@@ -15,6 +15,9 @@ reviewed before real hardware is attached:
 - `edge-modem` owns dependency-free QMUX/QMI framing, CTL client-ID allocation,
   and transaction correlation. It does not yet open a modem device; that comes
   after this wire layer is validated against real hardware.
+- `edge-uplink` models the durable upstream journal: stable envelope IDs,
+  cumulative acknowledgements, replay order, recovery hints, and audited gap
+  acceptance. It intentionally does not open SQLite or WSS connections yet.
 
 The matrix records real hardware facts such as EC20 plus China Telecom having
 no usable SMS bearer. Unsupported combinations are rejected before a blind
@@ -32,6 +35,7 @@ The full decision is in `docs/adr/0001-uplink-tls.md`.
 ```
 edge-core/   Pure domain model, capability matrix, and policy factories
 edge-modem/  Pure QMUX/QMI framing and transaction correlation
+edge-uplink/ Pure cumulative acknowledgement and loss-marker state
 docs/        Architecture decisions
 ```
 
