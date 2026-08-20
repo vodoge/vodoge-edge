@@ -104,6 +104,21 @@ pub struct UplinkRecord {
 }
 
 impl UplinkRecord {
+    /// Rebuilds a record that was already allocated and persisted.
+    pub fn restore(
+        sequence: u64,
+        envelope_id: EnvelopeId,
+        payload: impl Into<Vec<u8>>,
+        retention: RetentionClass,
+    ) -> Self {
+        Self {
+            sequence,
+            envelope_id,
+            payload: payload.into(),
+            retention,
+        }
+    }
+
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -262,6 +277,35 @@ impl UplinkState {
 
     pub const fn more_missing(&self) -> bool {
         self.more_missing
+    }
+
+    /// Rebuilds journal state after loading SQLite rows.
+    pub fn rehydrate(
+        committed_through: u64,
+        last_allocated: u64,
+        records: Vec<UplinkRecord>,
+    ) -> Result<Self, UplinkError> {
+        if last_allocated < committed_through {
+            return Err(UplinkError::InvalidRestoredJournal);
+        }
+
+        let mut state = Self::from_committed_through(committed_through);
+        state.last_allocated = last_allocated;
+        for record in records {
+            if record.sequence <= committed_through || record.sequence > last_allocated {
+                return Err(UplinkError::InvalidRestoredJournal);
+            }
+            if state.records.contains_key(&record.sequence)
+                || state.envelope_sequences.contains_key(&record.envelope_id)
+            {
+                return Err(UplinkError::InvalidRestoredJournal);
+            }
+            state
+                .envelope_sequences
+                .insert(record.envelope_id.clone(), record.sequence);
+            state.records.insert(record.sequence, record);
+        }
+        Ok(state)
     }
 
     /// Allocates the next sequence and retains the original envelope identity.
@@ -522,6 +566,7 @@ pub enum UplinkError {
     UnknownRetainedSequence(u64),
     ProtectedRecordCannotBeEvicted(u64),
     UnknownGapId(GapId),
+    InvalidRestoredJournal,
 }
 
 impl fmt::Display for UplinkError {
@@ -581,6 +626,9 @@ impl fmt::Display for UplinkError {
                 write!(formatter, "protected sequence {sequence} cannot be evicted")
             }
             Self::UnknownGapId(gap_id) => write!(formatter, "gap ID {gap_id} is not pending"),
+            Self::InvalidRestoredJournal => {
+                formatter.write_str("restored uplink journal is internally inconsistent")
+            }
         }
     }
 }

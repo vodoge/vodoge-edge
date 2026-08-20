@@ -5,9 +5,16 @@
 
 use std::{error::Error, fmt, path::Path};
 
+mod outbox;
+
 use rusqlite::{params, Connection};
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+pub use outbox::{CapacityAlert, DurableOutbox, QueueError, DEFAULT_MAX_RECORDS};
+
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_cursor.sql"),
+];
 
 /// An opened edge database with migrations applied.
 pub struct Store {
@@ -58,6 +65,7 @@ impl Store {
         if target < current {
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_gaps;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_outbox;")?;
+            self.conn.execute_batch("DROP TABLE IF EXISTS uplink_cursor;")?;
             self.conn.pragma_update(None, "user_version", 0)?;
             let mut store_version = 0i64;
             while store_version < target {
@@ -100,6 +108,80 @@ impl Store {
             .query_row("SELECT MAX(seq) FROM uplink_outbox", [], |row| row.get(0))?;
         Ok(max.unwrap_or(0) + 1)
     }
+
+    pub fn cursor(&self) -> Result<(u64, u64), StoreError> {
+        let row: (i64, i64) = self.conn.query_row(
+            "SELECT committed_through, last_allocated FROM uplink_cursor WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((row.0 as u64, row.1 as u64))
+    }
+
+    pub fn set_cursor(&self, committed_through: u64, last_allocated: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE uplink_cursor SET committed_through = ?1, last_allocated = ?2 WHERE id = 1",
+            params![committed_through as i64, last_allocated as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_outbox(&self) -> Result<Vec<OutboxRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT seq, envelope_id, kind, payload, protected FROM uplink_outbox ORDER BY seq ASC",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(OutboxRow {
+                    seq: row.get::<_, i64>(0)? as u64,
+                    envelope_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    payload: row.get(3)?,
+                    protected: row.get::<_, i64>(4)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_sequences(&self, sequences: &[u64]) -> Result<(), StoreError> {
+        for sequence in sequences {
+            self.conn
+                .execute("DELETE FROM uplink_outbox WHERE seq = ?1", params![*sequence as i64])?;
+        }
+        Ok(())
+    }
+
+    pub fn insert_gap(
+        &self,
+        gap_id: &str,
+        ranges: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO uplink_gaps (gap_id, ranges, reason, accepted) VALUES (?1, ?2, ?3, 0)",
+            params![gap_id, ranges, reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_gap_accepted(&self, gap_id: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE uplink_gaps SET accepted = 1 WHERE gap_id = ?1",
+            params![gap_id],
+        )?;
+        Ok(())
+    }
+}
+
+/// One persisted outbox row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboxRow {
+    pub seq: u64,
+    pub envelope_id: String,
+    pub kind: String,
+    pub payload: Vec<u8>,
+    pub protected: bool,
 }
 
 /// Persistence errors.

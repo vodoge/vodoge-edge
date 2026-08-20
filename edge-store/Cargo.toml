@@ -7,4 +7,5 @@ rust-version.workspace = true
 description = "SQLite local store and offline uplink queue for the Vodoge edge agent"
 
 [dependencies]
+edge-uplink = { path = "../edge-uplink" }
 rusqlite = { version = "0.32", features = ["bundled"] }
