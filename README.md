@@ -15,8 +15,9 @@ reviewed before real hardware is attached:
   `intl` are built-in; `lab` is a fictional vertical that proves a new region
   is one factory file plus one registry line.
 - `edge-modem` owns QMUX/QMI framing, CTL sync, client-ID allocation, a
-  transport-agnostic session, DMS identity/operating-mode codecs, and NAS
-  serving-system plus LTE cell-location codecs. Linux builds include a
+  transport-agnostic session, DMS, NAS, WMS, and UIM codecs. WMS list entries
+  keep the returned tag so mixed MO/MT rows can be filtered after the fact.
+  UIM can open an ISD-R channel and read the EID. Linux builds include a
   `cdc-wdm` adapter; macOS tests use a fake transport.
 - `edge-uplink` models the durable upstream journal: stable envelope IDs,
   cumulative acknowledgements, replay order, recovery hints, and audited gap
