@@ -14,6 +14,7 @@ pub use outbox::{CapacityAlert, DurableOutbox, QueueError, DEFAULT_MAX_RECORDS};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
+    include_str!("../migrations/0003_local_inbox.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -63,6 +64,8 @@ impl Store {
             });
         }
         if target < current {
+            self.conn.execute_batch("DROP TABLE IF EXISTS local_messages;")?;
+            self.conn.execute_batch("DROP TABLE IF EXISTS local_modems;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_gaps;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_outbox;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_cursor;")?;
@@ -172,6 +175,115 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn insert_local_message(&self, message: &LocalMessage) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO local_messages (seq, peer, body, bearer, direction, received_at, modem_imei)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(seq) DO UPDATE SET
+                peer = excluded.peer,
+                body = excluded.body,
+                bearer = excluded.bearer,
+                direction = excluded.direction,
+                received_at = excluded.received_at,
+                modem_imei = excluded.modem_imei",
+            params![
+                message.seq as i64,
+                message.peer,
+                message.body,
+                message.bearer,
+                message.direction,
+                message.received_at,
+                message.modem_imei,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_local_messages(&self) -> Result<Vec<LocalMessage>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT seq, peer, body, bearer, direction, received_at, modem_imei
+               FROM local_messages
+              ORDER BY received_at DESC, seq DESC
+              LIMIT 200",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(LocalMessage {
+                    seq: row.get::<_, i64>(0)? as u64,
+                    peer: row.get(1)?,
+                    body: row.get(2)?,
+                    bearer: row.get(3)?,
+                    direction: row.get(4)?,
+                    received_at: row.get(5)?,
+                    modem_imei: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn upsert_local_modem(&self, modem: &LocalModem) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO local_modems (imei, family, iccid, state, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(imei) DO UPDATE SET
+                family = excluded.family,
+                iccid = excluded.iccid,
+                state = excluded.state,
+                last_seen = excluded.last_seen",
+            params![
+                modem.imei,
+                modem.family,
+                modem.iccid,
+                modem.state,
+                modem.last_seen,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT imei, family, iccid, state, last_seen
+               FROM local_modems
+              ORDER BY imei",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(LocalModem {
+                    imei: row.get(0)?,
+                    family: row.get(1)?,
+                    iccid: row.get(2)?,
+                    state: row.get(3)?,
+                    last_seen: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+}
+
+/// One locally cached SMS row for the offline panel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalMessage {
+    pub seq: u64,
+    pub peer: String,
+    pub body: String,
+    pub bearer: String,
+    pub direction: String,
+    pub received_at: i64,
+    pub modem_imei: Option<String>,
+}
+
+/// One locally observed modem for the offline panel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalModem {
+    pub imei: String,
+    pub family: String,
+    pub iccid: Option<String>,
+    pub state: String,
+    pub last_seen: Option<i64>,
 }
 
 /// One persisted outbox row.
