@@ -6,8 +6,14 @@
 
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
+mod discovery;
 mod dms;
+mod fake;
+mod inbox;
 mod nas;
+mod port;
+mod qmi_port;
+mod restore;
 mod result;
 mod session;
 mod uim;
@@ -21,6 +27,11 @@ use std::{
 
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
+pub use discovery::{discover, DeviceEnumerator, DiscoveredModem, FakeEnumerator};
+pub use fake::FakeModem;
+pub use inbox::{collect_inbound, delete_inbound, CollectedMessage, InboxPass};
+pub use port::{ModemPort, PortError, TransportKind, UnsupportedPort};
+pub use restore::with_restore;
 pub use dms::{
     empty_request, get_manufacturer_request, get_model_request, get_operating_mode_request,
     get_revision_request, get_serial_numbers_request, parse_manufacturer, parse_model,

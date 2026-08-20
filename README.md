@@ -40,7 +40,8 @@ The full decision is in `docs/adr/0001-uplink-tls.md`.
 ```
 contract/    Generated edge-cloud protocol types
 edge-core/   Pure domain model, capability matrix, and policy factories
-edge-modem/  QMUX/QMI framing, session, and DMS codecs
+edge-modem/  QMI codecs, ModemPort, discovery, inbox collection
+edge-store/  SQLite local store and uplink outbox
 edge-uplink/ Pure cumulative acknowledgement and loss-marker state
 docs/        Architecture decisions
 ```

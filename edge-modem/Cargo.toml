@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "QMUX/QMI framing, session, and DMS codecs for the Vodoge edge agent"
 
 [dependencies]
+edge-core = { path = "../edge-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
