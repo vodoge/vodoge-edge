@@ -1,10 +1,11 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    dms, unique_tlv, AllocationError, ClientAllocationRequest, ClientAssignment, ClientId,
-    ClientRegistry, ClientRegistryError, CorrelationError, DeviceRevision, DeviceSerialNumbers,
-    DmsError, MessageId, OperatingMode, PendingTransactions, QmiRequest, QmiResponse, QmiResult,
-    ResultError, ServiceId, TlvLookupError, TransactionId, WireError,
+    dms, nas, unique_tlv, AllocationError, CellLocationInfo, ClientAllocationRequest,
+    ClientAssignment, ClientId, ClientRegistry, ClientRegistryError, CorrelationError,
+    DeviceRevision, DeviceSerialNumbers, DmsError, MessageId, NasError, OperatingMode,
+    PendingTransactions, QmiRequest, QmiResponse, QmiResult, ResultError, ServiceId, ServingSystem,
+    TlvLookupError, TransactionId, WireError,
 };
 
 /// CTL message that asks the modem to resynchronize control state.
@@ -96,6 +97,16 @@ impl<T: QmiTransport> QmiClient<T> {
         Ok(())
     }
 
+    pub fn get_serving_system(&mut self) -> Result<ServingSystem, SessionError> {
+        let response = self.nas_empty(nas::GET_SERVING_SYSTEM)?;
+        Ok(nas::parse_serving_system(&response)?)
+    }
+
+    pub fn get_cell_location(&mut self) -> Result<CellLocationInfo, SessionError> {
+        let response = self.nas_empty(nas::GET_CELL_LOCATION_INFO)?;
+        Ok(nas::parse_cell_location(&response)?)
+    }
+
     fn dms_empty(&mut self, message_id: MessageId) -> Result<QmiResponse, SessionError> {
         let assignment = self.dms_assignment()?;
         let request = dms::empty_request(assignment, self.allocate_service_transaction(), message_id)?;
@@ -107,6 +118,19 @@ impl<T: QmiTransport> QmiClient<T> {
             return Ok(ClientAssignment::new(ServiceId::DMS, client_id)?);
         }
         self.allocate(ServiceId::DMS)
+    }
+
+    fn nas_empty(&mut self, message_id: MessageId) -> Result<QmiResponse, SessionError> {
+        let assignment = self.nas_assignment()?;
+        let request = nas::empty_request(assignment, self.allocate_service_transaction(), message_id)?;
+        self.round_trip(&request)
+    }
+
+    fn nas_assignment(&mut self) -> Result<ClientAssignment, SessionError> {
+        if let Some(client_id) = self.clients.client_for(ServiceId::NAS) {
+            return Ok(ClientAssignment::new(ServiceId::NAS, client_id)?);
+        }
+        self.allocate(ServiceId::NAS)
     }
 
     fn round_trip(&mut self, request: &QmiRequest) -> Result<QmiResponse, SessionError> {
@@ -214,6 +238,7 @@ pub enum SessionError {
     Result(ResultError),
     Lookup(TlvLookupError),
     Dms(DmsError),
+    Nas(NasError),
     UnexpectedSyncResponse {
         service: ServiceId,
         client: ClientId,
@@ -238,6 +263,7 @@ impl fmt::Display for SessionError {
             Self::Result(error) => error.fmt(formatter),
             Self::Lookup(error) => error.fmt(formatter),
             Self::Dms(error) => error.fmt(formatter),
+            Self::Nas(error) => error.fmt(formatter),
             Self::UnexpectedSyncResponse {
                 service,
                 client,
@@ -260,6 +286,7 @@ impl Error for SessionError {
             Self::Result(error) => Some(error),
             Self::Lookup(error) => Some(error),
             Self::Dms(error) => Some(error),
+            Self::Nas(error) => Some(error),
             _ => None,
         }
     }
@@ -304,5 +331,11 @@ impl From<TlvLookupError> for SessionError {
 impl From<DmsError> for SessionError {
     fn from(value: DmsError) -> Self {
         Self::Dms(value)
+    }
+}
+
+impl From<NasError> for SessionError {
+    fn from(value: NasError) -> Self {
+        Self::Nas(value)
     }
 }

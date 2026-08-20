@@ -10,13 +10,14 @@ The first delivered slices are deliberately I/O-free so their behavior can be
 reviewed before real hardware is attached:
 
 - `edge-core` contains the `ModemFamily x CarrierProfile x Vertical` device
-  context, declarative TOML capability matrix, vertical factory resolution, and
-  pure SMS bearer routing. `cn` and `intl` are built-in; `lab` is a fictional
-  vertical that proves a new region is one factory file plus one registry line.
-- `edge-modem` owns dependency-free QMUX/QMI framing, CTL sync, client-ID
-  allocation, a transport-agnostic session, and DMS identity/operating-mode
-  codecs. It does not yet open `/dev/cdc-wdm*`; that adapter is the next
-  hardware slice.
+  context, declarative TOML capability matrix, vertical factory resolution,
+  pure SMS bearer routing, and multi-source registration arbitration. `cn` and
+  `intl` are built-in; `lab` is a fictional vertical that proves a new region
+  is one factory file plus one registry line.
+- `edge-modem` owns QMUX/QMI framing, CTL sync, client-ID allocation, a
+  transport-agnostic session, DMS identity/operating-mode codecs, and NAS
+  serving-system plus LTE cell-location codecs. Linux builds include a
+  `cdc-wdm` adapter; macOS tests use a fake transport.
 - `edge-uplink` models the durable upstream journal: stable envelope IDs,
   cumulative acknowledgements, replay order, recovery hints, and audited gap
   acceptance. It intentionally does not open SQLite or WSS connections yet.

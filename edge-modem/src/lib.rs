@@ -4,7 +4,10 @@
 //! QMI-over-MBIM adapter owns byte I/O, while this crate owns the binary
 //! invariants needed before a frame can be sent or accepted.
 
+#[cfg(target_os = "linux")]
+mod cdc_wdm;
 mod dms;
+mod nas;
 mod result;
 mod session;
 
@@ -14,6 +17,8 @@ use std::{
     fmt,
 };
 
+#[cfg(target_os = "linux")]
+pub use cdc_wdm::CdcWdmDevice;
 pub use dms::{
     empty_request, get_manufacturer_request, get_model_request, get_operating_mode_request,
     get_revision_request, get_serial_numbers_request, parse_manufacturer, parse_model,
@@ -21,6 +26,10 @@ pub use dms::{
     set_operating_mode_request, DeviceRevision, DeviceSerialNumbers, DmsError, OperatingMode,
     GET_DEVICE_REV_ID, GET_DEVICE_SERIAL_NUMBERS, GET_MANUFACTURER, GET_MODEL_ID,
     GET_OPERATING_MODE, SET_OPERATING_MODE,
+};
+pub use nas::{
+    parse_cell_location, parse_serving_system, CellLocationInfo, LteCellLocation, NasError,
+    NasRegistrationState, ServingSystem, GET_CELL_LOCATION_INFO, GET_SERVING_SYSTEM,
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC};
