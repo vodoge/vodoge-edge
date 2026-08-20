@@ -1,5 +1,5 @@
 [workspace]
-members = ["contract", "edge-core", "edge-modem", "edge-store", "edge-uplink"]
+members = ["contract", "edge-core", "edge-modem", "edge-store", "edge-uplink", "edge-agent"]
 resolver = "2"
 
 [workspace.package]

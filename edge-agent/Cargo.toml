@@ -1,0 +1,12 @@
+[package]
+name = "edge-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Command execution and receipts for the Vodoge edge agent"
+
+[dependencies]
+edge-uplink = { path = "../edge-uplink" }
+serde_json = "1"
+vodoge-contract = { path = "../contract" }

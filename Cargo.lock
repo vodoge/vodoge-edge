@@ -105,6 +105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge-agent"
+version = "0.1.0"
+dependencies = [
+ "edge-uplink",
+ "serde_json",
+ "vodoge-contract",
+]
+
+[[package]]
 name = "edge-core"
 version = "0.1.0"
 dependencies = [
@@ -126,6 +135,8 @@ version = "0.1.0"
 dependencies = [
  "edge-uplink",
  "rusqlite",
+ "serde_json",
+ "vodoge-contract",
 ]
 
 [[package]]

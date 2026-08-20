@@ -22,6 +22,9 @@ reviewed before real hardware is attached:
 - `edge-uplink` models the durable upstream journal: stable envelope IDs,
   cumulative acknowledgements, replay order, recovery hints, and audited gap
   acceptance. It intentionally does not open SQLite or WSS connections yet.
+- `edge-agent` executes `CommandDeliver`: persist `cmd_id`, emit
+  `CommandReceipt` (`accepted` / `duplicate`), run `SendSms` at most once
+  through a `SendPort`, and always sequence a terminal `CommandResult`.
 - `contract` contains protocol types generated from the edge-cloud JSON Schema.
 
 The matrix records real hardware facts such as EC20 plus China Telecom having
@@ -43,6 +46,7 @@ edge-core/   Pure domain model, capability matrix, and policy factories
 edge-modem/  QMI codecs, ModemPort, discovery, inbox collection
 edge-store/  SQLite local store and uplink outbox
 edge-uplink/ Pure cumulative acknowledgement and loss-marker state
+edge-agent/  CommandExecutor: receipt, exactly-once SendSms, sequenced result
 docs/        Architecture decisions
 ```
 
