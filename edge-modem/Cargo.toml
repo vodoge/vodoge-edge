@@ -7,3 +7,10 @@ rust-version.workspace = true
 description = "QMUX/QMI framing, session, and DMS codecs for the Vodoge edge agent"
 
 [dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "qmi-probe"
+path = "src/bin/qmi-probe.rs"
