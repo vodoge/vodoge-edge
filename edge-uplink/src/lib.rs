@@ -4,6 +4,7 @@
 //! atomically persist each state transition before a transport acts on it.
 
 pub mod codec;
+pub mod dial;
 pub mod session;
 pub mod tls;
 
