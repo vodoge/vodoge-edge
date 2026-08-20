@@ -1,0 +1,18 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --workspace
+      - name: edge-core has no I/O runtime
+        run: sh scripts/check-core-deps.sh
+      - name: Contract types match schema
+        run: python3 contract/codegen/generate.py --check --schema contract/schema/edge-cloud.v1.schema.json --rust contract/src/lib.rs

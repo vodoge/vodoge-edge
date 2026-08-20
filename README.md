@@ -11,13 +11,16 @@ reviewed before real hardware is attached:
 
 - `edge-core` contains the `ModemFamily x CarrierProfile x Vertical` device
   context, declarative TOML capability matrix, vertical factory resolution, and
-  pure SMS bearer routing.
-- `edge-modem` owns dependency-free QMUX/QMI framing, CTL client-ID allocation,
-  and transaction correlation. It does not yet open a modem device; that comes
-  after this wire layer is validated against real hardware.
+  pure SMS bearer routing. `cn` and `intl` are built-in; `lab` is a fictional
+  vertical that proves a new region is one factory file plus one registry line.
+- `edge-modem` owns dependency-free QMUX/QMI framing, CTL sync, client-ID
+  allocation, a transport-agnostic session, and DMS identity/operating-mode
+  codecs. It does not yet open `/dev/cdc-wdm*`; that adapter is the next
+  hardware slice.
 - `edge-uplink` models the durable upstream journal: stable envelope IDs,
   cumulative acknowledgements, replay order, recovery hints, and audited gap
   acceptance. It intentionally does not open SQLite or WSS connections yet.
+- `contract` contains protocol types generated from the edge-cloud JSON Schema.
 
 The matrix records real hardware facts such as EC20 plus China Telecom having
 no usable SMS bearer. Unsupported combinations are rejected before a blind
@@ -33,8 +36,9 @@ The full decision is in `docs/adr/0001-uplink-tls.md`.
 ## Layout
 
 ```
+contract/    Generated edge-cloud protocol types
 edge-core/   Pure domain model, capability matrix, and policy factories
-edge-modem/  Pure QMUX/QMI framing and transaction correlation
+edge-modem/  QMUX/QMI framing, session, and DMS codecs
 edge-uplink/ Pure cumulative acknowledgement and loss-marker state
 docs/        Architecture decisions
 ```
