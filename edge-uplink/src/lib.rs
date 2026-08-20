@@ -5,6 +5,7 @@
 
 pub mod codec;
 pub mod session;
+pub mod tls;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
