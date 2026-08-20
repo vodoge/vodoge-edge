@@ -1,4 +1,4 @@
-use edge_core::RegistrationEvidence;
+use edge_core::{Bearer, RegistrationEvidence};
 
 use crate::{ListedMessage, RawMessage, SessionError};
 
@@ -32,7 +32,10 @@ pub trait ModemPort {
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError>;
     fn read_sms(&mut self, index: u32) -> Result<RawMessage, PortError>;
     fn delete_sms(&mut self, index: u32) -> Result<(), PortError>;
-    fn send_pdu(&mut self, pdu: &[u8]) -> Result<(), PortError>;
+    fn send_pdu(&mut self, pdu: &[u8]) -> Result<(), PortError> {
+        self.send_on(Bearer::Cellular, pdu)
+    }
+    fn send_on(&mut self, bearer: Bearer, pdu: &[u8]) -> Result<(), PortError>;
 }
 
 /// A transport that exists in the discovery chain but is not implemented yet.
@@ -89,7 +92,7 @@ impl ModemPort for UnsupportedPort {
         Err(PortError::Unsupported(self.kind))
     }
 
-    fn send_pdu(&mut self, _pdu: &[u8]) -> Result<(), PortError> {
+    fn send_on(&mut self, _bearer: Bearer, _pdu: &[u8]) -> Result<(), PortError> {
         Err(PortError::Unsupported(self.kind))
     }
 }
@@ -100,6 +103,7 @@ pub enum PortError {
     Unsupported(TransportKind),
     Session(String),
     MissingImei,
+    PlanUnavailable(String),
 }
 
 impl std::fmt::Display for PortError {
@@ -108,6 +112,7 @@ impl std::fmt::Display for PortError {
             Self::Unsupported(kind) => write!(formatter, "{} transport is not implemented", kind.as_str()),
             Self::Session(message) => formatter.write_str(message),
             Self::MissingImei => formatter.write_str("modem did not return an IMEI"),
+            Self::PlanUnavailable(reason) => write!(formatter, "no SMS bearer: {reason}"),
         }
     }
 }

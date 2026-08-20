@@ -1,10 +1,12 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use edge_core::{arbitrate, Plmn, RegistrationEvidence, RegistrationSourceKind};
+use edge_core::{
+    arbitrate, Bearer, Plmn, RegistrationEvidence, RegistrationSourceKind, SendPlan,
+};
 use edge_modem::{
-    collect_inbound, delete_inbound, discover, with_restore, DiscoveredModem, FakeEnumerator,
-    FakeModem, MessageTag, ModemPort, TransportKind, UnsupportedPort,
+    collect_inbound, delete_inbound, discover, send_with_plan, with_restore, DiscoveredModem,
+    FakeEnumerator, FakeModem, MessageTag, ModemPort, TransportKind, UnsupportedPort,
 };
 
 #[test]
@@ -111,6 +113,33 @@ fn discovery_falls_back_to_vid_at() {
     };
     let found = discover(&enumerator);
     assert_eq!(found[0].kind, TransportKind::At);
+}
+
+#[test]
+fn send_plan_uses_fallback_when_primary_fails() {
+    let mut modem = FakeModem::new("867018069509705", "EC20");
+    modem.fail_on(Bearer::Cellular);
+    let plan = SendPlan::with_reason(
+        Some(Bearer::Cellular),
+        Some(Bearer::Ims),
+        "intl vertical: cellular then IMS",
+    );
+    let outcome = send_with_plan(&mut modem, &plan, b"pdu").expect("fallback send");
+    assert!(outcome.fallback_used);
+    assert_eq!(outcome.used, Bearer::Ims);
+    assert_eq!(
+        modem.sent(),
+        &[(Bearer::Ims, b"pdu".to_vec())]
+    );
+}
+
+#[test]
+fn send_plan_without_a_bearer_does_not_touch_the_modem() {
+    let mut modem = FakeModem::new("867018069509705", "EC20");
+    let plan = SendPlan::unavailable("no_cdma_fallback_and_no_ct_volte_mbn");
+    let error = send_with_plan(&mut modem, &plan, b"pdu").expect_err("no send");
+    assert!(modem.sent().is_empty());
+    assert!(error.to_string().contains("no_cdma_fallback_and_no_ct_volte_mbn"));
 }
 
 #[test]

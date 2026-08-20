@@ -15,6 +15,7 @@ mod port;
 mod qmi_port;
 mod restore;
 mod result;
+mod send;
 mod session;
 mod uim;
 mod wms;
@@ -32,6 +33,7 @@ pub use fake::FakeModem;
 pub use inbox::{collect_inbound, delete_inbound, CollectedMessage, InboxPass};
 pub use port::{ModemPort, PortError, TransportKind, UnsupportedPort};
 pub use restore::with_restore;
+pub use send::{send_with_plan, SendOutcome};
 pub use dms::{
     empty_request, get_manufacturer_request, get_model_request, get_operating_mode_request,
     get_revision_request, get_serial_numbers_request, parse_manufacturer, parse_model,

@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
-use edge_core::RegistrationEvidence;
+use edge_core::{Bearer, RegistrationEvidence};
 
 use crate::{
     ListedMessage, MessageTag, ModemPort, PortError, RawMessage, TransportKind,
@@ -16,6 +16,8 @@ pub struct FakeModem {
     reads: Vec<u32>,
     deletes: Vec<u32>,
     radio_on: bool,
+    fail_bearers: HashSet<Bearer>,
+    sent: Vec<(Bearer, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,7 +36,17 @@ impl FakeModem {
             reads: Vec::new(),
             deletes: Vec::new(),
             radio_on: true,
+            fail_bearers: HashSet::new(),
+            sent: Vec::new(),
         }
+    }
+
+    pub fn fail_on(&mut self, bearer: Bearer) {
+        self.fail_bearers.insert(bearer);
+    }
+
+    pub fn sent(&self) -> &[(Bearer, Vec<u8>)] {
+        &self.sent
     }
 
     pub fn push_sms(&mut self, index: u32, tag: MessageTag, pdu: impl Into<Vec<u8>>) {
@@ -106,7 +118,11 @@ impl ModemPort for FakeModem {
         Ok(())
     }
 
-    fn send_pdu(&mut self, _pdu: &[u8]) -> Result<(), PortError> {
+    fn send_on(&mut self, bearer: Bearer, pdu: &[u8]) -> Result<(), PortError> {
+        if self.fail_bearers.contains(&bearer) {
+            return Err(PortError::Session(format!("{bearer} send failed")));
+        }
+        self.sent.push((bearer, pdu.to_vec()));
         Ok(())
     }
 }

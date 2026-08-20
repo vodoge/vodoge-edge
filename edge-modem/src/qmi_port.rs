@@ -1,4 +1,4 @@
-use edge_core::{Plmn, RegistrationEvidence};
+use edge_core::{Bearer, Plmn, RegistrationEvidence};
 
 use crate::{
     ListedMessage, MessageMode, MessageTag, ModemPort, NasRegistrationState, PortError, QmiClient,
@@ -64,8 +64,15 @@ impl<T: QmiTransport> ModemPort for QmiClient<T> {
         Ok(QmiClient::delete_sms(self, StorageType::Uim, index, MessageMode::Gw)?)
     }
 
-    fn send_pdu(&mut self, pdu: &[u8]) -> Result<(), PortError> {
-        self.send_sms(GSM_WCDMA_FORMAT, pdu)?;
-        Ok(())
+    fn send_on(&mut self, bearer: Bearer, pdu: &[u8]) -> Result<(), PortError> {
+        match bearer {
+            Bearer::Cellular => {
+                self.send_sms(GSM_WCDMA_FORMAT, pdu)?;
+                Ok(())
+            }
+            other => Err(PortError::Session(format!(
+                "QMI WMS cannot send on {other}"
+            ))),
+        }
     }
 }
