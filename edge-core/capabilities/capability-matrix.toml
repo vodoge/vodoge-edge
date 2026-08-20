@@ -1,0 +1,91 @@
+version = "2026-08-20"
+
+[fallback]
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "probe" }
+voice = { kind = "probe" }
+
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Telecom"
+sms_mo = { kind = "unsupported", reason = "no_cdma_fallback_and_no_ct_volte_mbn" }
+sms_mt = { kind = "unsupported", reason = "no_cdma_fallback_and_no_ct_volte_mbn" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Unicom"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC20"
+carrier = "Generic-International"
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC25-CN"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC25-CN"
+carrier = "CN-Unicom"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC25-CN"
+carrier = "CN-Telecom"
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EC25-CN"
+carrier = "Generic-International"
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EG25-G"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EG25-G"
+carrier = "CN-Unicom"
+sms_mo = { kind = "supported", bearer = "cellular" }
+sms_mt = { kind = "supported", bearer = "cellular" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EG25-G"
+carrier = "CN-Telecom"
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "supported", bearer = "cellular" }
+
+[[rule]]
+modem_family = "EG25-G"
+carrier = "Generic-International"
+sms_mo = { kind = "probe" }
+sms_mt = { kind = "probe" }
+data = { kind = "supported", bearer = "cellular" }
