@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 
 use edge_core::CapabilityMatrix;
+use edge_uplink::update::UpdateGuard;
 use edge_uplink::{EnvelopeId, RetentionClass, UplinkError, UplinkState};
 use sha2::{Digest, Sha256};
 use vodoge_contract::{
@@ -99,6 +100,110 @@ impl SendPort for FakeSendPort {
     }
 }
 
+/// One SelfUpdate command presented to an [`UpdatePort`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelfUpdateRequest {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub signature: String,
+}
+
+/// Stages a new edge binary. The uplink handshake decides whether it stays.
+pub trait UpdatePort {
+    fn stage(&mut self, request: &SelfUpdateRequest) -> Result<(), SendError>;
+    fn restore(&mut self, version: &str) -> Result<(), SendError>;
+    fn current(&self) -> String;
+}
+
+/// Rejects SelfUpdate when no installer is configured.
+#[derive(Clone, Debug, Default)]
+pub struct RejectUpdate {
+    current: String,
+}
+
+impl RejectUpdate {
+    pub fn new(current: impl Into<String>) -> Self {
+        Self {
+            current: current.into(),
+        }
+    }
+}
+
+impl UpdatePort for RejectUpdate {
+    fn stage(&mut self, _request: &SelfUpdateRequest) -> Result<(), SendError> {
+        Err(SendError::new(
+            "update_not_configured",
+            "self-update is not configured on this edge",
+        ))
+    }
+
+    fn restore(&mut self, version: &str) -> Result<(), SendError> {
+        self.current = version.to_string();
+        Ok(())
+    }
+
+    fn current(&self) -> String {
+        self.current.clone()
+    }
+}
+
+/// In-memory installer used by self-update tests.
+#[derive(Clone, Debug)]
+pub struct FakeUpdatePort {
+    current: String,
+    staged: Vec<SelfUpdateRequest>,
+    restored: Vec<String>,
+    error: Option<SendError>,
+}
+
+impl FakeUpdatePort {
+    pub fn new(current: impl Into<String>) -> Self {
+        Self {
+            current: current.into(),
+            staged: Vec::new(),
+            restored: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub fn fail_with(&mut self, reason_code: impl Into<String>, message: impl Into<String>) {
+        self.error = Some(SendError::new(reason_code, message));
+    }
+
+    pub fn staged(&self) -> &[SelfUpdateRequest] {
+        &self.staged
+    }
+
+    pub fn restored(&self) -> &[String] {
+        &self.restored
+    }
+}
+
+impl UpdatePort for FakeUpdatePort {
+    fn stage(&mut self, request: &SelfUpdateRequest) -> Result<(), SendError> {
+        if let Some(error) = self.error.clone() {
+            return Err(error);
+        }
+        if request.sha256.trim().is_empty() {
+            return Err(SendError::new("update_sha256_missing", "self-update sha256 is required"));
+        }
+        self.staged.push(request.clone());
+        self.current = request.version.clone();
+        Ok(())
+    }
+
+    fn restore(&mut self, version: &str) -> Result<(), SendError> {
+        self.restored.push(version.to_string());
+        self.current = version.to_string();
+        Ok(())
+    }
+
+    fn current(&self) -> String {
+        self.current.clone()
+    }
+}
+
 /// Receipt plus the sequenced terminal result of one `CommandDeliver`.
 #[derive(Clone, Debug)]
 pub struct DeliveryOutcome {
@@ -110,8 +215,10 @@ pub struct DeliveryOutcome {
 
 /// Accepts `CommandDeliver`, persists `cmd_id`, executes at most once, and
 /// always sequences a `CommandResult`.
-pub struct CommandExecutor<P> {
+pub struct CommandExecutor<P, U = RejectUpdate> {
     port: P,
+    updater: U,
+    guard: UpdateGuard,
     commands: BTreeMap<String, StoredCommand>,
     uplink: UplinkState,
     matrix: CapabilityMatrix,
@@ -131,10 +238,19 @@ enum Phase {
     Terminal,
 }
 
-impl<P: SendPort> CommandExecutor<P> {
+impl<P: SendPort> CommandExecutor<P, RejectUpdate> {
     pub fn new(port: P) -> Self {
+        Self::with_updater(port, RejectUpdate::new("0.1.0"))
+    }
+}
+
+impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
+    pub fn with_updater(port: P, updater: U) -> Self {
+        let current = updater.current();
         Self {
             port,
+            updater,
+            guard: UpdateGuard::new(current),
             commands: BTreeMap::new(),
             uplink: UplinkState::new(),
             matrix: CapabilityMatrix::builtin().expect("built-in capability matrix"),
@@ -145,12 +261,29 @@ impl<P: SendPort> CommandExecutor<P> {
         &self.port
     }
 
+    pub fn updater(&self) -> &U {
+        &self.updater
+    }
+
     pub fn uplink(&self) -> &UplinkState {
         &self.uplink
     }
 
     pub fn matrix(&self) -> &CapabilityMatrix {
         &self.matrix
+    }
+
+    pub fn running_version(&self) -> &str {
+        &self.guard.current
+    }
+
+    /// After Resume, keep the staged binary or restore the previous one.
+    pub fn confirm_handshake(&mut self, handshake_ok: bool) -> Result<Option<String>, SendError> {
+        let Some(previous) = self.guard.rollback_if_handshake_failed(handshake_ok) else {
+            return Ok(None);
+        };
+        self.updater.restore(&previous)?;
+        Ok(Some(previous))
     }
 
     /// Handle one physical `CommandDeliver` envelope.
@@ -332,6 +465,46 @@ impl<P: SendPort> CommandExecutor<P> {
                     false,
                 )),
             },
+            Command::SelfUpdate {
+                version,
+                url,
+                sha256,
+                signature,
+            } => {
+                let request = SelfUpdateRequest {
+                    version: version.clone(),
+                    url: url.clone(),
+                    sha256: sha256.clone(),
+                    signature: signature.clone(),
+                };
+                match self.updater.stage(&request) {
+                    Ok(()) => {
+                        self.guard.start(version.clone());
+                        Ok((
+                            terminal_result(
+                                &payload.cmd_id,
+                                RESULT_SUCCEEDED,
+                                now_ms,
+                                attempts,
+                                None,
+                                None,
+                            ),
+                            true,
+                        ))
+                    }
+                    Err(error) => Ok((
+                        terminal_result(
+                            &payload.cmd_id,
+                            RESULT_FAILED,
+                            now_ms,
+                            attempts,
+                            Some(error.reason_code.as_str()),
+                            Some(error.message.as_str()),
+                        ),
+                        true,
+                    )),
+                }
+            }
             _ => Ok((
                 terminal_result(
                     &payload.cmd_id,

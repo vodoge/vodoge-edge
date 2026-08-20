@@ -1,6 +1,6 @@
 use edge_agent::{
-    CommandExecutor, FakeSendPort, RECEIPT_ACCEPTED, RECEIPT_DUPLICATE, RESULT_FAILED,
-    RESULT_SUCCEEDED,
+    CommandExecutor, FakeSendPort, FakeUpdatePort, UpdatePort, RECEIPT_ACCEPTED, RECEIPT_DUPLICATE,
+    RESULT_FAILED, RESULT_SUCCEEDED,
 };
 use edge_core::{Bearer, BearerSupport, CapabilityMatrix, CarrierProfile, ModemFamily};
 use edge_uplink::RetentionClass;
@@ -217,4 +217,53 @@ fn update_capability_matrix_rejects_a_bad_digest_without_replacing() {
     );
     assert!(!outcome.executed);
     assert_eq!(executor.matrix().version(), before);
+}
+
+fn self_update_payload(cmd_id: &str, version: &str) -> CommandDeliverPayload {
+    CommandDeliverPayload {
+        cmd_id: cmd_id.into(),
+        issued_at: 1_000,
+        expires_at: 10_000,
+        attempt: Some(1),
+        command: Command::SelfUpdate {
+            version: version.into(),
+            url: "https://updates.vodoge.com/edge/1.1.0".into(),
+            sha256: "abc".into(),
+            signature: "sig".into(),
+        },
+    }
+}
+
+#[test]
+fn self_update_rolls_back_when_resume_handshake_fails() {
+    let updater = FakeUpdatePort::new("1.0.0");
+    let mut executor = CommandExecutor::with_updater(FakeSendPort::new(), updater);
+    let outcome = executor
+        .deliver(DELIVERY_A, self_update_payload(CMD_ID, "1.1.0"), 1_500)
+        .expect("stage update");
+
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    assert_eq!(executor.running_version(), "1.1.0");
+    assert_eq!(executor.updater().staged().len(), 1);
+    assert_eq!(executor.updater().staged()[0].version, "1.1.0");
+
+    let restored = executor
+        .confirm_handshake(false)
+        .expect("rollback after failed resume");
+    assert_eq!(restored.as_deref(), Some("1.0.0"));
+    assert_eq!(executor.running_version(), "1.0.0");
+    assert_eq!(executor.updater().current(), "1.0.0");
+    assert_eq!(executor.updater().restored(), &["1.0.0".to_string()]);
+}
+
+#[test]
+fn self_update_keeps_the_new_binary_after_resume() {
+    let mut executor =
+        CommandExecutor::with_updater(FakeSendPort::new(), FakeUpdatePort::new("1.0.0"));
+    executor
+        .deliver(DELIVERY_A, self_update_payload(CMD_ID, "1.1.0"), 1_500)
+        .expect("stage update");
+    assert!(executor.confirm_handshake(true).expect("handshake").is_none());
+    assert_eq!(executor.running_version(), "1.1.0");
+    assert!(executor.updater().restored().is_empty());
 }
