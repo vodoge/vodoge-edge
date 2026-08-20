@@ -1,6 +1,7 @@
 use edge_uplink::{
     EnvelopeId, GapId, RetentionClass, UplinkAck, UplinkError, UplinkGap, UplinkRecord, UplinkState,
 };
+use edge_uplink::worker::{Outbox, RetainedRecord};
 
 use crate::{Store, StoreError};
 
@@ -118,6 +119,30 @@ impl DurableOutbox {
             .collect()
     }
 
+    pub fn lowest_retained_seq(&self) -> Option<u64> {
+        self.state.retained_records().next().map(|record| record.sequence())
+    }
+
+    pub fn pending_gap_ids(&self) -> Vec<String> {
+        self.state
+            .pending_gaps()
+            .map(|gap| gap.gap_id().as_str().to_owned())
+            .collect()
+    }
+
+    pub fn queue_records(&self) -> i64 {
+        self.retained_count() as i64
+    }
+
+    pub fn queue_bytes(&self) -> Option<i64> {
+        Some(
+            self.state
+                .retained_records()
+                .map(|record| record.payload().len() as i64)
+                .sum(),
+        )
+    }
+
     fn evict_if_needed(&mut self) -> Result<Option<CapacityAlert>, QueueError> {
         if self.retained_count() <= self.max_records {
             return Ok(None);
@@ -148,6 +173,52 @@ impl DurableOutbox {
             gap_id: gap_id.as_str().to_owned(),
             evicted_seq: sequence,
         }))
+    }
+}
+
+impl Outbox for DurableOutbox {
+    type Error = QueueError;
+
+    fn last_allocated(&self) -> u64 {
+        DurableOutbox::last_allocated(self)
+    }
+
+    fn committed_through(&self) -> u64 {
+        DurableOutbox::committed_through(self)
+    }
+
+    fn lowest_retained_seq(&self) -> Option<u64> {
+        DurableOutbox::lowest_retained_seq(self)
+    }
+
+    fn pending_gap_ids(&self) -> Vec<String> {
+        DurableOutbox::pending_gap_ids(self)
+    }
+
+    fn queue_records(&self) -> i64 {
+        DurableOutbox::queue_records(self)
+    }
+
+    fn queue_bytes(&self) -> Option<i64> {
+        DurableOutbox::queue_bytes(self)
+    }
+
+    fn observe_ack(&mut self, ack: UplinkAck) -> Result<Vec<u64>, Self::Error> {
+        DurableOutbox::observe_ack(self, ack)
+    }
+
+    fn retained(&self) -> Result<Vec<RetainedRecord>, Self::Error> {
+        Ok(self
+            .store
+            .load_outbox()?
+            .into_iter()
+            .map(|row| RetainedRecord {
+                sequence: row.seq,
+                envelope_id: row.envelope_id,
+                kind: row.kind,
+                payload: row.payload,
+            })
+            .collect())
     }
 }
 
