@@ -1,5 +1,5 @@
 [workspace]
-members = ["edge-core"]
+members = ["edge-core", "edge-modem"]
 resolver = "2"
 
 [workspace.package]
