@@ -6,6 +6,7 @@
 
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
+mod channels;
 mod discovery;
 mod dms;
 mod fake;
@@ -28,6 +29,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
+pub use channels::LogicalChannels;
 pub use discovery::{discover, DeviceEnumerator, DiscoveredModem, FakeEnumerator};
 pub use fake::FakeModem;
 pub use inbox::{collect_inbound, delete_inbound, CollectedMessage, InboxPass};
