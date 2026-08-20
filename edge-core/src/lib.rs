@@ -5,6 +5,7 @@
 //! stay deterministic and straightforward to test.
 
 mod capability;
+mod concat;
 mod factory;
 mod matrix;
 mod policy;
@@ -16,6 +17,7 @@ pub use capability::{
     Bearer, BearerSupport, Capability, CarrierProfile, DeviceContext, ModemFamily, Vertical,
     VerticalId,
 };
+pub use concat::{assemble, AssembledSms, ConcatPart};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{
