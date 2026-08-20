@@ -46,10 +46,22 @@ pub struct SendPlan {
 }
 
 impl SendPlan {
-    fn unavailable(reason: impl Into<Cow<'static, str>>) -> Self {
+    pub fn unavailable(reason: impl Into<Cow<'static, str>>) -> Self {
         Self {
             primary: None,
             fallback: None,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn with_reason(
+        primary: Option<Bearer>,
+        fallback: Option<Bearer>,
+        reason: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self {
+            primary,
+            fallback,
             reason: reason.into(),
         }
     }
@@ -61,24 +73,22 @@ pub trait SmsRouter: Send + Sync {
 }
 
 /// A deterministic router whose order is supplied by its vertical factory.
+///
+/// Built-in verticals use dedicated routers because their fallback rules are not
+/// a simple preference list. This helper remains for additional verticals that
+/// only need an ordered probe sequence.
 #[derive(Clone, Debug)]
 pub struct OrderedSmsRouter {
     preferred: [Bearer; 3],
 }
 
 impl OrderedSmsRouter {
-    /// Domestic lines prefer the circuit-switched/cellular path before IMS.
-    pub fn cn() -> Self {
-        Self::new([Bearer::Cellular, Bearer::Ims, Bearer::Sgs])
-    }
-
-    /// International lines use IMS as the fallback behind the cellular path.
-    pub fn intl() -> Self {
-        Self::new([Bearer::Cellular, Bearer::Ims, Bearer::Sgs])
-    }
-
     pub fn new(preferred: [Bearer; 3]) -> Self {
         Self { preferred }
+    }
+
+    pub fn preferred(&self) -> [Bearer; 3] {
+        self.preferred
     }
 }
 
@@ -86,47 +96,56 @@ impl SmsRouter for OrderedSmsRouter {
     fn plan(&self, capability: &Capability, radio_state: &RadioState) -> SendPlan {
         match &capability.sms_mo {
             BearerSupport::Unsupported { reason } => SendPlan::unavailable(reason.clone()),
-            BearerSupport::Supported(bearer) if radio_state.is_available(*bearer) => SendPlan {
-                primary: Some(*bearer),
-                fallback: None,
-                reason: Cow::Owned(format!(
-                    "capability matrix authorizes {} as the SMS bearer",
-                    bearer
-                )),
-            },
+            BearerSupport::Supported(bearer) if radio_state.is_available(*bearer) => {
+                SendPlan::with_reason(
+                    Some(*bearer),
+                    None,
+                    format!("capability matrix authorizes {bearer} as the SMS bearer"),
+                )
+            }
             BearerSupport::Supported(bearer) => SendPlan::unavailable(format!(
                 "capability matrix authorizes {bearer}, but it is not currently registered"
             )),
-            BearerSupport::Probe => {
-                let available = self
-                    .preferred
-                    .iter()
-                    .copied()
-                    .filter(|bearer| radio_state.is_available(*bearer))
-                    .collect::<Vec<_>>();
-
-                match available.as_slice() {
-                    [] => SendPlan::unavailable(
-                        "SMS capability requires runtime probing and no bearer is currently available",
-                    ),
-                    [primary] => SendPlan {
-                        primary: Some(*primary),
-                        fallback: None,
-                        reason: Cow::Owned(format!(
-                            "SMS capability requires runtime probing; {} is available",
-                            primary
-                        )),
-                    },
-                    [primary, fallback, ..] => SendPlan {
-                        primary: Some(*primary),
-                        fallback: Some(*fallback),
-                        reason: Cow::Owned(format!(
-                            "SMS capability requires runtime probing; {} is primary and {} is fallback",
-                            primary, fallback
-                        )),
-                    },
-                }
-            }
+            BearerSupport::Probe => probe_in_order(self.preferred, radio_state),
         }
+    }
+}
+
+pub(crate) fn veto_unsupported(capability: &Capability) -> Option<SendPlan> {
+    match &capability.sms_mo {
+        BearerSupport::Unsupported { reason } => Some(SendPlan::unavailable(reason.clone())),
+        _ => None,
+    }
+}
+
+pub(crate) fn authorized_bearer(capability: &Capability) -> Option<Bearer> {
+    match capability.sms_mo {
+        BearerSupport::Supported(bearer) => Some(bearer),
+        _ => None,
+    }
+}
+
+fn probe_in_order(preferred: [Bearer; 3], radio_state: &RadioState) -> SendPlan {
+    let available = preferred
+        .into_iter()
+        .filter(|bearer| radio_state.is_available(*bearer))
+        .collect::<Vec<_>>();
+
+    match available.as_slice() {
+        [] => SendPlan::unavailable(
+            "SMS capability requires runtime probing and no bearer is currently available",
+        ),
+        [primary] => SendPlan::with_reason(
+            Some(*primary),
+            None,
+            format!("SMS capability requires runtime probing; {primary} is available"),
+        ),
+        [primary, fallback, ..] => SendPlan::with_reason(
+            Some(*primary),
+            Some(*fallback),
+            format!(
+                "SMS capability requires runtime probing; {primary} is primary and {fallback} is fallback"
+            ),
+        ),
     }
 }

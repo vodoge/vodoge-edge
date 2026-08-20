@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use edge_core::{
     Bearer, BearerSupport, Capability, CapabilityMatrix, CapabilityOrigin, CarrierProfile,
-    DeviceContext, ModemFamily, OrderedSmsRouter, RadioState, SmsRouter, Vertical, VerticalFactory,
-    VerticalId, VerticalRegistry,
+    DeviceContext, EsimPolicy, EgressPolicy, ModemFamily, NotificationPolicy, OrderedSmsRouter,
+    RadioState, RegistrationPolicy, SmsRouter, Vertical, VerticalFactory, VerticalId,
+    VerticalRegistry, builtin_registry, CnFactory, DataIntent, IntlFactory, RecoveryPreference,
+    ReleaseScope,
 };
 
 #[test]
@@ -21,10 +23,12 @@ fn ec20_on_cn_telecom_is_rejected_before_a_send_attempt() {
         BearerSupport::unsupported("no_cdma_fallback_and_no_ct_volte_mbn")
     );
 
-    let plan = OrderedSmsRouter::cn().plan(
-        query.capability,
-        &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
-    );
+    let plan = CnFactory
+        .sms_router(query.capability)
+        .plan(
+            query.capability,
+            &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
+        );
     assert_eq!(plan.primary, None);
     assert_eq!(plan.fallback, None);
     assert_eq!(plan.reason, "no_cdma_fallback_and_no_ct_volte_mbn");
@@ -41,12 +45,16 @@ fn ec20_on_cn_mobile_has_a_cellular_sms_bearer() {
         BearerSupport::Supported(Bearer::Cellular)
     );
 
-    let plan = OrderedSmsRouter::cn().plan(
-        query.capability,
-        &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
-    );
-    assert_eq!(plan.primary, Some(Bearer::Cellular));
-    assert_eq!(plan.fallback, None);
+    let radio = RadioState::with_available([Bearer::Cellular, Bearer::Ims]);
+    let cn_plan = CnFactory.sms_router(query.capability).plan(query.capability, &radio);
+    assert_eq!(cn_plan.primary, Some(Bearer::Cellular));
+    assert_eq!(cn_plan.fallback, None);
+
+    let intl_plan = IntlFactory
+        .sms_router(query.capability)
+        .plan(query.capability, &radio);
+    assert_eq!(intl_plan.primary, Some(Bearer::Cellular));
+    assert_eq!(intl_plan.fallback, Some(Bearer::Ims));
 }
 
 #[test]
@@ -97,8 +105,20 @@ fn registry_uses_fallback_when_no_factory_matches() {
 }
 
 #[test]
-fn probe_capability_produces_a_primary_and_backup_bearer_plan() {
-    let router = OrderedSmsRouter::cn();
+fn cn_probe_uses_ims_only_when_ims_is_registered() {
+    let router = CnFactory.sms_router(&Capability::probe_all());
+    let plan = router.plan(
+        &Capability::probe_all(),
+        &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
+    );
+
+    assert_eq!(plan.primary, Some(Bearer::Ims));
+    assert_eq!(plan.fallback, None);
+}
+
+#[test]
+fn international_router_uses_ims_as_the_probe_fallback() {
+    let router = IntlFactory.sms_router(&Capability::probe_all());
     let plan = router.plan(
         &Capability::probe_all(),
         &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
@@ -109,15 +129,25 @@ fn probe_capability_produces_a_primary_and_backup_bearer_plan() {
 }
 
 #[test]
-fn international_router_uses_ims_as_the_probe_fallback() {
-    let router = OrderedSmsRouter::intl();
-    let plan = router.plan(
-        &Capability::probe_all(),
-        &RadioState::with_available([Bearer::Cellular, Bearer::Ims]),
+fn cn_and_intl_policy_families_are_not_mixed() {
+    let capability = Capability::probe_all();
+    let cn = CnFactory.assemble(&capability);
+    let intl = IntlFactory.assemble(&capability);
+
+    assert!(cn.is_coherent());
+    assert!(intl.is_coherent());
+    assert_ne!(cn.vertical_id, intl.vertical_id);
+    assert_eq!(cn.registration.recovery_preference(), RecoveryPreference::ImsFirst);
+    assert_eq!(
+        intl.registration.recovery_preference(),
+        RecoveryPreference::CellularFirst
     );
 
-    assert_eq!(plan.primary, Some(Bearer::Cellular));
-    assert_eq!(plan.fallback, Some(Bearer::Ims));
+    let radio = RadioState::with_available([Bearer::Cellular, Bearer::Ims]);
+    assert_ne!(
+        cn.sms.plan(&capability, &radio),
+        intl.sms.plan(&capability, &radio)
+    );
 }
 
 fn cn_context() -> DeviceContext {
@@ -152,6 +182,52 @@ impl VerticalFactory for TestFactory {
     }
 
     fn sms_router(&self, _capability: &Capability) -> Arc<dyn SmsRouter> {
-        Arc::new(OrderedSmsRouter::cn())
+        Arc::new(OrderedSmsRouter::new([
+            Bearer::Cellular,
+            Bearer::Ims,
+            Bearer::Sgs,
+        ]))
     }
+
+    fn registration(&self, _capability: &Capability) -> Arc<dyn RegistrationPolicy> {
+        Arc::new(edge_core::StaticRegistrationPolicy::new(
+            self.id.as_str().to_owned(),
+            false,
+            RecoveryPreference::ObserveOnly,
+        ))
+    }
+
+    fn esim(&self) -> Arc<dyn EsimPolicy> {
+        Arc::new(edge_core::StaticEsimPolicy::new(
+            self.id.as_str().to_owned(),
+            ReleaseScope::AllExceptEsimChannel,
+            false,
+        ))
+    }
+
+    fn egress(&self) -> Arc<dyn EgressPolicy> {
+        Arc::new(edge_core::StaticEgressPolicy::new(
+            self.id.as_str().to_owned(),
+            DataIntent::Deny,
+        ))
+    }
+
+    fn notification(&self) -> Arc<dyn NotificationPolicy> {
+        Arc::new(edge_core::StaticNotificationPolicy::new(
+            self.id.as_str().to_owned(),
+            true,
+            false,
+        ))
+    }
+}
+
+#[test]
+fn builtin_registry_is_available_to_callers() {
+    let registry = builtin_registry();
+    let ids = registry
+        .factory_ids()
+        .into_iter()
+        .map(|id| id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["cn", "intl", "lab"]);
 }

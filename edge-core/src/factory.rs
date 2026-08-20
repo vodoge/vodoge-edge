@@ -1,18 +1,56 @@
 use std::sync::Arc;
 
 use crate::{
-    Capability, DeviceContext, OrderedSmsRouter, SmsRouter, Vertical, VerticalId,
+    Capability, DeviceContext, EsimPolicy, EgressPolicy, NotificationPolicy, RegistrationPolicy,
+    SmsRouter, VerticalId,
 };
 
-/// Produces a matched family of policies for one vertical.
+/// One factory's complete policy family.
 ///
-/// More policy methods can be added as their domains are implemented. Keeping
-/// factory selection here ensures policy objects are never chosen independently
-/// from different verticals.
+/// SMS routing, registration, eSIM, egress, and notification must come from the
+/// same factory. Mixing objects from different factories produces combinations
+/// that have never been tested together.
+#[derive(Clone)]
+pub struct PolicyFamily {
+    pub vertical_id: VerticalId,
+    pub sms: Arc<dyn SmsRouter>,
+    pub registration: Arc<dyn RegistrationPolicy>,
+    pub esim: Arc<dyn EsimPolicy>,
+    pub egress: Arc<dyn EgressPolicy>,
+    pub notification: Arc<dyn NotificationPolicy>,
+}
+
+impl PolicyFamily {
+    /// True when every policy object in the family reports the same vertical.
+    pub fn is_coherent(&self) -> bool {
+        self.registration.vertical_id() == self.vertical_id
+            && self.esim.vertical_id() == self.vertical_id
+            && self.egress.vertical_id() == self.vertical_id
+            && self.notification.vertical_id() == self.vertical_id
+    }
+}
+
+/// Produces a matched family of policies for one vertical.
 pub trait VerticalFactory: Send + Sync {
     fn id(&self) -> VerticalId;
     fn matches(&self, context: &DeviceContext) -> bool;
     fn sms_router(&self, capability: &Capability) -> Arc<dyn SmsRouter>;
+    fn registration(&self, capability: &Capability) -> Arc<dyn RegistrationPolicy>;
+    fn esim(&self) -> Arc<dyn EsimPolicy>;
+    fn egress(&self) -> Arc<dyn EgressPolicy>;
+    fn notification(&self) -> Arc<dyn NotificationPolicy>;
+
+    /// Assembles the matched family so callers cannot pick policies a la carte.
+    fn assemble(&self, capability: &Capability) -> PolicyFamily {
+        PolicyFamily {
+            vertical_id: self.id(),
+            sms: self.sms_router(capability),
+            registration: self.registration(capability),
+            esim: self.esim(),
+            egress: self.egress(),
+            notification: self.notification(),
+        }
+    }
 }
 
 /// Factories are evaluated in insertion order. The fallback is always available
@@ -37,53 +75,8 @@ impl VerticalRegistry {
             .cloned()
             .unwrap_or_else(|| Arc::clone(&self.fallback))
     }
-}
 
-/// A small built-in factory implementation for the two initial verticals.
-/// It exists mainly to give the registry a concrete production implementation;
-/// additional verticals can implement `VerticalFactory` without touching it.
-pub struct VerticalSmsFactory {
-    id: VerticalId,
-    vertical: Vertical,
-    router: Arc<dyn SmsRouter>,
-}
-
-impl VerticalSmsFactory {
-    pub fn cn() -> Self {
-        Self::new(VerticalId::from("cn"), Vertical::Cn, OrderedSmsRouter::cn())
-    }
-
-    pub fn intl() -> Self {
-        Self::new(
-            VerticalId::from("intl"),
-            Vertical::Intl,
-            OrderedSmsRouter::intl(),
-        )
-    }
-
-    pub fn new(
-        id: VerticalId,
-        vertical: Vertical,
-        router: impl SmsRouter + 'static,
-    ) -> Self {
-        Self {
-            id,
-            vertical,
-            router: Arc::new(router),
-        }
-    }
-}
-
-impl VerticalFactory for VerticalSmsFactory {
-    fn id(&self) -> VerticalId {
-        self.id.clone()
-    }
-
-    fn matches(&self, context: &DeviceContext) -> bool {
-        self.vertical == context.vertical
-    }
-
-    fn sms_router(&self, _capability: &Capability) -> Arc<dyn SmsRouter> {
-        Arc::clone(&self.router)
+    pub fn factory_ids(&self) -> Vec<VerticalId> {
+        self.factories.iter().map(|factory| factory.id()).collect()
     }
 }

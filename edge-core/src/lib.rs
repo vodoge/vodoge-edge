@@ -7,12 +7,22 @@
 mod capability;
 mod factory;
 mod matrix;
+mod policy;
 mod sms;
+mod verticals;
 
 pub use capability::{
     Bearer, BearerSupport, Capability, CarrierProfile, DeviceContext, ModemFamily, Vertical,
     VerticalId,
 };
-pub use factory::{VerticalFactory, VerticalRegistry, VerticalSmsFactory};
+pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
+pub use policy::{
+    DataIntent, EsimPolicy, EgressPolicy, NotificationPolicy, RecoveryPreference,
+    RegistrationPolicy, ReleaseScope, StaticEsimPolicy, StaticEgressPolicy,
+    StaticNotificationPolicy, StaticRegistrationPolicy,
+};
 pub use sms::{OrderedSmsRouter, RadioState, SendPlan, SmsRouter};
+pub use verticals::{builtin_registry, CnFactory, IntlFactory, LabFactory};
+
+pub(crate) use sms::{authorized_bearer, veto_unsupported};
