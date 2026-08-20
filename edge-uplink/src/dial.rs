@@ -33,6 +33,7 @@ pub enum DialError {
     Handshake(String),
     NonBinaryFrame,
     Closed,
+    Timeout,
     Protocol(SessionError),
 }
 
@@ -46,6 +47,7 @@ impl std::fmt::Display for DialError {
             Self::Handshake(reason) => write!(formatter, "websocket handshake: {reason}"),
             Self::NonBinaryFrame => formatter.write_str("only binary websocket frames are allowed"),
             Self::Closed => formatter.write_str("connection closed"),
+            Self::Timeout => formatter.write_str("read timed out"),
             Self::Protocol(err) => write!(formatter, "{err}"),
         }
     }
@@ -68,6 +70,17 @@ impl From<rustls::Error> for DialError {
 impl From<SessionError> for DialError {
     fn from(err: SessionError) -> Self {
         Self::Protocol(err)
+    }
+}
+
+/// Byte-oriented WSS (or a test double) that carries JSON envelopes.
+pub trait FrameConn {
+    fn send_envelope(&mut self, envelope: &Envelope) -> Result<(), DialError>;
+    fn recv_envelope(&mut self) -> Result<Envelope, DialError>;
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), DialError> {
+        let _ = timeout;
+        Ok(())
     }
 }
 
@@ -172,24 +185,33 @@ impl Socket {
 
     pub fn recv_envelope(&mut self) -> Result<Envelope, DialError> {
         loop {
-            match self
-                .inner
-                .read()
-                .map_err(|err| DialError::Handshake(err.to_string()))?
-            {
-                Message::Binary(bytes) => {
+            match self.inner.read() {
+                Ok(Message::Binary(bytes)) => {
                     return decode_json(&bytes).map_err(DialError::Protocol);
                 }
-                Message::Ping(payload) => {
+                Ok(Message::Ping(payload)) => {
                     self.inner
                         .send(Message::Pong(payload))
                         .map_err(|err| DialError::Handshake(err.to_string()))?;
                 }
-                Message::Pong(_) => {}
-                Message::Close(_) => return Err(DialError::Closed),
-                Message::Text(_) | Message::Frame(_) => return Err(DialError::NonBinaryFrame),
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Close(_)) => return Err(DialError::Closed),
+                Ok(Message::Text(_) | Message::Frame(_)) => return Err(DialError::NonBinaryFrame),
+                Err(tungstenite::Error::Io(err))
+                    if err.kind() == std::io::ErrorKind::TimedOut
+                        || err.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    return Err(DialError::Timeout);
+                }
+                Err(tungstenite::Error::ConnectionClosed) => return Err(DialError::Closed),
+                Err(err) => return Err(DialError::Handshake(err.to_string())),
             }
         }
+    }
+
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), DialError> {
+        self.inner.get_mut().sock.set_read_timeout(timeout)?;
+        Ok(())
     }
 
     /// Sends Resume as the first application frame and waits for ResumeAck.
@@ -209,6 +231,20 @@ impl Socket {
         self.inner
             .close(None)
             .map_err(|err| DialError::Handshake(err.to_string()))
+    }
+}
+
+impl FrameConn for Socket {
+    fn send_envelope(&mut self, envelope: &Envelope) -> Result<(), DialError> {
+        Socket::send_envelope(self, envelope)
+    }
+
+    fn recv_envelope(&mut self) -> Result<Envelope, DialError> {
+        Socket::recv_envelope(self)
+    }
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), DialError> {
+        Socket::set_read_timeout(self, timeout)
     }
 }
 

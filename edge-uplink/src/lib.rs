@@ -7,6 +7,7 @@ pub mod codec;
 pub mod dial;
 pub mod session;
 pub mod tls;
+pub mod worker;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

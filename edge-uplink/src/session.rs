@@ -165,6 +165,24 @@ impl LinkSession {
         self.reconnect_at
     }
 
+    pub fn device_id(&self) -> &str {
+        &self.config.device_id
+    }
+
+    pub fn snapshot(&self) -> &ResumeSnapshot {
+        &self.config.snapshot
+    }
+
+    /// Replace local Resume cursors. Capability and version fields are kept
+    /// by the caller; reconnect must send a fresh outbox snapshot.
+    pub fn set_snapshot(&mut self, snapshot: ResumeSnapshot) {
+        self.config.snapshot = snapshot;
+    }
+
+    pub(crate) fn stamp(&self, now: Instant) -> i64 {
+        self.timestamp(now)
+    }
+
     /// After the TLS socket is up, emit Resume as the first outbound envelope.
     pub fn handshake(
         &mut self,
