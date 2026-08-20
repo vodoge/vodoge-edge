@@ -56,12 +56,17 @@ dependencies = [
 name = "edge-store"
 version = "0.1.0"
 dependencies = [
+ "edge-uplink",
  "rusqlite",
 ]
 
 [[package]]
 name = "edge-uplink"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "vodoge-contract",
+]
 
 [[package]]
 name = "equivalent"

@@ -7,3 +7,5 @@ rust-version.workspace = true
 description = "Pure cumulative upstream acknowledgement state for the Vodoge edge agent"
 
 [dependencies]
+serde_json = "1"
+vodoge-contract = { path = "../contract" }

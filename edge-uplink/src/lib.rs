@@ -3,6 +3,9 @@
 //! This crate has no storage or network dependency. A persistence adapter must
 //! atomically persist each state transition before a transport acts on it.
 
+pub mod codec;
+pub mod session;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
