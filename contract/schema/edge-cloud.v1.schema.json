@@ -1,0 +1,703 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.vodoge.cloud/edge-cloud/v1/edge-cloud.schema.json",
+  "title": "VoDoge Edge-to-Cloud protocol v1",
+  "description": "Logical shape of one binary WebSocket MessagePack frame. The JSON form is the canonical schema representation; the wire form uses the same map keys and values encoded as MessagePack.",
+  "$ref": "#/$defs/Envelope",
+  "x-vodoge-contract": {
+    "name": "vodoge-edge-cloud",
+    "version": 1,
+    "wire": {
+      "transport": "wss",
+      "port": 443,
+      "websocket_subprotocol": "vodoge.edge.v1",
+      "frame_encoding": "messagepack",
+      "binary_frames_only": true,
+      "permessage_deflate": false,
+      "tls": {
+        "minimum_version": "TLSv1.3",
+        "maximum_version": "TLSv1.3",
+        "allow_tls_1_2_or_lower_fallback": false,
+        "client_authentication": "mTLS required",
+        "server_certificate_validation": "required",
+        "allowed_cipher_suites": [
+          "TLS_AES_256_GCM_SHA384",
+          "TLS_CHACHA20_POLY1305_SHA256",
+          "TLS_AES_128_GCM_SHA256"
+        ],
+        "allow_early_data": false,
+        "early_data_policy": "No application envelope, especially a command or other non-idempotent action, may use TLS 0-RTT."
+      },
+      "max_frame_bytes": 1048576,
+      "max_control_payload_bytes": 16384,
+      "heartbeat_interval_ms": 30000,
+      "idle_timeout_ms": 90000,
+      "resume_first_frame_deadline_ms": 10000
+    },
+    "compatibility": {
+      "unknown_fields": "reject",
+      "unknown_kinds": "reject",
+      "breaking_change": "increment v and publish a new schema",
+      "sequence_encoding": "canonical decimal string representing an unsigned 64-bit integer"
+    }
+  },
+  "x-vodoge-message-catalog": {
+    "Resume": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 16384 },
+    "ResumeAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
+    "UplinkAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
+    "UplinkGap": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 16384 },
+    "UplinkGapAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
+    "Ping": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 1024 },
+    "Pong": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 1024 },
+    "CommandDeliver": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 131072 },
+    "CommandReceipt": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 4096 },
+    "SmsReceived": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
+    "DeviceState": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
+    "CommandResult": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
+    "EsimInventory": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
+    "Alert": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
+    "ProtocolError": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 4096 }
+  },
+  "$defs": {
+    "Envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "kind", "id", "ts", "device_id", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "kind": { "$ref": "#/$defs/MessageKind" },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "ts": { "$ref": "#/$defs/EpochMillis" },
+        "device_id": { "$ref": "#/$defs/Uuid" },
+        "seq": { "$ref": "#/$defs/SequenceNumber" },
+        "trace_id": { "$ref": "#/$defs/Uuid" },
+        "payload": {}
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "Resume" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/ResumePayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "ResumeAck" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/ResumeAckPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "UplinkAck" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/UplinkAckPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "UplinkGap" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/UplinkGapPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "UplinkGapAck" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/UplinkGapAckPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "Ping" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/PingPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "Pong" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/PongPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "CommandDeliver" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/CommandDeliverPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "CommandReceipt" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/CommandReceiptPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "SmsReceived" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/SmsReceivedPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "DeviceState" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/DeviceStatePayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "CommandResult" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/CommandResultPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "EsimInventory" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/EsimInventoryPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "Alert" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/AlertPayload" } }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "ProtocolError" } }, "required": ["kind"] },
+          "then": {
+            "not": { "required": ["seq"] },
+            "properties": { "payload": { "$ref": "#/$defs/ProtocolErrorPayload" } }
+          }
+        }
+      ]
+    },
+    "MessageKind": {
+      "type": "string",
+      "enum": [
+        "Resume",
+        "ResumeAck",
+        "UplinkAck",
+        "UplinkGap",
+        "UplinkGapAck",
+        "Ping",
+        "Pong",
+        "CommandDeliver",
+        "CommandReceipt",
+        "SmsReceived",
+        "DeviceState",
+        "CommandResult",
+        "EsimInventory",
+        "Alert",
+        "ProtocolError"
+      ]
+    },
+    "Uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "EpochMillis": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 253402300799999,
+      "description": "Unix epoch milliseconds. It is an observed time, not a trusted authorization clock."
+    },
+    "SequenceNumber": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "x-vodoge-wire-type": "u64-decimal",
+      "x-vodoge-invariant": "numeric value is in [1, 18446744073709551615] and has no leading zero"
+    },
+    "SequenceCursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "x-vodoge-wire-type": "u64-decimal",
+      "x-vodoge-invariant": "numeric value is in [0, 18446744073709551615] and has no leading zero"
+    },
+    "SequenceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "through"],
+      "properties": {
+        "from": { "$ref": "#/$defs/SequenceNumber" },
+        "through": { "$ref": "#/$defs/SequenceNumber" }
+      },
+      "x-vodoge-invariant": "numeric from is less than or equal to numeric through"
+    },
+    "Iccid": {
+      "type": "string",
+      "pattern": "^[0-9]{19,20}$"
+    },
+    "Imei": {
+      "type": "string",
+      "pattern": "^[0-9]{14,16}$"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "format": "uri",
+      "maxLength": 2048,
+      "pattern": "^https://"
+    },
+    "NullableString": {
+      "type": ["string", "null"],
+      "maxLength": 1024
+    },
+    "ContextValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string", "maxLength": 4096 },
+        {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/ContextValue" }
+        },
+        {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+        }
+      ]
+    },
+    "ResumePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connection_id",
+        "last_assigned_seq",
+        "lowest_retained_seq",
+        "last_acked_seq",
+        "pending_gap_ids",
+        "capability_matrix_version"
+      ],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/Uuid" },
+        "last_assigned_seq": { "$ref": "#/$defs/SequenceCursor" },
+        "lowest_retained_seq": {
+          "anyOf": [
+            { "$ref": "#/$defs/SequenceNumber" },
+            { "type": "null" }
+          ]
+        },
+        "last_acked_seq": { "$ref": "#/$defs/SequenceCursor" },
+        "pending_gap_ids": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/Uuid" }
+        },
+        "capability_matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "edge_version": { "type": "string", "maxLength": 128 },
+        "queue_records": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "queue_bytes": { "type": "integer", "minimum": 0, "maximum": 10737418240 }
+      },
+      "x-vodoge-invariant": "last_acked_seq <= last_assigned_seq; lowest_retained_seq is null exactly when no unacknowledged records are retained"
+    },
+    "ResumeAckPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connection_id",
+        "committed_through",
+        "missing_ranges",
+        "more_missing",
+        "max_in_flight",
+        "server_time"
+      ],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/Uuid" },
+        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
+        "missing_ranges": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/SequenceRange" }
+        },
+        "more_missing": { "type": "boolean" },
+        "max_in_flight": { "type": "integer", "minimum": 1, "maximum": 2048 },
+        "server_time": { "$ref": "#/$defs/EpochMillis" }
+      }
+    },
+    "UplinkAckPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_id", "committed_through", "missing_ranges", "more_missing", "max_in_flight"],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/Uuid" },
+        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
+        "missing_ranges": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/SequenceRange" }
+        },
+        "more_missing": { "type": "boolean" },
+        "max_in_flight": { "type": "integer", "minimum": 1, "maximum": 2048 }
+      }
+    },
+    "UplinkGapPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap_id", "ranges", "reason", "dropped_records", "occurred_at", "drop_policy"],
+      "properties": {
+        "gap_id": { "$ref": "#/$defs/Uuid" },
+        "ranges": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/SequenceRange" }
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["queue_capacity", "storage_corruption", "operator_purge"]
+        },
+        "dropped_records": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "occurred_at": { "$ref": "#/$defs/EpochMillis" },
+        "drop_policy": { "const": "oldest_non_verification_only" },
+        "detail": { "$ref": "#/$defs/NullableString" }
+      },
+      "x-vodoge-invariant": "ranges are non-overlapping, each covers only records that are no longer retained, and dropped_records equals their total cardinality"
+    },
+    "UplinkGapAckPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap_id", "accepted", "committed_through"],
+      "properties": {
+        "gap_id": { "$ref": "#/$defs/Uuid" },
+        "accepted": { "type": "boolean" },
+        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
+        "reason_code": { "$ref": "#/$defs/NullableString" }
+      }
+    },
+    "PingPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_id", "sent_at"],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/Uuid" },
+        "sent_at": { "$ref": "#/$defs/EpochMillis" }
+      }
+    },
+    "PongPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_id", "ping_id", "server_time"],
+      "properties": {
+        "connection_id": { "$ref": "#/$defs/Uuid" },
+        "ping_id": { "$ref": "#/$defs/Uuid" },
+        "server_time": { "$ref": "#/$defs/EpochMillis" }
+      }
+    },
+    "CommandDeliverPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cmd_id", "issued_at", "expires_at", "command"],
+      "properties": {
+        "cmd_id": { "$ref": "#/$defs/Uuid" },
+        "issued_at": { "$ref": "#/$defs/EpochMillis" },
+        "expires_at": { "$ref": "#/$defs/EpochMillis" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "command": { "$ref": "#/$defs/Command" }
+      },
+      "x-vodoge-invariant": "expires_at is greater than issued_at; the envelope id is the physical delivery_id and cmd_id is the logical command id"
+    },
+    "CommandReceiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cmd_id", "delivery_id", "status", "received_at"],
+      "properties": {
+        "cmd_id": { "$ref": "#/$defs/Uuid" },
+        "delivery_id": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "enum": ["accepted", "duplicate", "retry_later"] },
+        "received_at": { "$ref": "#/$defs/EpochMillis" },
+        "retry_after_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "reason_code": { "$ref": "#/$defs/NullableString" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "retry_later" } }, "required": ["status"] },
+          "then": { "required": ["retry_after_ms"] }
+        }
+      ]
+    },
+    "SmsReceivedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modem_imei", "peer", "body", "received_at", "iccid", "bearer", "encoding"],
+      "properties": {
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "peer": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "body": { "type": "string", "maxLength": 16384 },
+        "received_at": { "$ref": "#/$defs/EpochMillis" },
+        "iccid": { "$ref": "#/$defs/Iccid" },
+        "bearer": { "type": "string", "enum": ["cs", "ims", "nas", "unknown"] },
+        "encoding": { "type": "string", "enum": ["gsm7", "ucs2", "8bit", "unknown"] },
+        "modem_storage_index": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "DeviceStatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observed_at", "modems"],
+      "properties": {
+        "observed_at": { "$ref": "#/$defs/EpochMillis" },
+        "modems": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/ModemState" }
+        }
+      }
+    },
+    "ModemState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modem_imei", "state", "registration", "capability"],
+      "properties": {
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "state": { "type": "string", "enum": ["online", "offline", "recovering", "unknown"] },
+        "registration": { "type": "string", "enum": ["registered", "searching", "denied", "unregistered", "unknown"] },
+        "iccid": {
+          "anyOf": [
+            { "$ref": "#/$defs/Iccid" },
+            { "type": "null" }
+          ]
+        },
+        "signal_dbm": {
+          "anyOf": [
+            { "type": "integer", "minimum": -160, "maximum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "capability": { "$ref": "#/$defs/CapabilitySummary" }
+      }
+    },
+    "CapabilitySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sms_mo", "sms_mt", "matrix_version"],
+      "properties": {
+        "sms_mo": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
+        "sms_mt": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
+        "matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reason": { "$ref": "#/$defs/NullableString" }
+      }
+    },
+    "CommandResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cmd_id", "status", "completed_at", "attempts"],
+      "properties": {
+        "cmd_id": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "enum": ["succeeded", "failed", "unknown", "expired", "cancelled"] },
+        "completed_at": { "$ref": "#/$defs/EpochMillis" },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "reason_code": { "$ref": "#/$defs/NullableString" },
+        "reason": { "$ref": "#/$defs/NullableString" },
+        "details": {
+          "anyOf": [
+            { "$ref": "#/$defs/ContextValue" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "EsimInventoryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modem_imei", "eid", "collected_at", "profiles"],
+      "properties": {
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "eid": { "type": "string", "pattern": "^[0-9]{32}$" },
+        "collected_at": { "$ref": "#/$defs/EpochMillis" },
+        "profiles": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/EsimProfile" }
+        }
+      }
+    },
+    "EsimProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iccid", "state"],
+      "properties": {
+        "iccid": { "$ref": "#/$defs/Iccid" },
+        "state": { "type": "string", "enum": ["enabled", "disabled", "deleted", "unknown"] },
+        "nickname": {
+          "anyOf": [
+            { "type": "string", "maxLength": 256 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "AlertPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "code", "message", "occurred_at", "context"],
+      "properties": {
+        "level": { "type": "string", "enum": ["info", "warning", "error", "critical"] },
+        "code": { "type": "string", "pattern": "^[a-z0-9_]{1,128}$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "occurred_at": { "$ref": "#/$defs/EpochMillis" },
+        "context": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+        }
+      }
+    },
+    "Command": {
+      "oneOf": [
+        { "$ref": "#/$defs/SendSmsCommand" },
+        { "$ref": "#/$defs/RestartModemCommand" },
+        { "$ref": "#/$defs/SwitchEsimProfileCommand" },
+        { "$ref": "#/$defs/UpdateCardPolicyCommand" },
+        { "$ref": "#/$defs/UpdateCapabilityMatrixCommand" },
+        { "$ref": "#/$defs/SelfUpdateCommand" }
+      ]
+    },
+    "SendSmsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "to", "body"],
+      "properties": {
+        "kind": { "const": "SendSms" },
+        "to": { "type": "string", "pattern": "^\\+?[0-9]{1,15}$" },
+        "body": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "iccid": { "$ref": "#/$defs/Iccid" }
+      },
+      "anyOf": [
+        { "required": ["modem_imei"] },
+        { "required": ["iccid"] }
+      ]
+    },
+    "RestartModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "RestartModem" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "SwitchEsimProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "target_iccid"],
+      "properties": {
+        "kind": { "const": "SwitchEsimProfile" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "target_iccid": { "$ref": "#/$defs/Iccid" }
+      }
+    },
+    "UpdateCardPolicyCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "policy_version", "policies"],
+      "properties": {
+        "kind": { "const": "UpdateCardPolicy" },
+        "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "policies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/CardPolicy" }
+        }
+      }
+    },
+    "CardPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iccid", "cellular_enabled", "vertical"],
+      "properties": {
+        "iccid": { "$ref": "#/$defs/Iccid" },
+        "cellular_enabled": { "type": "boolean" },
+        "vertical": { "type": "string", "enum": ["cn", "intl"] },
+        "apn": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "UpdateCapabilityMatrixCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "matrix_version", "matrix_sha256", "matrix"],
+      "properties": {
+        "kind": { "const": "UpdateCapabilityMatrix" },
+        "matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "matrix_sha256": { "$ref": "#/$defs/Sha256" },
+        "matrix": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 4096,
+          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+        }
+      }
+    },
+    "SelfUpdateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "version", "url", "sha256", "signature"],
+      "properties": {
+        "kind": { "const": "SelfUpdate" },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "url": { "$ref": "#/$defs/HttpsUrl" },
+        "sha256": { "$ref": "#/$defs/Sha256" },
+        "signature": { "type": "string", "minLength": 16, "maxLength": 1024, "contentEncoding": "base64" }
+      }
+    },
+    "ProtocolErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "related_message_id", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_envelope",
+            "frame_too_large",
+            "unsupported_version",
+            "wrong_direction",
+            "device_id_mismatch",
+            "sequence_conflict",
+            "sequence_state_invalid",
+            "connection_superseded",
+            "rate_limited"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "related_message_id": {
+          "anyOf": [
+            { "$ref": "#/$defs/Uuid" },
+            { "type": "null" }
+          ]
+        },
+        "retryable": { "type": "boolean" },
+        "retry_after_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+      }
+    }
+  }
+}
