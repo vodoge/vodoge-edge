@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoDoge Edge</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10141c; --raised:#171d28; --fg:#e8eef6; --muted:#93a0b3; --line:#2a3444; --accent:#3ecf8e; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--raised); display: flex; gap: 1rem; align-items: center; }
+    h1 { margin: 0; font-size: 1.1rem; }
+    .muted { color: var(--muted); font-size: .9rem; }
+    main { padding: 1.25rem; display: grid; gap: 1.25rem; }
+    section { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    h2 { margin: 0; padding: .8rem 1rem; font-size: .95rem; border-bottom: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+    th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+    .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
+    .offline { color: var(--accent); margin-left: auto; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>VoDoge Edge</h1>
+    <span class="muted">本地面板 · 断网可用</span>
+    <span class="offline" id="status-flag">local</span>
+  </header>
+  <main>
+    <section>
+      <h2>模组</h2>
+      <table>
+        <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th></tr></thead>
+        <tbody id="modems"><tr><td class="empty" colspan="4">加载中</td></tr></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>本地短信</h2>
+      <table>
+        <thead><tr><th>对端</th><th>内容</th><th>承载</th><th>时间</th></tr></thead>
+        <tbody id="messages"><tr><td class="empty" colspan="4">加载中</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    function cell(text) { const td = document.createElement("td"); td.textContent = text; return td; }
+    function fill(id, rows, cols, empty) {
+      const body = document.getElementById(id);
+      body.replaceChildren();
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = cols;
+        td.className = "empty";
+        td.textContent = empty;
+        tr.append(td);
+        body.append(tr);
+        return;
+      }
+      for (const row of rows) body.append(row);
+    }
+    async function load() {
+      const [status, inbox] = await Promise.all([
+        fetch("/api/status").then((r) => r.json()),
+        fetch("/api/messages").then((r) => r.json()),
+      ]);
+      document.getElementById("status-flag").textContent = status.mode || "local";
+      fill("modems", (status.modems || []).map((modem) => {
+        const tr = document.createElement("tr");
+        tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
+        return tr;
+      }), 4, "没有模组");
+      fill("messages", (inbox.messages || []).map((message) => {
+        const tr = document.createElement("tr");
+        const when = message.received_at ? new Date(message.received_at).toISOString() : "—";
+        tr.append(cell(message.peer), cell(message.body), cell(message.bearer), cell(when));
+        return tr;
+      }), 4, "没有本地短信");
+    }
+    load().catch(() => {
+      document.getElementById("status-flag").textContent = "error";
+    });
+  </script>
+</body>
+</html>

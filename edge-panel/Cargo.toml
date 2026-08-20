@@ -1,0 +1,22 @@
+[package]
+name = "edge-panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Offline local web panel for the Vodoge edge agent"
+
+[dependencies]
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+edge-store = { path = "../edge-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net"] }
+
+[dev-dependencies]
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+edge-store = { path = "../edge-store" }
+http-body-util = "0.1"
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
