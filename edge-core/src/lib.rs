@@ -8,6 +8,7 @@ mod capability;
 mod factory;
 mod matrix;
 mod policy;
+mod registration;
 mod sms;
 mod verticals;
 
@@ -17,6 +18,9 @@ pub use capability::{
 };
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
+pub use registration::{
+    arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
+};
 pub use policy::{
     DataIntent, EsimPolicy, EgressPolicy, NotificationPolicy, RecoveryPreference,
     RegistrationPolicy, ReleaseScope, StaticEsimPolicy, StaticEgressPolicy,
