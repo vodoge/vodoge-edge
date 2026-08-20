@@ -25,6 +25,8 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)

@@ -67,6 +67,12 @@ impl Error for SendError {}
 /// Executes `SendSms` without requiring a real modem.
 pub trait SendPort {
     fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError>;
+    fn restart_modem(&mut self, _imei: &str) -> Result<(), SendError> {
+        Err(SendError::new(
+            "unsupported_command",
+            "restart_modem is not implemented",
+        ))
+    }
 }
 
 /// In-memory send target used by command tests.
@@ -415,6 +421,28 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     iccid: iccid.clone(),
                 };
                 let result = match self.port.send_sms(&send) {
+                    Ok(()) => terminal_result(
+                        &payload.cmd_id,
+                        RESULT_SUCCEEDED,
+                        now_ms,
+                        attempts,
+                        None,
+                        None,
+                    ),
+                    Err(error) => terminal_result(
+                        &payload.cmd_id,
+                        RESULT_FAILED,
+                        now_ms,
+                        attempts,
+                        Some(error.reason_code.as_str()),
+                        Some(error.message.as_str()),
+                    ),
+                };
+                Ok((result, true))
+            }
+            Command::RestartModem { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let result = match self.port.restart_modem(modem_imei) {
                     Ok(()) => terminal_result(
                         &payload.cmd_id,
                         RESULT_SUCCEEDED,

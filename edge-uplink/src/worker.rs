@@ -183,7 +183,7 @@ impl<O: Outbox> UplinkWorker<O> {
             Inbound::UplinkAck(ack) => {
                 self.apply_ack(ack.committed_through, &ack.missing_ranges, ack.more_missing)?;
             }
-            Inbound::IgnoredStale | Inbound::Pong(_) => {}
+            Inbound::IgnoredStale | Inbound::Pong(_) | Inbound::CommandDeliver(_) => {}
             Inbound::ProtocolError(_) => {}
         }
         Ok(inbound)

@@ -1,0 +1,24 @@
+[package]
+name = "edge-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Vodoge edge daemon: QMI, local panel, and WSS uplink"
+
+[[bin]]
+name = "vodoge-edge"
+path = "src/main.rs"
+
+[dependencies]
+edge-core = { path = "../edge-core" }
+edge-modem = { path = "../edge-modem" }
+edge-panel = { path = "../edge-panel" }
+edge-store = { path = "../edge-store" }
+edge-uplink = { path = "../edge-uplink" }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls-pemfile = "2"
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net", "time"] }
+uuid = { version = "1", features = ["v4"] }
+vodoge-contract = { path = "../contract" }

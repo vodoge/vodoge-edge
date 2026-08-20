@@ -73,6 +73,7 @@ pub enum Inbound {
     UplinkAck(UplinkAckPayload),
     Pong(PongPayload),
     ProtocolError(ProtocolErrorPayload),
+    CommandDeliver(Envelope),
     IgnoredStale,
 }
 
@@ -237,6 +238,7 @@ impl LinkSession {
             MessageKind::UplinkAck => self.on_uplink_ack(envelope, now),
             MessageKind::Pong => self.on_pong(envelope, now),
             MessageKind::ProtocolError => self.on_protocol_error(envelope, now),
+            MessageKind::CommandDeliver => Ok(Inbound::CommandDeliver(envelope)),
             other => Err(SessionError::UnexpectedKind(other.as_str().to_string())),
         }
     }

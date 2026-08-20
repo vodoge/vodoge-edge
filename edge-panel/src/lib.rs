@@ -91,6 +91,12 @@ pub fn router(inbox: Arc<dyn Inbox>) -> Router {
         .with_state(inbox)
 }
 
+/// Serve the panel until the process exits.
+pub async fn serve(bind: impl tokio::net::ToSocketAddrs, inbox: Arc<dyn Inbox>) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, router(inbox)).await
+}
+
 async fn index() -> Html<&'static str> {
     Html(INDEX)
 }
