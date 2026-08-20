@@ -1,14 +1,29 @@
 //! Pure QMUX/QMI framing and correlation primitives.
 //!
-//! This crate deliberately has no transport dependency. A later cdc-wdm or
+//! This crate deliberately has no OS device dependency. A later cdc-wdm or
 //! QMI-over-MBIM adapter owns byte I/O, while this crate owns the binary
 //! invariants needed before a frame can be sent or accepted.
+
+mod dms;
+mod result;
+mod session;
 
 use std::{
     collections::HashMap,
     error::Error,
     fmt,
 };
+
+pub use dms::{
+    empty_request, get_manufacturer_request, get_model_request, get_operating_mode_request,
+    get_revision_request, get_serial_numbers_request, parse_manufacturer, parse_model,
+    parse_operating_mode, parse_revision, parse_serial_numbers, parse_set_operating_mode,
+    set_operating_mode_request, DeviceRevision, DeviceSerialNumbers, DmsError, OperatingMode,
+    GET_DEVICE_REV_ID, GET_DEVICE_SERIAL_NUMBERS, GET_MANUFACTURER, GET_MODEL_ID,
+    GET_OPERATING_MODE, SET_OPERATING_MODE,
+};
+pub use result::{QmiResult, ResultError};
+pub use session::{QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC};
 
 const QMUX_INTERFACE_TYPE: u8 = 0x01;
 const QMUX_HEADER_LENGTH: usize = 6;
@@ -965,16 +980,42 @@ fn decode_response_sdu(
     Ok((transaction, message_id, payload))
 }
 
-fn required_tlv<'a>(tlvs: &'a [Tlv], kind: u8) -> Result<&'a Tlv, AllocationError> {
+/// Looks up a TLV kind and rejects both absence and duplicates.
+pub fn unique_tlv(tlvs: &[Tlv], kind: u8) -> Result<&Tlv, TlvLookupError> {
     let mut matches = tlvs.iter().filter(|tlv| tlv.kind == kind);
     let value = matches
         .next()
-        .ok_or(AllocationError::MissingTlv { kind })?;
+        .ok_or(TlvLookupError::Missing { kind })?;
     if matches.next().is_some() {
-        return Err(AllocationError::DuplicateTlv { kind });
+        return Err(TlvLookupError::Duplicate { kind });
     }
     Ok(value)
 }
+
+fn required_tlv<'a>(tlvs: &'a [Tlv], kind: u8) -> Result<&'a Tlv, AllocationError> {
+    unique_tlv(tlvs, kind).map_err(|error| match error {
+        TlvLookupError::Missing { kind } => AllocationError::MissingTlv { kind },
+        TlvLookupError::Duplicate { kind } => AllocationError::DuplicateTlv { kind },
+    })
+}
+
+/// Errors from locating a unique TLV in a decoded payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TlvLookupError {
+    Missing { kind: u8 },
+    Duplicate { kind: u8 },
+}
+
+impl fmt::Display for TlvLookupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing { kind } => write!(formatter, "missing TLV 0x{kind:02x}"),
+            Self::Duplicate { kind } => write!(formatter, "duplicate TLV 0x{kind:02x}"),
+        }
+    }
+}
+
+impl Error for TlvLookupError {}
 
 fn validate_address(service: ServiceId, client_id: ClientId) -> Result<(), WireError> {
     if service.is_control() && !client_id.is_control() {
