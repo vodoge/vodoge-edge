@@ -10,6 +10,8 @@ mod dms;
 mod nas;
 mod result;
 mod session;
+mod uim;
+mod wms;
 
 use std::{
     collections::HashMap,
@@ -33,6 +35,14 @@ pub use nas::{
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC};
+pub use uim::{
+    parse_eid, parse_open_logical_channel, parse_send_apdu, ApduResponse, UimError,
+    CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, OPEN_LOGICAL_CHANNEL, SEND_APDU,
+};
+pub use wms::{
+    parse_list_messages, parse_raw_read, retain_mobile_terminated, ListedMessage, MessageMode,
+    MessageTag, RawMessage, StorageType, WmsError, LIST_MESSAGES, RAW_READ, RAW_SEND,
+};
 
 const QMUX_INTERFACE_TYPE: u8 = 0x01;
 const QMUX_HEADER_LENGTH: usize = 6;

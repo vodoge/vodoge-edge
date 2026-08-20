@@ -1,11 +1,12 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    dms, nas, unique_tlv, AllocationError, CellLocationInfo, ClientAllocationRequest,
-    ClientAssignment, ClientId, ClientRegistry, ClientRegistryError, CorrelationError,
-    DeviceRevision, DeviceSerialNumbers, DmsError, MessageId, NasError, OperatingMode,
-    PendingTransactions, QmiRequest, QmiResponse, QmiResult, ResultError, ServiceId, ServingSystem,
-    TlvLookupError, TransactionId, WireError,
+    dms, nas, uim, unique_tlv, wms, AllocationError, ApduResponse, CellLocationInfo,
+    ClientAllocationRequest, ClientAssignment, ClientId, ClientRegistry, ClientRegistryError,
+    CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, ListedMessage, MessageId,
+    MessageMode, MessageTag, NasError, OperatingMode, PendingTransactions, QmiRequest, QmiResponse,
+    QmiResult, RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError,
+    TransactionId, UimError, WireError, WmsError,
 };
 
 /// CTL message that asks the modem to resynchronize control state.
@@ -105,6 +106,137 @@ impl<T: QmiTransport> QmiClient<T> {
     pub fn get_cell_location(&mut self) -> Result<CellLocationInfo, SessionError> {
         let response = self.nas_empty(nas::GET_CELL_LOCATION_INFO)?;
         Ok(nas::parse_cell_location(&response)?)
+    }
+
+    pub fn list_sms(
+        &mut self,
+        storage: StorageType,
+        tag: MessageTag,
+        mode: MessageMode,
+    ) -> Result<Vec<ListedMessage>, SessionError> {
+        let assignment = self.assignment(ServiceId::WMS)?;
+        let request = wms::list_messages_request(
+            assignment,
+            self.allocate_service_transaction(),
+            storage,
+            tag,
+            mode,
+        )?;
+        let response = self.round_trip(&request)?;
+        Ok(wms::parse_list_messages(&response)?)
+    }
+
+    pub fn read_sms(
+        &mut self,
+        storage: StorageType,
+        index: u32,
+        mode: MessageMode,
+    ) -> Result<RawMessage, SessionError> {
+        let assignment = self.assignment(ServiceId::WMS)?;
+        let request = wms::raw_read_request(
+            assignment,
+            self.allocate_service_transaction(),
+            storage,
+            index,
+            mode,
+        )?;
+        let response = self.round_trip(&request)?;
+        Ok(wms::parse_raw_read(&response)?)
+    }
+
+    pub fn send_sms(&mut self, format: u8, pdu: &[u8]) -> Result<Option<u16>, SessionError> {
+        let assignment = self.assignment(ServiceId::WMS)?;
+        let request =
+            wms::raw_send_request(assignment, self.allocate_service_transaction(), format, pdu)?;
+        let response = self.round_trip(&request)?;
+        Ok(wms::parse_raw_send(&response)?)
+    }
+
+    pub fn delete_sms(
+        &mut self,
+        storage: StorageType,
+        index: u32,
+        mode: MessageMode,
+    ) -> Result<(), SessionError> {
+        let assignment = self.assignment(ServiceId::WMS)?;
+        let request = wms::delete_by_index_request(
+            assignment,
+            self.allocate_service_transaction(),
+            storage,
+            index,
+            mode,
+        )?;
+        let response = self.round_trip(&request)?;
+        wms::parse_delete(&response)?;
+        Ok(())
+    }
+
+    pub fn open_logical_channel(&mut self, slot: u8, aid: &[u8]) -> Result<u8, SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::open_logical_channel_request(
+            assignment,
+            self.allocate_service_transaction(),
+            slot,
+            aid,
+        )?;
+        let response = self.round_trip(&request)?;
+        Ok(uim::parse_open_logical_channel(&response)?)
+    }
+
+    pub fn close_logical_channel(&mut self, slot: u8, channel: u8) -> Result<(), SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::close_logical_channel_request(
+            assignment,
+            self.allocate_service_transaction(),
+            slot,
+            channel,
+        )?;
+        let response = self.round_trip(&request)?;
+        uim::parse_close_logical_channel(&response)?;
+        Ok(())
+    }
+
+    pub fn send_apdu(
+        &mut self,
+        slot: u8,
+        channel: u8,
+        command: &[u8],
+    ) -> Result<ApduResponse, SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::send_apdu_request(
+            assignment,
+            self.allocate_service_transaction(),
+            slot,
+            channel,
+            command,
+        )?;
+        let response = self.round_trip(&request)?;
+        Ok(uim::parse_send_apdu(&response)?)
+    }
+
+    /// Open the ISD-R application, GET DATA tag `5A`, and return the EID digits.
+    pub fn read_eid(&mut self, slot: u8) -> Result<String, SessionError> {
+        let channel = self.open_logical_channel(slot, uim::ISD_R_AID)?;
+        let result = (|| {
+            let mut rapdu = self.send_apdu(slot, channel, uim::GET_EID_APDU)?;
+            if let Some(get_response) = rapdu.get_response_apdu() {
+                rapdu = self.send_apdu(slot, channel, &get_response)?;
+            }
+            Ok(uim::parse_eid(&rapdu)?)
+        })();
+        let close = self.close_logical_channel(slot, channel);
+        match (result, close) {
+            (Ok(eid), Ok(())) => Ok(eid),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn assignment(&mut self, service: ServiceId) -> Result<ClientAssignment, SessionError> {
+        if let Some(client_id) = self.clients.client_for(service) {
+            return Ok(ClientAssignment::new(service, client_id)?);
+        }
+        self.allocate(service)
     }
 
     fn dms_empty(&mut self, message_id: MessageId) -> Result<QmiResponse, SessionError> {
@@ -239,6 +371,8 @@ pub enum SessionError {
     Lookup(TlvLookupError),
     Dms(DmsError),
     Nas(NasError),
+    Wms(WmsError),
+    Uim(UimError),
     UnexpectedSyncResponse {
         service: ServiceId,
         client: ClientId,
@@ -264,6 +398,8 @@ impl fmt::Display for SessionError {
             Self::Lookup(error) => error.fmt(formatter),
             Self::Dms(error) => error.fmt(formatter),
             Self::Nas(error) => error.fmt(formatter),
+            Self::Wms(error) => error.fmt(formatter),
+            Self::Uim(error) => error.fmt(formatter),
             Self::UnexpectedSyncResponse {
                 service,
                 client,
@@ -287,6 +423,8 @@ impl Error for SessionError {
             Self::Lookup(error) => Some(error),
             Self::Dms(error) => Some(error),
             Self::Nas(error) => Some(error),
+            Self::Wms(error) => Some(error),
+            Self::Uim(error) => Some(error),
             _ => None,
         }
     }
@@ -337,5 +475,17 @@ impl From<DmsError> for SessionError {
 impl From<NasError> for SessionError {
     fn from(value: NasError) -> Self {
         Self::Nas(value)
+    }
+}
+
+impl From<WmsError> for SessionError {
+    fn from(value: WmsError) -> Self {
+        Self::Wms(value)
+    }
+}
+
+impl From<UimError> for SessionError {
+    fn from(value: UimError) -> Self {
+        Self::Uim(value)
     }
 }
