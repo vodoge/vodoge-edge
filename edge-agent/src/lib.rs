@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use edge_core::CapabilityMatrix;
 use edge_uplink::{EnvelopeId, RetentionClass, UplinkError, UplinkState};
+use sha2::{Digest, Sha256};
 use vodoge_contract::{
-    Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload, Envelope,
-    MessageKind,
+    Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload, ContextValue,
+    Envelope, MessageKind,
 };
 
 /// Receipt status: first durable accept of a `cmd_id`.
@@ -112,6 +114,7 @@ pub struct CommandExecutor<P> {
     port: P,
     commands: BTreeMap<String, StoredCommand>,
     uplink: UplinkState,
+    matrix: CapabilityMatrix,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +137,7 @@ impl<P: SendPort> CommandExecutor<P> {
             port,
             commands: BTreeMap::new(),
             uplink: UplinkState::new(),
+            matrix: CapabilityMatrix::builtin().expect("built-in capability matrix"),
         }
     }
 
@@ -143,6 +147,10 @@ impl<P: SendPort> CommandExecutor<P> {
 
     pub fn uplink(&self) -> &UplinkState {
         &self.uplink
+    }
+
+    pub fn matrix(&self) -> &CapabilityMatrix {
+        &self.matrix
     }
 
     /// Handle one physical `CommandDeliver` envelope.
@@ -293,6 +301,37 @@ impl<P: SendPort> CommandExecutor<P> {
                 };
                 Ok((result, true))
             }
+            Command::UpdateCapabilityMatrix {
+                matrix_version,
+                matrix_sha256,
+                matrix,
+            } => match install_matrix(matrix_version, matrix_sha256, matrix) {
+                Ok(parsed) => {
+                    self.matrix = parsed;
+                    Ok((
+                        terminal_result(
+                            &payload.cmd_id,
+                            RESULT_SUCCEEDED,
+                            now_ms,
+                            attempts,
+                            None,
+                            None,
+                        ),
+                        true,
+                    ))
+                }
+                Err((reason_code, message)) => Ok((
+                    terminal_result(
+                        &payload.cmd_id,
+                        RESULT_FAILED,
+                        now_ms,
+                        attempts,
+                        Some(reason_code),
+                        Some(&message),
+                    ),
+                    false,
+                )),
+            },
             _ => Ok((
                 terminal_result(
                     &payload.cmd_id,
@@ -382,6 +421,46 @@ fn receipt(
         retry_after_ms: None,
         reason_code: None,
     }
+}
+
+fn install_matrix(
+    matrix_version: &str,
+    matrix_sha256: &str,
+    matrix: &ContextValue,
+) -> Result<CapabilityMatrix, (&'static str, String)> {
+    let bytes = serde_json::to_vec(matrix)
+        .map_err(|err| ("matrix_invalid", err.to_string()))?;
+    let digest = hex_sha256(&bytes);
+    if !digest.eq_ignore_ascii_case(matrix_sha256.trim()) {
+        return Err((
+            "matrix_sha256_mismatch",
+            "capability matrix sha256 does not match".to_string(),
+        ));
+    }
+    let value = serde_json::to_value(matrix)
+        .map_err(|err| ("matrix_invalid", err.to_string()))?;
+    let parsed = CapabilityMatrix::from_json_value(&value)
+        .map_err(|err| ("matrix_invalid", err.to_string()))?;
+    if parsed.version() != matrix_version {
+        return Err((
+            "matrix_version_mismatch",
+            format!(
+                "matrix version {} does not match command {}",
+                parsed.version(),
+                matrix_version
+            ),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 fn terminal_result(

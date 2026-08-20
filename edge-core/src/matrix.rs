@@ -44,6 +44,17 @@ impl CapabilityMatrix {
     /// `[fallback]`, which defaults to `probe` for every operation.
     pub fn from_toml(source: &str) -> Result<Self, MatrixError> {
         let document: MatrixDocument = toml::from_str(source).map_err(MatrixError::Parse)?;
+        Self::from_document(document)
+    }
+
+    /// Parses the same document shape as TOML, delivered as JSON in CommandDeliver.
+    pub fn from_json_value(value: &serde_json::Value) -> Result<Self, MatrixError> {
+        let document: MatrixDocument =
+            serde_json::from_value(value.clone()).map_err(MatrixError::Json)?;
+        Self::from_document(document)
+    }
+
+    fn from_document(document: MatrixDocument) -> Result<Self, MatrixError> {
         let fallback = document.fallback.into_capability(&Capability::probe_all());
         let mut rules = HashMap::with_capacity(document.rule.len());
 
@@ -107,6 +118,7 @@ impl CapabilityMatrix {
 #[derive(Debug)]
 pub enum MatrixError {
     Parse(toml::de::Error),
+    Json(serde_json::Error),
     DuplicateRule {
         modem_family: ModemFamily,
         carrier_profile: CarrierProfile,
@@ -117,6 +129,7 @@ impl fmt::Display for MatrixError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(error) => write!(formatter, "invalid capability matrix: {error}"),
+            Self::Json(error) => write!(formatter, "invalid capability matrix json: {error}"),
             Self::DuplicateRule {
                 modem_family,
                 carrier_profile,
@@ -132,6 +145,7 @@ impl Error for MatrixError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Parse(error) => Some(error),
+            Self::Json(error) => Some(error),
             Self::DuplicateRule { .. } => None,
         }
     }
@@ -188,5 +202,39 @@ impl From<RawBearerSupport> for BearerSupport {
             RawBearerSupport::Unsupported { reason } => Self::Unsupported { reason },
             RawBearerSupport::Probe => Self::Probe,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Bearer, BearerSupport, CarrierProfile, ModemFamily};
+
+    #[test]
+    fn json_matrix_installs_supported_sms_for_ec20_telecom() {
+        let matrix = CapabilityMatrix::from_json_value(&serde_json::json!({
+            "version": "hot-1",
+            "fallback": {
+                "sms_mo": { "kind": "probe" },
+                "sms_mt": { "kind": "probe" },
+                "data": { "kind": "probe" },
+                "voice": { "kind": "probe" }
+            },
+            "rule": [{
+                "modem_family": "EC20",
+                "carrier": "CN-Telecom",
+                "sms_mo": { "kind": "supported", "bearer": "cellular" },
+                "sms_mt": { "kind": "supported", "bearer": "cellular" }
+            }]
+        }))
+        .expect("json matrix");
+
+        assert_eq!(matrix.version(), "hot-1");
+        let query = matrix.query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
+        assert_eq!(query.origin, CapabilityOrigin::Rule);
+        assert_eq!(
+            query.capability.sms_mo,
+            BearerSupport::Supported(Bearer::Cellular)
+        );
     }
 }

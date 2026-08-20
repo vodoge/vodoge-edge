@@ -7,6 +7,14 @@ rust-version.workspace = true
 description = "Command execution and receipts for the Vodoge edge agent"
 
 [dependencies]
+edge-core = { path = "../edge-core" }
 edge-uplink = { path = "../edge-uplink" }
 serde_json = "1"
+sha2 = "0.10"
+vodoge-contract = { path = "../contract" }
+
+[dev-dependencies]
+edge-core = { path = "../edge-core" }
+edge-uplink = { path = "../edge-uplink" }
+sha2 = "0.10"
 vodoge-contract = { path = "../contract" }

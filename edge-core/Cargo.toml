@@ -8,4 +8,5 @@ description = "Pure domain logic for the Vodoge edge agent"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
