@@ -61,6 +61,33 @@ pub trait Actions: Send + Sync {
         iccid: String,
         enable: bool,
     ) -> Result<(), PanelError>;
+    /// Sweep for visible networks. This takes the radio away for as long as the
+    /// scan runs, so the modem serves nothing while it is in progress.
+    fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError>;
+    /// Modems currently executing an operator-initiated command.
+    ///
+    /// Such a modem stops answering the poll loop, and a long command outlasts
+    /// the staleness window, so without this the panel calls a busy modem
+    /// offline.
+    fn busy_modems(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScannedOperatorBody {
+    pub numeric: String,
+    pub long_name: String,
+    pub short_name: String,
+    pub status: String,
+    pub access_technology: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScanResult {
+    pub imei: Option<String>,
+    pub elapsed_ms: u64,
+    pub operators: Vec<ScannedOperatorBody>,
 }
 
 /// One eUICC profile as the panel reports it.
@@ -223,6 +250,7 @@ pub fn router_with_uplink(
         .route("/api/report", post(modem_report))
         .route("/api/esim", post(list_profiles))
         .route("/api/esim/switch", post(switch_profile))
+        .route("/api/scan", post(scan_operators))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -252,12 +280,20 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
         "local"
     };
     let now = now_ms();
+    let busy = state
+        .actions
+        .as_ref()
+        .map(|actions| actions.busy_modems())
+        .unwrap_or_default();
     match state.inbox.list_modems() {
         Ok(modems) => Json(StatusBody {
             mode,
             modems: modems
                 .into_iter()
-                .map(|modem| ModemBody::observed(modem, now))
+                .map(|modem| {
+                    let is_busy = busy.iter().any(|imei| *imei == modem.imei);
+                    ModemBody::observed(modem, now, is_busy)
+                })
                 .collect(),
         })
         .into_response(),
@@ -307,6 +343,22 @@ async fn at_command(
         return json_error(StatusCode::BAD_REQUEST, "command is required");
     }
     match actions.at_command(body.imei, command) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// The scan runs for as long as the module needs to sweep every band, so this
+/// endpoint is deliberately slow rather than returning early with a partial
+/// list that would look like a complete one.
+async fn scan_operators(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local scan is not configured");
+    };
+    match actions.scan_operators(body.imei) {
         Ok(result) => Json(result).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
@@ -446,20 +498,26 @@ struct ModemBody {
 impl ModemBody {
     /// Report a modem that has gone quiet as offline rather than repeating the
     /// registration state it happened to have when it was last reachable.
-    fn observed(value: LocalModem, now: i64) -> Self {
+    fn observed(value: LocalModem, now: i64, busy: bool) -> Self {
         let stale = value
             .last_seen
             .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
             .unwrap_or(true);
+        // Busy wins over stale: a modem mid-scan has stopped answering the poll
+        // loop on purpose, and reporting that as offline sends the operator
+        // looking for a fault that does not exist.
+        let state = if busy {
+            "Busy".to_string()
+        } else if stale {
+            "Offline".to_string()
+        } else {
+            value.state
+        };
         Self {
             imei: value.imei,
             family: value.family,
             iccid: value.iccid,
-            state: if stale {
-                "Offline".to_string()
-            } else {
-                value.state
-            },
+            state,
             last_seen: value.last_seen,
         }
     }

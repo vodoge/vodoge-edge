@@ -34,7 +34,9 @@ use std::{
 
 pub use at::{at_port_for_qmi, AtError, AtExchange, AtPort, AT_CONTROL_INTERFACE};
 pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
-pub use report::{collect as collect_report, ModemReport, Registration, Signal};
+pub use report::{
+    collect as collect_report, parse_cops_scan, ModemReport, Registration, ScannedOperator, Signal,
+};
 pub use es10c::{Es10cError, Profile};
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;

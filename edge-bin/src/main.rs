@@ -33,7 +33,7 @@ mod linux {
     };
     use edge_panel::{
         serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
-        UsbResetResult,
+        ScanResult, ScannedOperatorBody, UsbResetResult,
     };
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
     use edge_uplink::dial::{DialError, Socket};
@@ -49,6 +49,10 @@ mod linux {
     /// Primary UICC slot. These modules expose one card slot, and the eUICC
     /// always sits in it.
     const ESIM_SLOT: u8 = 1;
+
+    /// A full band sweep on an EC20 routinely runs past a minute, and the
+    /// module answers nothing until it finishes.
+    const SCAN_TIMEOUT: Duration = Duration::from_secs(180);
 
     struct SharedStore(Mutex<Store>);
 
@@ -73,6 +77,12 @@ mod linux {
     struct Radio {
         lock: Arc<Mutex<()>>,
         by_imei: Arc<Mutex<BTreeMap<String, PathBuf>>>,
+        /// Device currently held by an operator-initiated command.
+        ///
+        /// A band scan keeps the radio for over a minute, which is longer than
+        /// the panel's staleness window, so without this the panel reports a
+        /// modem as offline while it is busy doing exactly what was asked.
+        busy: Arc<Mutex<Option<PathBuf>>>,
     }
 
     impl Radio {
@@ -80,6 +90,7 @@ mod linux {
             Self {
                 lock: Arc::new(Mutex::new(())),
                 by_imei: Arc::new(Mutex::new(BTreeMap::new())),
+                busy: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -88,6 +99,28 @@ mod linux {
                 .lock()
                 .expect("imei map")
                 .insert(imei.to_string(), path.to_path_buf());
+        }
+
+        /// IMEIs whose device is mid-command right now.
+        fn busy_imeis(&self) -> Vec<String> {
+            let Some(path) = self.busy.lock().expect("busy").clone() else {
+                return Vec::new();
+            };
+            self.by_imei
+                .lock()
+                .expect("imei map")
+                .iter()
+                .filter(|(_, known)| **known == path)
+                .map(|(imei, _)| imei.clone())
+                .collect()
+        }
+
+        /// Marks a device busy until the guard drops, including on a panic path.
+        fn hold(&self, path: &Path) -> BusyGuard {
+            *self.busy.lock().expect("busy") = Some(path.to_path_buf());
+            BusyGuard {
+                busy: self.busy.clone(),
+            }
         }
 
         fn path_for(&self, imei: Option<&str>) -> Result<PathBuf, SendError> {
@@ -109,8 +142,9 @@ mod linux {
             imei: Option<&str>,
             work: impl FnOnce(&mut edge_modem::AtPort) -> Result<T, SendError>,
         ) -> Result<T, SendError> {
-            let _busy = self.lock.lock().expect("radio");
+            let _lock = self.lock.lock().expect("radio");
             let qmi_path = self.path_for(imei)?;
+            let _busy = self.hold(&qmi_path);
             let at_path = edge_modem::at_port_for_qmi(&qmi_path).ok_or_else(|| {
                 SendError::new(
                     "at_port_not_found",
@@ -127,8 +161,9 @@ mod linux {
             imei: Option<&str>,
             work: impl FnOnce(&mut QmiClient<CdcWdmDevice>) -> Result<T, SendError>,
         ) -> Result<T, SendError> {
-            let _busy = self.lock.lock().expect("radio");
+            let _lock = self.lock.lock().expect("radio");
             let path = self.path_for(imei)?;
+            let _busy = self.hold(&path);
             let device = CdcWdmDevice::open(&path)
                 .map_err(|error| SendError::new("modem_open_failed", error.to_string()))?;
             let mut client = QmiClient::new(device);
@@ -136,6 +171,17 @@ mod linux {
                 .sync()
                 .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
             work(&mut client)
+        }
+    }
+
+    /// Clears the busy marker when the command finishes, however it finishes.
+    struct BusyGuard {
+        busy: Arc<Mutex<Option<PathBuf>>>,
+    }
+
+    impl Drop for BusyGuard {
+        fn drop(&mut self) {
+            *self.busy.lock().expect("busy") = None;
         }
     }
 
@@ -188,6 +234,40 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn busy_modems(&self) -> Vec<String> {
+            self.radio.busy_imeis()
+        }
+
+        fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
+            let wanted = imei.clone();
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    let exchange = port
+                        .command_with_timeout("AT+COPS=?", SCAN_TIMEOUT)
+                        .map_err(|error| SendError::new("scan_failed", error.to_string()))?;
+                    if !exchange.succeeded() {
+                        return Err(SendError::new("scan_rejected", exchange.terminator.clone()));
+                    }
+                    Ok(ScanResult {
+                        imei: wanted,
+                        elapsed_ms: exchange.elapsed.as_millis() as u64,
+                        operators: edge_modem::parse_cops_scan(&exchange.lines)
+                            .into_iter()
+                            .map(|found| ScannedOperatorBody {
+                                status: found.status_label().to_string(),
+                                numeric: found.numeric,
+                                long_name: found.long_name,
+                                short_name: found.short_name,
+                                access_technology: found
+                                    .access_technology
+                                    .map(|value| value.to_string()),
+                            })
+                            .collect(),
+                    })
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
 
@@ -269,11 +349,12 @@ mod linux {
         fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError> {
             // Held across the reset so a poll cannot open the character device
             // while the module is re-enumerating.
-            let _busy = self.radio.lock.lock().expect("radio");
+            let _lock = self.radio.lock.lock().expect("radio");
             let qmi_path = self
                 .radio
                 .path_for(imei.as_deref())
                 .map_err(|error| PanelError::Action(error.to_string()))?;
+            let _busy = self.radio.hold(&qmi_path);
             let reset = edge_modem::reset_for_qmi(&qmi_path)
                 .map_err(|error| PanelError::Action(error.to_string()))?;
             Ok(UsbResetResult {

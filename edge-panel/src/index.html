@@ -59,6 +59,14 @@
         <tbody id="modems"><tr><td class="empty" colspan="5">加载中</td></tr></tbody>
       </table>
     </section>
+    <section id="scan-card" hidden>
+      <h2>可见网络 <span class="note" id="scan-target"></span></h2>
+      <table>
+        <thead><tr><th>运营商</th><th>MCC/MNC</th><th>制式</th><th>状态</th></tr></thead>
+        <tbody id="scan-rows"></tbody>
+      </table>
+      <p class="hint danger">扫描期间模组会停止服务，耗时可达两分钟。</p>
+    </section>
     <section id="esim-card" hidden>
       <h2>eSIM Profile <span class="note" id="esim-target"></span></h2>
       <table>
@@ -267,6 +275,55 @@
       }
     }
 
+    async function scanOperators(imei, button) {
+      if (!confirm("对 " + imei + " 全频段扫网？\n模组会停止服务，最长两分钟。")) return;
+      const card = document.getElementById("scan-card");
+      const rows = document.getElementById("scan-rows");
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "扫描中…";
+      logLine("> 扫网 " + imei + "（可能耗时较久）", "sent");
+      try {
+        const response = await fetch("/api/scan", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          logLine("  扫网失败: " + (result.error || response.status), "fail");
+          return;
+        }
+        document.getElementById("scan-target").textContent =
+          imei + " · " + Math.round(result.elapsed_ms / 1000) + "s";
+        rows.replaceChildren();
+        const found = result.operators || [];
+        if (!found.length) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 4; td.className = "empty"; td.textContent = "没有扫到网络";
+          tr.append(td); rows.append(tr);
+        }
+        for (const op of found) {
+          const tr = document.createElement("tr");
+          const state = document.createElement("td");
+          state.textContent = { current: "当前", available: "可用", forbidden: "禁止" }[op.status] || op.status;
+          state.className = op.status === "current" ? "sent" : op.status === "forbidden" ? "fail" : "meta";
+          tr.append(cell(op.long_name || op.short_name), cell(op.numeric), cell(op.access_technology || "—"));
+          tr.append(state);
+          rows.append(tr);
+        }
+        logLine("  扫到 " + found.length + " 个网络", "meta");
+        card.hidden = false;
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (error) {
+        logLine("  扫网失败: " + String(error), "fail");
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+
     async function listProfiles(imei, button) {
       const card = document.getElementById("esim-card");
       const rows = document.getElementById("esim-rows");
@@ -384,6 +441,12 @@
         const action = document.createElement("td");
         const group = document.createElement("div");
         group.className = "row-actions";
+        const scan = document.createElement("button");
+        scan.type = "button";
+        scan.className = "ghost";
+        scan.textContent = "扫网";
+        scan.title = "AT+COPS=? 全频段扫描。期间模组停止服务，最长两分钟。";
+        scan.addEventListener("click", () => scanOperators(modem.imei, scan));
         const esim = document.createElement("button");
         esim.type = "button";
         esim.className = "ghost";
@@ -402,7 +465,7 @@
         reset.textContent = "USB 复位";
         reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
         reset.addEventListener("click", () => usbReset(modem.imei, reset));
-        group.append(probe, esim, reset);
+        group.append(probe, esim, scan, reset);
         action.append(group);
         tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
         tr.append(action);

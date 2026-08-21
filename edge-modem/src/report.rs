@@ -373,3 +373,156 @@ mod tests {
         assert!(report.refused.is_empty());
     }
 }
+
+/// One network a `AT+COPS=?` scan found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedOperator {
+    /// 0 unknown, 1 available, 2 current, 3 forbidden.
+    pub status: u8,
+    pub long_name: String,
+    pub short_name: String,
+    /// MCC+MNC as the module reports it, e.g. `46001`.
+    pub numeric: String,
+    pub access_technology: Option<&'static str>,
+}
+
+impl ScannedOperator {
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            1 => "available",
+            2 => "current",
+            3 => "forbidden",
+            _ => "unknown",
+        }
+    }
+}
+
+/// Parse `+COPS: (2,"CHN-UNICOM","UNICOM","46001",7),(1,...),,(0-4),(0-2)`.
+///
+/// The trailing `(0-4),(0-2)` groups describe the modes the module supports,
+/// not networks, and they are separated from the list by an empty field. Taking
+/// every parenthesised group would report them as two nameless operators.
+pub fn parse_cops_scan(lines: &[String]) -> Vec<ScannedOperator> {
+    let Some(value) = field_after(lines, "+COPS:") else {
+        return Vec::new();
+    };
+    let mut operators = Vec::new();
+    for group in parenthesised_groups(&value) {
+        let fields = split_fields(&group);
+        // A network entry carries status, long, short and numeric names. The
+        // capability groups are a single range like `0-4`.
+        if fields.len() < 4 {
+            continue;
+        }
+        let Ok(status) = fields[0].parse::<u8>() else {
+            continue;
+        };
+        let numeric = fields[3].clone();
+        if numeric.is_empty() || !numeric.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        operators.push(ScannedOperator {
+            status,
+            long_name: fields[1].clone(),
+            short_name: fields[2].clone(),
+            numeric,
+            access_technology: fields
+                .get(4)
+                .and_then(|value| value.parse::<u8>().ok())
+                .map(access_technology),
+        });
+    }
+    operators
+}
+
+/// Split on top-level parentheses, ignoring any inside quoted names.
+fn parenthesised_groups(value: &str) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut current: Option<String> = None;
+    let mut quoted = false;
+    for character in value.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                if let Some(buffer) = current.as_mut() {
+                    buffer.push(character);
+                }
+            }
+            '(' if !quoted => current = Some(String::new()),
+            ')' if !quoted => {
+                if let Some(buffer) = current.take() {
+                    groups.push(buffer);
+                }
+            }
+            _ => {
+                if let Some(buffer) = current.as_mut() {
+                    buffer.push(character);
+                }
+            }
+        }
+    }
+    groups
+}
+
+/// Split a group on commas that are not inside a quoted name.
+fn split_fields(group: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut buffer = String::new();
+    let mut quoted = false;
+    for character in group.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut buffer)),
+            _ => buffer.push(character),
+        }
+    }
+    fields.push(buffer);
+    fields.into_iter().map(|field| field.trim().to_string()).collect()
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn scan_reads_each_network() {
+        let found = parse_cops_scan(&lines(&[
+            "+COPS: (2,\"CHN-UNICOM\",\"UNICOM\",\"46001\",7),(1,\"CHINA MOBILE\",\"CMCC\",\"46000\",0),,(0-4),(0-2)",
+        ]));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].numeric, "46001");
+        assert_eq!(found[0].status_label(), "current");
+        assert_eq!(found[0].access_technology, Some("LTE"));
+        assert_eq!(found[1].long_name, "CHINA MOBILE");
+        assert_eq!(found[1].access_technology, Some("GSM"));
+    }
+
+    /// The trailing `(0-4),(0-2)` groups are supported modes, not networks.
+    #[test]
+    fn scan_ignores_the_capability_groups() {
+        let found = parse_cops_scan(&lines(&[
+            "+COPS: (1,\"A\",\"A\",\"46001\",7),,(0-4),(0-2)",
+        ]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].numeric, "46001");
+    }
+
+    /// A comma inside an operator name must not split the entry.
+    #[test]
+    fn scan_keeps_a_quoted_comma_together() {
+        let found = parse_cops_scan(&lines(&[
+            "+COPS: (1,\"Telecom, Ltd\",\"TL\",\"46011\",7)",
+        ]));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].long_name, "Telecom, Ltd");
+    }
+
+    #[test]
+    fn scan_of_an_empty_response_is_empty() {
+        assert!(parse_cops_scan(&lines(&["+COPS: "])).is_empty());
+    }
+}

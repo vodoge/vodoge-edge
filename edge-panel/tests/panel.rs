@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use edge_panel::{
     router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ProfileBody,
-    ProfilesResult, ReportResult, UsbResetResult,
+    ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody, UsbResetResult,
 };
 use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
@@ -161,6 +161,20 @@ impl Actions for RecordingActions {
         self.switched.lock().expect("switched").push((iccid, enable));
         Ok(())
     }
+
+    fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
+        Ok(ScanResult {
+            imei,
+            elapsed_ms: 42_000,
+            operators: vec![ScannedOperatorBody {
+                numeric: "46001".into(),
+                long_name: "CHN-UNICOM".into(),
+                short_name: "UNICOM".into(),
+                status: "current".into(),
+                access_technology: Some("LTE".into()),
+            }],
+        })
+    }
 }
 
 #[tokio::test]
@@ -251,6 +265,14 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
 
         fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> {
             Ok(())
+        }
+
+        fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
+            Ok(ScanResult {
+                imei,
+                elapsed_ms: 0,
+                operators: Vec::new(),
+            })
         }
     }
 
@@ -380,4 +402,105 @@ async fn panel_refuses_a_switch_without_an_iccid() {
         .unwrap();
     assert_eq!(response.status(), 400);
     assert!(actions.switched.lock().expect("switched").is_empty());
+}
+
+#[tokio::test]
+async fn panel_scans_for_operators() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/scan")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"imei":"867018069514820"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["operators"][0]["numeric"], "46001");
+    assert_eq!(body["operators"][0]["status"], "current");
+}
+
+/// A modem mid-scan stops answering the poll loop for longer than the
+/// staleness window. Reporting that as offline sends the operator looking for
+/// a fault that is not there.
+#[tokio::test]
+async fn panel_reports_a_busy_modem_as_busy_not_offline() {
+    struct Busy;
+    impl Actions for Busy {
+        fn send_sms(&self, _: String, _: String, _: Option<String>) -> Result<(), PanelError> {
+            Ok(())
+        }
+        fn restart_modem(&self, _: String) -> Result<(), PanelError> {
+            Ok(())
+        }
+        fn at_command(&self, _: Option<String>, command: String) -> Result<AtResult, PanelError> {
+            Ok(AtResult {
+                port: "/dev/ttyUSB2".into(),
+                command,
+                lines: Vec::new(),
+                terminator: "OK".into(),
+                ok: true,
+                elapsed_ms: 1,
+            })
+        }
+        fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> {
+            Ok(UsbResetResult {
+                device: "2-4.1".into(),
+                node: "/dev/bus/usb/002/052".into(),
+            })
+        }
+        fn modem_report(&self, _: Option<String>) -> Result<ReportResult, PanelError> {
+            Ok(ReportResult::default())
+        }
+        fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError> {
+            Ok(ProfilesResult {
+                imei,
+                profiles: Vec::new(),
+            })
+        }
+        fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> {
+            Ok(())
+        }
+        fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
+            Ok(ScanResult {
+                imei,
+                elapsed_ms: 0,
+                operators: Vec::new(),
+            })
+        }
+        fn busy_modems(&self) -> Vec<String> {
+            vec!["867018069509705".into()]
+        }
+    }
+
+    // last_seen far in the past, so without the busy marker this is "Offline".
+    let inbox = Arc::new(MemoryInbox {
+        messages: Vec::new(),
+        modems: vec![LocalModem {
+            imei: "867018069509705".into(),
+            family: "EC20".into(),
+            iccid: None,
+            state: "Registered".into(),
+            last_seen: Some(1_700_000_000_000),
+        }],
+    });
+    let app = router_with_actions(inbox, Some(Arc::new(Busy)));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["modems"][0]["state"], "Busy");
 }

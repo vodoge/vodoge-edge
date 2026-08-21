@@ -120,6 +120,23 @@ impl AtPort {
         &self.path
     }
 
+    /// Run one command with a timeout that overrides the port default.
+    ///
+    /// A network scan keeps the module busy far longer than any query: the
+    /// radio has to sweep every band. Applying the ordinary budget to it
+    /// reports a timeout for a command that was working correctly.
+    pub fn command_with_timeout(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<AtExchange, AtError> {
+        let previous = self.timeout;
+        self.timeout = timeout;
+        let result = self.command(command);
+        self.timeout = previous;
+        result
+    }
+
     /// Run one command and read until a terminal result code.
     ///
     /// A rejection is returned as a successful exchange carrying the error
