@@ -35,6 +35,14 @@
     .meta { color: var(--muted); }
     .hint { color: var(--muted); font-size: .85rem; padding: 0 1rem 1rem; }
     .danger { color: var(--warn); }
+    .row-actions { display: flex; gap: .35rem; }
+    .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .1rem .75rem; padding: .9rem 1rem; }
+    .fact { display: flex; justify-content: space-between; gap: .75rem; padding: .45rem 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
+    .fact dt { color: var(--muted); }
+    .fact dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; word-break: break-all; }
+    .fact dd.absent { color: var(--muted); font-family: inherit; }
+    .fact dd.good { color: var(--accent); }
+    .fact dd.bad { color: var(--bad); }
   </style>
 </head>
 <body>
@@ -50,6 +58,11 @@
         <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th><th>操作</th></tr></thead>
         <tbody id="modems"><tr><td class="empty" colspan="5">加载中</td></tr></tbody>
       </table>
+    </section>
+    <section id="detail-card" hidden>
+      <h2>模组体检 <span class="note" id="detail-target"></span></h2>
+      <div class="facts" id="detail-facts"></div>
+      <p class="hint" id="detail-refused"></p>
     </section>
     <section>
       <h2>AT 控制台 <span class="note danger">直连模组，命令原样下发</span></h2>
@@ -173,6 +186,79 @@
       logLine("  " + result.port + " · " + result.elapsed_ms + "ms", "meta");
     }
 
+    const REG_LABEL = {
+      home: "已注册(本网)", roaming: "已注册(漫游)", searching: "搜网中",
+      denied: "被拒绝", not_registered: "未注册", unknown: "未知",
+    };
+
+    function fact(list, label, value, tone) {
+      const row = document.createElement("div");
+      row.className = "fact";
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      if (value === null || value === undefined || value === "") {
+        dd.textContent = "—";
+        dd.className = "absent";
+      } else {
+        dd.textContent = value;
+        if (tone) dd.className = tone;
+      }
+      row.append(dt, dd);
+      list.append(row);
+    }
+
+    async function runReport(imei, button) {
+      const card = document.getElementById("detail-card");
+      const facts = document.getElementById("detail-facts");
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "读取中…";
+      try {
+        const response = await fetch("/api/report", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei }),
+        });
+        const r = await response.json();
+        if (!response.ok) {
+          logLine("体检失败: " + (r.error || response.status), "fail");
+          return;
+        }
+        document.getElementById("detail-target").textContent = imei + " · " + r.port;
+        facts.replaceChildren();
+        const dbm = r.signal_dbm;
+        fact(facts, "信号", dbm === null ? null : dbm + " dBm (CSQ " + r.signal_index + ")",
+             dbm === null ? null : (dbm > -85 ? "good" : dbm > -100 ? null : "bad"));
+        // CS and PS are shown separately on purpose: a module can be attached
+        // for data and still have no circuit-switched domain, which is exactly
+        // the state in which SMS silently fails.
+        for (const [key, name] of [["cs_registration", "注册 CS"], ["ps_registration", "注册 PS"]]) {
+          const state = r[key];
+          fact(facts, name, state ? (REG_LABEL[state] || state) : null,
+               state === "home" || state === "roaming" ? "good" : state ? "bad" : null);
+        }
+        fact(facts, "运营商", r.operator);
+        fact(facts, "接入制式", r.access_technology);
+        fact(facts, "ICCID", r.iccid);
+        fact(facts, "IMSI", r.imsi);
+        fact(facts, "本机号", r.msisdn);
+        fact(facts, "短信中心", r.sms_centre, r.sms_centre ? "good" : "bad");
+        fact(facts, "固件", r.firmware);
+        const refused = document.getElementById("detail-refused");
+        refused.textContent = (r.refused || []).length
+          ? "模组拒绝了: " + r.refused.join("、")
+          : "";
+        card.hidden = false;
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (error) {
+        logLine("体检失败: " + String(error), "fail");
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+
     async function usbReset(imei, button) {
       button.disabled = true;
       button.textContent = "复位中…";
@@ -208,13 +294,22 @@
       fill("modems", modems.map((modem) => {
         const tr = document.createElement("tr");
         const action = document.createElement("td");
+        const group = document.createElement("div");
+        group.className = "row-actions";
+        const probe = document.createElement("button");
+        probe.type = "button";
+        probe.className = "ghost";
+        probe.textContent = "体检";
+        probe.title = "下发一批只读 AT 命令，取信号、注册、运营商、卡标识。";
+        probe.addEventListener("click", () => runReport(modem.imei, probe));
         const reset = document.createElement("button");
         reset.type = "button";
         reset.className = "ghost";
         reset.textContent = "USB 复位";
         reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
         reset.addEventListener("click", () => usbReset(modem.imei, reset));
-        action.append(reset);
+        group.append(probe, reset);
+        action.append(group);
         tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
         tr.append(action);
         return tr;

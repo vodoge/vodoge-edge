@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use edge_panel::{
-    router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, UsbResetResult,
+    router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ReportResult,
+    UsbResetResult,
 };
 use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
@@ -122,6 +123,16 @@ impl Actions for RecordingActions {
             node: "/dev/bus/usb/002/052".into(),
         })
     }
+
+    fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError> {
+        Ok(ReportResult {
+            imei,
+            port: "/dev/ttyUSB2".into(),
+            signal_dbm: Some(-65),
+            operator: Some("CHN-UNICOM".into()),
+            ..ReportResult::default()
+        })
+    }
 }
 
 #[tokio::test]
@@ -198,6 +209,10 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
                 node: "/dev/bus/usb/002/052".into(),
             })
         }
+
+        fn modem_report(&self, _: Option<String>) -> Result<ReportResult, PanelError> {
+            Ok(ReportResult::default())
+        }
     }
 
     let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(Arc::new(Rejecting)));
@@ -236,4 +251,27 @@ async fn panel_rejects_an_empty_at_command() {
         .unwrap();
     assert_eq!(response.status(), 400);
     assert!(actions.at.lock().expect("at").is_empty());
+}
+
+#[tokio::test]
+async fn panel_reports_modem_diagnostics() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/report")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"imei":"867018069514820"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["imei"], "867018069514820");
+    assert_eq!(body["signal_dbm"], -65);
+    assert_eq!(body["operator"], "CHN-UNICOM");
 }

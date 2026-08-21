@@ -50,6 +50,29 @@ pub trait Actions: Send + Sync {
     /// QMI stack has desynced — allocating a client to send the restart is
     /// itself a QMI request. This is the path that works when that one cannot.
     fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError>;
+    /// Read-only diagnostic snapshot of one modem.
+    fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError>;
+}
+
+/// Structured answers to the diagnostic batch.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReportResult {
+    pub imei: Option<String>,
+    pub port: String,
+    pub signal_dbm: Option<i16>,
+    pub signal_index: Option<u8>,
+    pub cs_registration: Option<String>,
+    pub ps_registration: Option<String>,
+    pub operator: Option<String>,
+    pub access_technology: Option<String>,
+    pub imsi: Option<String>,
+    pub iccid: Option<String>,
+    pub msisdn: Option<String>,
+    pub firmware: Option<String>,
+    pub sms_centre: Option<String>,
+    /// Commands the module refused, so an empty field can be told apart from a
+    /// field the module declined to report.
+    pub refused: Vec<String>,
 }
 
 /// Where a USB reset landed.
@@ -169,6 +192,7 @@ pub fn router_with_uplink(
         .route("/api/restart", post(restart_modem))
         .route("/api/at", post(at_command))
         .route("/api/usb-reset", post(usb_reset))
+        .route("/api/report", post(modem_report))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -253,6 +277,19 @@ async fn at_command(
         return json_error(StatusCode::BAD_REQUEST, "command is required");
     }
     match actions.at_command(body.imei, command) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn modem_report(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local diagnostics are not configured");
+    };
+    match actions.modem_report(body.imei) {
         Ok(result) => Json(result).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }

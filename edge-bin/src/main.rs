@@ -31,7 +31,7 @@ mod linux {
     use edge_modem::{
         collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
     };
-    use edge_panel::{serve, Actions, AtResult, Inbox, PanelError, UsbResetResult};
+    use edge_panel::{serve, Actions, AtResult, Inbox, PanelError, ReportResult, UsbResetResult};
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
     use edge_uplink::dial::{DialError, Socket};
     use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
@@ -181,6 +181,39 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError> {
+            let wanted = imei.clone();
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    let path = port.path().display().to_string();
+                    let report = edge_modem::collect_report(port)
+                        .map_err(|error| SendError::new("report_failed", error.to_string()))?;
+                    Ok(ReportResult {
+                        imei: wanted,
+                        port: path,
+                        signal_dbm: report.signal.and_then(|signal| signal.dbm),
+                        signal_index: report.signal.map(|signal| signal.rssi_index),
+                        cs_registration: report
+                            .cs_registration
+                            .map(|state| state.as_str().to_string()),
+                        ps_registration: report
+                            .ps_registration
+                            .map(|state| state.as_str().to_string()),
+                        operator: report.operator,
+                        access_technology: report
+                            .access_technology
+                            .map(|value| value.to_string()),
+                        imsi: report.imsi,
+                        iccid: report.iccid,
+                        msisdn: report.msisdn,
+                        firmware: report.firmware,
+                        sms_centre: report.sms_centre,
+                        refused: report.refused,
+                    })
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
 

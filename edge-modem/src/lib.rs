@@ -16,6 +16,7 @@ mod nas;
 mod pdu;
 mod port;
 mod qmi_port;
+mod report;
 mod restore;
 mod result;
 mod send;
@@ -32,6 +33,7 @@ use std::{
 
 pub use at::{at_port_for_qmi, AtError, AtExchange, AtPort, AT_CONTROL_INTERFACE};
 pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
+pub use report::{collect as collect_report, ModemReport, Registration, Signal};
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
 pub use channels::LogicalChannels;
