@@ -52,6 +52,34 @@ pub trait Actions: Send + Sync {
     fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError>;
     /// Read-only diagnostic snapshot of one modem.
     fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError>;
+    /// List the profiles held by a modem's eUICC.
+    fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError>;
+    /// Enable or disable one eUICC profile by ICCID.
+    fn switch_profile(
+        &self,
+        imei: Option<String>,
+        iccid: String,
+        enable: bool,
+    ) -> Result<(), PanelError>;
+}
+
+/// One eUICC profile as the panel reports it.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfileBody {
+    pub iccid: String,
+    pub label: String,
+    pub enabled: bool,
+    pub provider: Option<String>,
+    pub name: Option<String>,
+    pub nickname: Option<String>,
+    pub class: Option<u8>,
+    pub isdp_aid: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProfilesResult {
+    pub imei: Option<String>,
+    pub profiles: Vec<ProfileBody>,
 }
 
 /// Structured answers to the diagnostic batch.
@@ -193,6 +221,8 @@ pub fn router_with_uplink(
         .route("/api/at", post(at_command))
         .route("/api/usb-reset", post(usb_reset))
         .route("/api/report", post(modem_report))
+        .route("/api/esim", post(list_profiles))
+        .route("/api/esim/switch", post(switch_profile))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -282,6 +312,38 @@ async fn at_command(
     }
 }
 
+async fn list_profiles(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local eSIM access is not configured");
+    };
+    match actions.list_profiles(body.imei) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// Switching takes the modem off its current network while the card refreshes,
+/// so the caller must name the profile explicitly rather than toggling
+/// whatever happens to be active.
+async fn switch_profile(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<SwitchBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local eSIM access is not configured");
+    };
+    if body.iccid.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "iccid is required");
+    }
+    match actions.switch_profile(body.imei, body.iccid, body.enable) {
+        Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
 async fn modem_report(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<ResetBody>,
@@ -330,6 +392,13 @@ async fn restart_modem(
 struct SendBody {
     to: String,
     body: String,
+    imei: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SwitchBody {
+    iccid: String,
+    enable: bool,
     imei: Option<String>,
 }
 

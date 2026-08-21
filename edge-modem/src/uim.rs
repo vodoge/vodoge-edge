@@ -15,7 +15,12 @@ const APDU_COMMAND_TLV: u8 = 0x02;
 const CHANNEL_TLV: u8 = 0x10;
 const AID_TLV: u8 = 0x10;
 const APDU_RESPONSE_TLV: u8 = 0x10;
-const TERMINATE_APPLICATION_TLV: u8 = 0x13;
+/// `LOGICAL_CHANNEL` (0x003f) carries the AID at 0x10 and the channel to close
+/// at 0x11, unlike `OPEN_LOGICAL_CHANNEL` (0x0042) whose *response* reports the
+/// new channel at 0x10. Reusing 0x10 to close makes the module read a channel
+/// number as an AID and reject the whole message as malformed.
+const CLOSE_CHANNEL_TLV: u8 = 0x11;
+const TERMINATE_APPLICATION_TLV: u8 = 0x12;
 const SESSION_TLV: u8 = 0x01;
 const FILE_TLV: u8 = 0x02;
 const READ_INFO_TLV: u8 = 0x03;
@@ -101,7 +106,7 @@ pub fn close_logical_channel_request(
 ) -> Result<QmiRequest, UimError> {
     ensure_uim(assignment)?;
     let slot_tlv = Tlv::new(SLOT_TLV, vec![slot])?;
-    let channel_tlv = Tlv::new(CHANNEL_TLV, vec![channel])?;
+    let channel_tlv = Tlv::new(CLOSE_CHANNEL_TLV, vec![channel])?;
     let terminate_tlv = Tlv::new(TERMINATE_APPLICATION_TLV, vec![0x01])?;
     Ok(QmiRequest::from_tlvs(
         ServiceId::UIM,

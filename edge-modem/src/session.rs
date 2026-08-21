@@ -231,6 +231,63 @@ impl<T: QmiTransport> QmiClient<T> {
         Ok(uim::decode_iccid(&bytes)?)
     }
 
+    /// List every profile the eUICC holds.
+    pub fn list_profiles(&mut self, slot: u8) -> Result<Vec<crate::Profile>, SessionError> {
+        let bytes = self.isdr_exchange(slot, &crate::es10c::get_profiles_apdu())?;
+        Ok(crate::es10c::parse_profiles(&bytes)?)
+    }
+
+    /// Enable or disable one profile by ICCID.
+    ///
+    /// `refresh` is requested so the modem re-reads the card immediately.
+    /// Without it the switch only takes effect after a restart, which reads to
+    /// an operator as if the command did nothing.
+    pub fn set_profile(
+        &mut self,
+        slot: u8,
+        iccid: &str,
+        enable: bool,
+    ) -> Result<(), SessionError> {
+        let apdu = if enable {
+            crate::es10c::enable_profile_apdu(iccid, true)?
+        } else {
+            crate::es10c::disable_profile_apdu(iccid, true)?
+        };
+        let bytes = self.isdr_exchange(slot, &apdu)?;
+        Ok(crate::es10c::parse_profile_result(&bytes, enable)?)
+    }
+
+    /// Open the ISD-R channel, run one APDU including any GET RESPONSE, and
+    /// close the channel even when the exchange failed.
+    ///
+    /// Leaking a logical channel is not harmless: an eUICC offers only a few,
+    /// and once they are gone every later profile operation fails to open one.
+    fn isdr_exchange(&mut self, slot: u8, apdu: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let channel = self
+            .open_logical_channel(slot, uim::ISD_R_AID)
+            .map_err(|error| SessionError::transport(format!("open ISD-R channel: {error}")))?;
+        let result = (|| {
+            let mut rapdu = self
+                .send_apdu(slot, channel, apdu)
+                .map_err(|error| SessionError::transport(format!("ES10c command: {error}")))?;
+            if let Some(get_response) = rapdu.get_response_apdu() {
+                rapdu = self
+                    .send_apdu(slot, channel, &get_response)
+                    .map_err(|error| SessionError::transport(format!("GET RESPONSE: {error}")))?;
+            }
+            Ok(rapdu.data.clone())
+        })();
+        // A failed close is worth reporting — an eUICC offers only a few
+        // logical channels and a leaked one makes every later profile
+        // operation fail to open — but it must not discard an exchange that
+        // already succeeded. Throwing away the profile list because cleanup
+        // failed leaves the operator with an error and no data.
+        if let Err(error) = self.close_logical_channel(slot, channel) {
+            eprintln!("close ISD-R channel {channel} on slot {slot}: {error}");
+        }
+        result
+    }
+
     pub fn read_eid(&mut self, slot: u8) -> Result<String, SessionError> {
         let channel = self.open_logical_channel(slot, uim::ISD_R_AID)?;
         let result = (|| {
@@ -389,6 +446,7 @@ pub enum SessionError {
     Nas(NasError),
     Wms(WmsError),
     Uim(UimError),
+    Es10c(crate::Es10cError),
     UnexpectedSyncResponse {
         service: ServiceId,
         client: ClientId,
@@ -416,6 +474,7 @@ impl fmt::Display for SessionError {
             Self::Nas(error) => error.fmt(formatter),
             Self::Wms(error) => error.fmt(formatter),
             Self::Uim(error) => error.fmt(formatter),
+            Self::Es10c(error) => error.fmt(formatter),
             Self::UnexpectedSyncResponse {
                 service,
                 client,
@@ -441,6 +500,7 @@ impl Error for SessionError {
             Self::Nas(error) => Some(error),
             Self::Wms(error) => Some(error),
             Self::Uim(error) => Some(error),
+            Self::Es10c(error) => Some(error),
             _ => None,
         }
     }
@@ -503,5 +563,11 @@ impl From<WmsError> for SessionError {
 impl From<UimError> for SessionError {
     fn from(value: UimError) -> Self {
         Self::Uim(value)
+    }
+}
+
+impl From<crate::Es10cError> for SessionError {
+    fn from(value: crate::Es10cError) -> Self {
+        Self::Es10c(value)
     }
 }

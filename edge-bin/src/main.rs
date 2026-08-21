@@ -31,7 +31,10 @@ mod linux {
     use edge_modem::{
         collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
     };
-    use edge_panel::{serve, Actions, AtResult, Inbox, PanelError, ReportResult, UsbResetResult};
+    use edge_panel::{
+        serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
+        UsbResetResult,
+    };
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
     use edge_uplink::dial::{DialError, Socket};
     use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
@@ -42,6 +45,10 @@ mod linux {
     use vodoge_contract::{Envelope, MessageKind, PROTOCOL_VERSION};
 
     const DEVICE_ID: &str = "b0000000-0000-4000-8000-00000000000b";
+
+    /// Primary UICC slot. These modules expose one card slot, and the eUICC
+    /// always sits in it.
+    const ESIM_SLOT: u8 = 1;
 
     struct SharedStore(Mutex<Store>);
 
@@ -181,6 +188,48 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError> {
+            let wanted = imei.clone();
+            self.radio
+                .with_client(imei.as_deref(), |client| {
+                    let profiles = client
+                        .list_profiles(ESIM_SLOT)
+                        .map_err(|error| SendError::new("esim_list_failed", error.to_string()))?;
+                    Ok(ProfilesResult {
+                        imei: wanted,
+                        profiles: profiles
+                            .into_iter()
+                            .map(|profile| ProfileBody {
+                                label: profile.label(),
+                                iccid: profile.iccid,
+                                enabled: profile.enabled,
+                                provider: profile.provider,
+                                name: profile.name,
+                                nickname: profile.nickname,
+                                class: profile.class,
+                                isdp_aid: profile.isdp_aid,
+                            })
+                            .collect(),
+                    })
+                })
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn switch_profile(
+            &self,
+            imei: Option<String>,
+            iccid: String,
+            enable: bool,
+        ) -> Result<(), PanelError> {
+            self.radio
+                .with_client(imei.as_deref(), |client| {
+                    client
+                        .set_profile(ESIM_SLOT, &iccid, enable)
+                        .map_err(|error| SendError::new("esim_switch_failed", error.to_string()))
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
 

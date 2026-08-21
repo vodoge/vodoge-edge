@@ -59,6 +59,14 @@
         <tbody id="modems"><tr><td class="empty" colspan="5">加载中</td></tr></tbody>
       </table>
     </section>
+    <section id="esim-card" hidden>
+      <h2>eSIM Profile <span class="note" id="esim-target"></span></h2>
+      <table>
+        <thead><tr><th>名称</th><th>ICCID</th><th>运营商</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="esim-rows"></tbody>
+      </table>
+      <p class="hint danger">切换会让模组短暂脱网并触发卡片 REFRESH。</p>
+    </section>
     <section id="detail-card" hidden>
       <h2>模组体检 <span class="note" id="detail-target"></span></h2>
       <div class="facts" id="detail-facts"></div>
@@ -259,6 +267,86 @@
       }
     }
 
+    async function listProfiles(imei, button) {
+      const card = document.getElementById("esim-card");
+      const rows = document.getElementById("esim-rows");
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "读取中…";
+      try {
+        const response = await fetch("/api/esim", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          logLine("eSIM 读取失败: " + (result.error || response.status), "fail");
+          return;
+        }
+        document.getElementById("esim-target").textContent = imei;
+        rows.replaceChildren();
+        const profiles = result.profiles || [];
+        if (!profiles.length) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 5; td.className = "empty"; td.textContent = "卡上没有 profile";
+          tr.append(td); rows.append(tr);
+        }
+        for (const profile of profiles) {
+          const tr = document.createElement("tr");
+          const state = document.createElement("td");
+          state.textContent = profile.enabled ? "已启用" : "已停用";
+          state.className = profile.enabled ? "sent" : "meta";
+          const action = document.createElement("td");
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "ghost";
+          toggle.textContent = profile.enabled ? "停用" : "启用";
+          toggle.addEventListener("click", () =>
+            switchProfile(imei, profile.iccid, !profile.enabled, toggle));
+          action.append(toggle);
+          tr.append(cell(profile.label), cell(profile.iccid), cell(profile.provider || "—"));
+          tr.append(state, action);
+          rows.append(tr);
+        }
+        card.hidden = false;
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (error) {
+        logLine("eSIM 读取失败: " + String(error), "fail");
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+
+    async function switchProfile(imei, iccid, enable, button) {
+      const verb = enable ? "启用" : "停用";
+      if (!confirm(verb + " profile " + iccid + "？\n模组会短暂脱网。")) return;
+      button.disabled = true;
+      button.textContent = verb + "中…";
+      logLine("> eSIM " + verb + " " + iccid, "sent");
+      try {
+        const response = await fetch("/api/esim/switch", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei, iccid, enable }),
+        });
+        const result = await response.json();
+        logLine(response.ok ? "  完成" : "  " + (result.error || response.status),
+                response.ok ? "meta" : "fail");
+      } catch (error) {
+        logLine("  " + String(error), "fail");
+      }
+      // The card refreshes and the module re-registers; give it time before
+      // showing a list that would otherwise still say the old thing.
+      setTimeout(() => {
+        const trigger = document.getElementById("esim-card");
+        if (!trigger.hidden) listProfiles(imei, button);
+        load().catch(() => {});
+      }, 8000);
+    }
+
     async function usbReset(imei, button) {
       button.disabled = true;
       button.textContent = "复位中…";
@@ -296,6 +384,12 @@
         const action = document.createElement("td");
         const group = document.createElement("div");
         group.className = "row-actions";
+        const esim = document.createElement("button");
+        esim.type = "button";
+        esim.className = "ghost";
+        esim.textContent = "eSIM";
+        esim.title = "读取 eUICC 上的 profile 列表。";
+        esim.addEventListener("click", () => listProfiles(modem.imei, esim));
         const probe = document.createElement("button");
         probe.type = "button";
         probe.className = "ghost";
@@ -308,7 +402,7 @@
         reset.textContent = "USB 复位";
         reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
         reset.addEventListener("click", () => usbReset(modem.imei, reset));
-        group.append(probe, reset);
+        group.append(probe, esim, reset);
         action.append(group);
         tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
         tr.append(action);

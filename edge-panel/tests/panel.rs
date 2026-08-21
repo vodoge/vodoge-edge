@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use edge_panel::{
-    router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ReportResult,
-    UsbResetResult,
+    router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ProfileBody,
+    ProfilesResult, ReportResult, UsbResetResult,
 };
 use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
@@ -84,6 +84,7 @@ async fn panel_serves_embedded_html_and_local_json() {
 struct RecordingActions {
     sent: Mutex<Vec<(String, String)>>,
     at: Mutex<Vec<String>>,
+    switched: Mutex<Vec<(String, bool)>>,
 }
 
 impl RecordingActions {
@@ -91,6 +92,7 @@ impl RecordingActions {
         Self {
             sent: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
+            switched: Mutex::new(Vec::new()),
         }
     }
 }
@@ -132,6 +134,32 @@ impl Actions for RecordingActions {
             operator: Some("CHN-UNICOM".into()),
             ..ReportResult::default()
         })
+    }
+
+    fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError> {
+        Ok(ProfilesResult {
+            imei,
+            profiles: vec![ProfileBody {
+                iccid: "89852351225042214201".into(),
+                label: "WEBBING".into(),
+                enabled: true,
+                provider: Some("Saily".into()),
+                name: Some("WEBBING".into()),
+                nickname: None,
+                class: Some(2),
+                isdp_aid: None,
+            }],
+        })
+    }
+
+    fn switch_profile(
+        &self,
+        _imei: Option<String>,
+        iccid: String,
+        enable: bool,
+    ) -> Result<(), PanelError> {
+        self.switched.lock().expect("switched").push((iccid, enable));
+        Ok(())
     }
 }
 
@@ -213,6 +241,17 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
         fn modem_report(&self, _: Option<String>) -> Result<ReportResult, PanelError> {
             Ok(ReportResult::default())
         }
+
+        fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError> {
+            Ok(ProfilesResult {
+                imei,
+                profiles: Vec::new(),
+            })
+        }
+
+        fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> {
+            Ok(())
+        }
     }
 
     let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(Arc::new(Rejecting)));
@@ -274,4 +313,71 @@ async fn panel_reports_modem_diagnostics() {
     assert_eq!(body["imei"], "867018069514820");
     assert_eq!(body["signal_dbm"], -65);
     assert_eq!(body["operator"], "CHN-UNICOM");
+}
+
+#[tokio::test]
+async fn panel_lists_euicc_profiles() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/esim")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"imei":"867018069514820"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["profiles"][0]["label"], "WEBBING");
+    assert_eq!(body["profiles"][0]["enabled"], true);
+}
+
+#[tokio::test]
+async fn panel_switches_a_profile_by_iccid() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/esim/switch")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"iccid":"89852351225042214201","enable":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        actions.switched.lock().expect("switched").as_slice(),
+        &[("89852351225042214201".to_string(), true)]
+    );
+}
+
+/// Switching takes the modem off its network, so an unnamed profile must be
+/// refused rather than guessed at.
+#[tokio::test]
+async fn panel_refuses_a_switch_without_an_iccid() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/esim/switch")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"iccid":"  ","enable":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(actions.switched.lock().expect("switched").is_empty());
 }
