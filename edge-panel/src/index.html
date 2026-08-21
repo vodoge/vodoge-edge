@@ -28,8 +28,9 @@
     button.ghost:hover { color: var(--fg); border-color: var(--accent); }
     .quick { display: flex; flex-wrap: wrap; gap: .4rem; padding: 0 1rem .8rem; }
     .quick button { font-size: .8rem; padding: .3rem .55rem; }
-    pre#at-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
+    pre#at-log, pre#ussd-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
     pre#at-log:empty::before { content: "尚未执行命令"; color: var(--muted); }
+    pre#ussd-log:empty::before { content: "尚未发起会话"; color: var(--muted); }
     .sent { color: var(--accent); }
     .fail { color: var(--bad); }
     .meta { color: var(--muted); }
@@ -92,6 +93,17 @@
       <pre id="at-log"></pre>
     </section>
     <section>
+      <h2>USSD <span class="note">向运营商发码，回复以非请求上报到达</span></h2>
+      <form id="ussd-form">
+        <select id="ussd-modem" name="imei"><option value="">默认模组</option></select>
+        <input name="code" required placeholder="*100#" autocomplete="off" spellcheck="false">
+        <button type="submit">发送</button>
+        <button type="button" class="ghost" id="ussd-cancel">取消会话</button>
+      </form>
+      <p class="hint" id="ussd-status"></p>
+      <pre id="ussd-log"></pre>
+    </section>
+    <section>
       <h2>本机发送</h2>
       <form id="send-form">
         <select id="send-modem" name="imei"><option value="">默认模组</option></select>
@@ -146,7 +158,7 @@
     }
 
     function syncModemOptions(modems) {
-      for (const id of ["at-modem", "send-modem"]) {
+      for (const id of ["at-modem", "send-modem", "ussd-modem"]) {
         const select = document.getElementById(id);
         const chosen = select.value;
         select.replaceChildren();
@@ -274,6 +286,65 @@
         button.textContent = label;
       }
     }
+
+    function ussdLine(text, className) {
+      const pre = document.getElementById("ussd-log");
+      const span = document.createElement("span");
+      if (className) span.className = className;
+      span.textContent = text + "\n";
+      pre.append(span);
+      pre.scrollTop = pre.scrollHeight;
+    }
+
+    async function runUssd(code) {
+      const imei = document.getElementById("ussd-modem").value;
+      const status = document.getElementById("ussd-status");
+      ussdLine("> " + code, "sent");
+      status.textContent = "等待运营商回复…";
+      try {
+        const response = await fetch("/api/ussd", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code, imei: imei || null }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          ussdLine(result.error || ("HTTP " + response.status), "fail");
+          status.textContent = "失败";
+          return;
+        }
+        if (result.text) ussdLine(result.text);
+        ussdLine("  " + result.stage + " · " + Math.round(result.elapsed_ms / 100) / 10 + "s", "meta");
+        // A menu keeps the session open; the reply goes back on the same
+        // session, so tell the operator rather than leaving it hanging.
+        status.textContent = result.expects_reply
+          ? "运营商在等待回复——直接把选项填进输入框再发一次。"
+          : "会话已结束";
+      } catch (error) {
+        ussdLine(String(error), "fail");
+        status.textContent = "失败";
+      }
+    }
+
+    document.getElementById("ussd-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.code;
+      const code = input.value.trim();
+      if (!code) return;
+      await runUssd(code);
+    });
+
+    document.getElementById("ussd-cancel").addEventListener("click", async () => {
+      const imei = document.getElementById("ussd-modem").value;
+      const status = document.getElementById("ussd-status");
+      const response = await fetch("/api/ussd/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ imei: imei || null }),
+      });
+      ussdLine("> 取消会话", "sent");
+      status.textContent = response.ok ? "已取消" : "取消失败";
+    });
 
     async function scanOperators(imei, button) {
       if (!confirm("对 " + imei + " 全频段扫网？\n模组会停止服务，最长两分钟。")) return;

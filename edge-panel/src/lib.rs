@@ -64,6 +64,10 @@ pub trait Actions: Send + Sync {
     /// Sweep for visible networks. This takes the radio away for as long as the
     /// scan runs, so the modem serves nothing while it is in progress.
     fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError>;
+    /// Run one USSD request and wait for the network's reply.
+    fn ussd(&self, imei: Option<String>, code: String) -> Result<UssdResult, PanelError>;
+    /// Cancel an open USSD session.
+    fn ussd_cancel(&self, imei: Option<String>) -> Result<(), PanelError>;
     /// Modems currently executing an operator-initiated command.
     ///
     /// Such a modem stops answering the poll loop, and a long command outlasts
@@ -81,6 +85,18 @@ pub struct ScannedOperatorBody {
     pub short_name: String,
     pub status: String,
     pub access_technology: Option<String>,
+}
+
+/// One USSD exchange as the panel reports it.
+#[derive(Clone, Debug, Serialize)]
+pub struct UssdResult {
+    pub code: String,
+    pub stage: String,
+    pub text: String,
+    pub dcs: Option<u8>,
+    /// True when the network is waiting for a follow-up on the same session.
+    pub expects_reply: bool,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -251,6 +267,8 @@ pub fn router_with_uplink(
         .route("/api/esim", post(list_profiles))
         .route("/api/esim/switch", post(switch_profile))
         .route("/api/scan", post(scan_operators))
+        .route("/api/ussd", post(ussd))
+        .route("/api/ussd/cancel", post(ussd_cancel))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -344,6 +362,37 @@ async fn at_command(
     }
     match actions.at_command(body.imei, command) {
         Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// The network answers after the command returns, so this endpoint holds the
+/// request until the reply arrives or the wait runs out.
+async fn ussd(State(state): State<Arc<PanelState>>, Json(body): Json<UssdBody>) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local USSD is not configured");
+    };
+    let code = body.code.trim().to_string();
+    if code.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "code is required");
+    }
+    match actions.ussd(body.imei, code) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// An abandoned session keeps the network waiting and blocks the next request,
+/// so cancelling is a first-class action rather than something to work around.
+async fn ussd_cancel(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local USSD is not configured");
+    };
+    match actions.ussd_cancel(body.imei) {
+        Ok(()) => Json(serde_json::json!({ "status": "cancelled" })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -444,6 +493,12 @@ async fn restart_modem(
 struct SendBody {
     to: String,
     body: String,
+    imei: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UssdBody {
+    code: String,
     imei: Option<String>,
 }
 

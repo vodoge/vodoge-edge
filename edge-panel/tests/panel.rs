@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use edge_panel::{
     router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ProfileBody,
-    ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody, UsbResetResult,
+    ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
 };
 use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
@@ -85,6 +85,7 @@ struct RecordingActions {
     sent: Mutex<Vec<(String, String)>>,
     at: Mutex<Vec<String>>,
     switched: Mutex<Vec<(String, bool)>>,
+    ussd: Mutex<Vec<String>>,
 }
 
 impl RecordingActions {
@@ -93,6 +94,7 @@ impl RecordingActions {
             sent: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
             switched: Mutex::new(Vec::new()),
+            ussd: Mutex::new(Vec::new()),
         }
     }
 }
@@ -174,6 +176,22 @@ impl Actions for RecordingActions {
                 access_technology: Some("LTE".into()),
             }],
         })
+    }
+
+    fn ussd(&self, _imei: Option<String>, code: String) -> Result<UssdResult, PanelError> {
+        self.ussd.lock().expect("ussd").push(code.clone());
+        Ok(UssdResult {
+            code,
+            stage: "complete".into(),
+            text: "余额 12.30".into(),
+            dcs: Some(72),
+            expects_reply: false,
+            elapsed_ms: 3200,
+        })
+    }
+
+    fn ussd_cancel(&self, _imei: Option<String>) -> Result<(), PanelError> {
+        Ok(())
     }
 }
 
@@ -273,6 +291,21 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
                 elapsed_ms: 0,
                 operators: Vec::new(),
             })
+        }
+
+        fn ussd(&self, _: Option<String>, code: String) -> Result<UssdResult, PanelError> {
+            Ok(UssdResult {
+                code,
+                stage: "complete".into(),
+                text: String::new(),
+                dcs: None,
+                expects_reply: false,
+                elapsed_ms: 0,
+            })
+        }
+
+        fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> {
+            Ok(())
         }
     }
 
@@ -474,6 +507,21 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
                 operators: Vec::new(),
             })
         }
+        fn ussd(&self, _: Option<String>, code: String) -> Result<UssdResult, PanelError> {
+            Ok(UssdResult {
+                code,
+                stage: "complete".into(),
+                text: String::new(),
+                dcs: None,
+                expects_reply: false,
+                elapsed_ms: 0,
+            })
+        }
+
+        fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> {
+            Ok(())
+        }
+
         fn busy_modems(&self) -> Vec<String> {
             vec!["867018069509705".into()]
         }
@@ -503,4 +551,46 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
     let body: serde_json::Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["modems"][0]["state"], "Busy");
+}
+
+#[tokio::test]
+async fn panel_runs_a_ussd_session() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/ussd")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"code":"*100#"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["text"], "余额 12.30");
+    assert_eq!(body["expects_reply"], false);
+    assert_eq!(actions.ussd.lock().expect("ussd").as_slice(), &["*100#"]);
+}
+
+#[tokio::test]
+async fn panel_rejects_an_empty_ussd_code() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/ussd")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"code":"  "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(actions.ussd.lock().expect("ussd").is_empty());
 }

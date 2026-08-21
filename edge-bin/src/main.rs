@@ -33,7 +33,7 @@ mod linux {
     };
     use edge_panel::{
         serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
-        ScanResult, ScannedOperatorBody, UsbResetResult,
+        ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
     };
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
     use edge_uplink::dial::{DialError, Socket};
@@ -53,6 +53,11 @@ mod linux {
     /// A full band sweep on an EC20 routinely runs past a minute, and the
     /// module answers nothing until it finishes.
     const SCAN_TIMEOUT: Duration = Duration::from_secs(180);
+
+    /// How long to wait for the network's `+CUSD:` report. Carriers routinely
+    /// take several seconds, and a session that is never answered has to end
+    /// rather than hold the radio.
+    const USSD_TIMEOUT: Duration = Duration::from_secs(45);
 
     struct SharedStore(Mutex<Store>);
 
@@ -234,6 +239,91 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn ussd(&self, imei: Option<String>, code: String) -> Result<UssdResult, PanelError> {
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    let started = Instant::now();
+                    // Start from a known state. A session left open by an
+                    // earlier attempt changes how the module answers the next
+                    // request, and the result is a reply that parses into
+                    // nothing recognisable. The cancel is best-effort: there is
+                    // usually no session to cancel.
+                    let _ = port.command(edge_modem::ussd_cancel());
+                    let exchange = port
+                        .command(&edge_modem::ussd_request(&code))
+                        .map_err(|error| SendError::new("ussd_failed", error.to_string()))?;
+                    if !exchange.succeeded() {
+                        return Err(SendError::new("ussd_rejected", exchange.terminator.clone()));
+                    }
+                    // Some networks report inside the command response instead
+                    // of afterwards, so check what already arrived before
+                    // waiting for a separate report.
+                    let inline = exchange
+                        .lines
+                        .iter()
+                        .find_map(|line| edge_modem::parse_ussd_reply(line));
+                    let reply = match inline {
+                        Some(reply) => Some(reply),
+                        None => {
+                            // The module may answer with a report or reject the
+                            // session outright; waiting only for the former
+                            // turns a one-second refusal into a full timeout.
+                            let line = port
+                                .wait_for_any_urc(
+                                    &["+CUSD:", "+CME ERROR:", "+CMS ERROR:"],
+                                    USSD_TIMEOUT,
+                                )
+                                .map_err(|error| {
+                                    SendError::new("ussd_wait_failed", error.to_string())
+                                })?;
+                            match line {
+                                Some(line) if line.starts_with("+CUSD:") => {
+                                    let parsed = edge_modem::parse_ussd_reply(&line);
+                                    // A report the parser cannot place is more
+                                    // useful shown raw than summarised as
+                                    // "other" with mangled text.
+                                    match parsed {
+                                        Some(reply) => Some(reply),
+                                        // A report the parser cannot place is
+                                        // more useful shown raw than summarised
+                                        // into a shape it does not fit.
+                                        None => {
+                                            return Err(SendError::new("ussd_unparsed", line));
+                                        }
+                                    }
+                                }
+                                Some(line) => {
+                                    return Err(SendError::new("ussd_rejected", line));
+                                }
+                                None => None,
+                            }
+                        }
+                    };
+                    let reply = reply.ok_or_else(|| {
+                        SendError::new("ussd_no_reply", "network did not answer in time")
+                    })?;
+                    Ok(UssdResult {
+                        code: code.clone(),
+                        stage: reply.stage.as_str().to_string(),
+                        expects_reply: reply.stage.expects_reply(),
+                        text: reply.text,
+                        dcs: reply.dcs,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    })
+                })
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn ussd_cancel(&self, imei: Option<String>) -> Result<(), PanelError> {
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    port.command(edge_modem::ussd_cancel())
+                        .map(|_| ())
+                        .map_err(|error| SendError::new("ussd_cancel_failed", error.to_string()))
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
 

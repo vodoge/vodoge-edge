@@ -24,6 +24,7 @@ mod send;
 mod session;
 mod uim;
 mod usb;
+mod ussd;
 mod wms;
 
 use std::{
@@ -34,6 +35,10 @@ use std::{
 
 pub use at::{at_port_for_qmi, AtError, AtExchange, AtPort, AT_CONTROL_INTERFACE};
 pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
+pub use ussd::{
+    cancel as ussd_cancel, parse_reply as parse_ussd_reply, request as ussd_request, UssdReply,
+    UssdStage,
+};
 pub use report::{
     collect as collect_report, parse_cops_scan, ModemReport, Registration, ScannedOperator, Signal,
 };

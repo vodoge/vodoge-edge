@@ -186,6 +186,62 @@ impl AtPort {
         }
     }
 
+    /// Wait for an unsolicited line beginning with `prefix`.
+    ///
+    /// Some operations answer twice. `AT+CUSD=1,...` returns `OK` as soon as
+    /// the request is accepted and the network's reply arrives seconds later as
+    /// a `+CUSD:` report, so treating the `OK` as the answer returns an empty
+    /// result for a command that worked. This must not drain first: the report
+    /// can arrive between the `OK` and this call.
+    pub fn wait_for_urc(
+        &mut self,
+        prefix: &str,
+        timeout: Duration,
+    ) -> Result<Option<String>, AtError> {
+        self.wait_for_any_urc(&[prefix], timeout)
+    }
+
+    /// Wait for the first unsolicited line matching any of `prefixes`.
+    ///
+    /// An operation that reports asynchronously can also fail asynchronously.
+    /// A USSD request the network rejects produces `+CME ERROR: 100` about a
+    /// second after the command's own `OK`; waiting only for the success
+    /// prefix spends the whole timeout and then reports no answer, when the
+    /// module had already said exactly what went wrong.
+    pub fn wait_for_any_urc(
+        &mut self,
+        prefixes: &[&str],
+        timeout: Duration,
+    ) -> Result<Option<String>, AtError> {
+        let started = Instant::now();
+        let mut buffer = String::new();
+        loop {
+            if let Some(line) = buffer
+                .lines()
+                .map(|line| line.trim())
+                .find(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
+            {
+                return Ok(Some(line.to_string()));
+            }
+            if started.elapsed() >= timeout {
+                return Ok(None);
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !wait_readable(&self.file, remaining)? {
+                continue;
+            }
+            let mut chunk = [0u8; READ_CHUNK];
+            let read = self
+                .file
+                .read(&mut chunk)
+                .map_err(|error| AtError::Io(format!("read report: {error}")))?;
+            if read == 0 {
+                continue;
+            }
+            buffer.push_str(&String::from_utf8_lossy(&chunk[..read]));
+        }
+    }
+
     /// Discard unsolicited output left over from a previous session, so it does
     /// not get attributed to the next command.
     fn drain(&mut self) {
