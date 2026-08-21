@@ -2,319 +2,632 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0e14">
   <title>VoDoge Edge</title>
   <style>
-    :root { color-scheme: dark; --bg:#10141c; --raised:#171d28; --fg:#e8eef6; --muted:#93a0b3; --line:#2a3444; --accent:#3ecf8e; --warn:#e8a33d; --bad:#e06c6c; }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--raised); display: flex; gap: 1rem; align-items: center; }
-    h1 { margin: 0; font-size: 1.1rem; }
-    .muted { color: var(--muted); font-size: .9rem; }
-    main { padding: 1.25rem; display: grid; gap: 1.25rem; }
-    section { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-    h2 { margin: 0; padding: .8rem 1rem; font-size: .95rem; border-bottom: 1px solid var(--line); display: flex; gap: .6rem; align-items: baseline; }
-    h2 .note { font-weight: 400; font-size: .8rem; color: var(--muted); }
-    table { width: 100%; border-collapse: collapse; font-size: .95rem; }
-    th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--line); }
-    th { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
-    .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
-    .offline { color: var(--accent); margin-left: auto; font-size: .8rem; }
-    form { display: flex; gap: .5rem; padding: .8rem 1rem; flex-wrap: wrap; align-items: center; }
-    input, select { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: .45rem .6rem; font: inherit; }
-    input[name="command"] { flex: 1 1 22rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    button { background: var(--accent); color: #102018; border: 0; border-radius: 8px; padding: .45rem .7rem; font: inherit; cursor: pointer; }
-    button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
-    button.ghost:hover { color: var(--fg); border-color: var(--accent); }
-    .quick { display: flex; flex-wrap: wrap; gap: .4rem; padding: 0 1rem .8rem; }
-    .quick button { font-size: .8rem; padding: .3rem .55rem; }
-    pre#at-log, pre#ussd-log, pre#run-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
-    pre#at-log:empty::before { content: "尚未执行命令"; color: var(--muted); }
-    pre#ussd-log:empty::before { content: "尚未发起会话"; color: var(--muted); }
-    pre#run-log:empty::before { content: "等待日志…"; color: var(--muted); }
-    .sent { color: var(--accent); }
-    .fail { color: var(--bad); }
-    .meta { color: var(--muted); }
-    .hint { color: var(--muted); font-size: .85rem; padding: 0 1rem 1rem; }
-    .danger { color: var(--warn); }
-    .row-actions { display: flex; gap: .35rem; }
-    .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .1rem .75rem; padding: .9rem 1rem; }
-    .fact { display: flex; justify-content: space-between; gap: .75rem; padding: .45rem 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
-    .fact dt { color: var(--muted); }
-    .fact dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; word-break: break-all; }
-    .fact dd.absent { color: var(--muted); font-family: inherit; }
-    .fact dd.good { color: var(--accent); }
-    .fact dd.bad { color: var(--bad); }
+    /*
+     * Same tokens as the cloud console, so the two read as one product. The
+     * layout is not the same: this is a bench instrument, not an overview.
+     * Density and immediate feedback win over calm summaries here.
+     */
+    :root {
+      color-scheme: dark;
+      --bg:#0b0e14; --surface:#12161f; --surface-raised:#171c27; --surface-hover:#1c2230;
+      --line:#232a38; --line-strong:#303950;
+      --fg:#e7ecf3; --fg-muted:#93a1b5; --fg-faint:#64708a;
+      --accent:#4ade9b; --accent-strong:#22c47f; --accent-ink:#06251a;
+      --accent-wash:rgba(74,222,155,.12);
+      --ok:#4ade9b; --warn:#f0b429; --bad:#f2686d; --info:#63a4ff;
+      --ok-wash:rgba(74,222,155,.14); --warn-wash:rgba(240,180,41,.14);
+      --bad-wash:rgba(242,104,109,.14); --info-wash:rgba(99,164,255,.14);
+      --text-xs:.75rem; --text-sm:.8125rem; --text-base:.9375rem; --text-lg:1.125rem;
+      --font-ui: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem;
+      --radius:10px; --radius-lg:14px; --radius-pill:999px;
+      --shadow:0 1px 2px rgba(0,0,0,.35);
+      --touch:44px;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; background:var(--bg); color:var(--fg);
+      font-family:var(--font-ui); font-size:var(--text-base); line-height:1.55;
+      -webkit-font-smoothing:antialiased;
+      padding-bottom:env(safe-area-inset-bottom);
+    }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
+    @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition-duration:.01ms !important; } }
+
+    /* ---------- Header ---------- */
+    header {
+      position:sticky; top:0; z-index:20;
+      display:flex; align-items:center; gap:var(--s3); flex-wrap:wrap;
+      padding:var(--s3) var(--s4);
+      padding-top:calc(var(--s3) + env(safe-area-inset-top));
+      background:var(--surface); border-bottom:1px solid var(--line);
+    }
+    .brand { display:flex; align-items:center; gap:var(--s2); font-weight:650; }
+    .brand-mark {
+      width:22px; height:22px; border-radius:7px; display:grid; place-items:center;
+      background:linear-gradient(135deg,var(--accent),var(--accent-strong));
+      color:var(--accent-ink); font-size:12px; font-weight:800;
+    }
+    .brand-note { color:var(--fg-faint); font-size:var(--text-xs); font-weight:400; }
+    .header-side { margin-left:auto; display:flex; align-items:center; gap:var(--s2); }
+
+    main { padding:var(--s4); display:grid; gap:var(--s4); max-width:1500px; margin:0 auto; }
+
+    /* ---------- Cards ---------- */
+    .card {
+      background:var(--surface); border:1px solid var(--line);
+      border-radius:var(--radius-lg); overflow:hidden; box-shadow:var(--shadow);
+    }
+    .card-head {
+      display:flex; align-items:center; gap:var(--s2);
+      padding:var(--s3) var(--s4); border-bottom:1px solid var(--line);
+    }
+    .card-title { margin:0; font-size:var(--text-sm); font-weight:600; }
+    .card-note { color:var(--fg-faint); font-size:var(--text-xs); }
+    .card-actions { margin-left:auto; display:flex; gap:var(--s2); flex-wrap:wrap; }
+    .card-body { padding:var(--s4); }
+
+    /* ---------- Modem cards ----------
+       A card per module instead of a table row with five buttons crammed in.
+       Selecting one sets the target for everything below, so an action can no
+       longer be aimed at the wrong stick by leaving a dropdown unchanged. */
+    .modems { display:grid; gap:var(--s3); grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr)); }
+    .modem {
+      text-align:left; width:100%; cursor:pointer;
+      background:var(--surface); border:1px solid var(--line);
+      border-radius:var(--radius-lg); padding:var(--s4);
+      display:grid; gap:var(--s2); font:inherit; color:inherit;
+      transition:border-color .12s ease, background .12s ease;
+    }
+    .modem:hover { border-color:var(--line-strong); background:var(--surface-hover); }
+    .modem[aria-pressed="true"] { border-color:var(--accent); background:var(--accent-wash); }
+    .modem-top { display:flex; align-items:center; gap:var(--s2); }
+    .modem-imei { font-family:var(--font-mono); font-size:var(--text-sm); font-weight:600; }
+    .modem-meta { display:grid; gap:2px; font-size:var(--text-xs); color:var(--fg-muted); }
+    .modem-meta .mono { font-family:var(--font-mono); color:var(--fg-faint); }
+
+    /* ---------- Badges ---------- */
+    .badge {
+      display:inline-flex; align-items:center; gap:var(--s1);
+      padding:2px var(--s2); border-radius:var(--radius-pill);
+      font-size:var(--text-xs); font-weight:600; line-height:1.7; white-space:nowrap;
+    }
+    .badge::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .badge-ok{color:var(--ok);background:var(--ok-wash)}
+    .badge-warn{color:var(--warn);background:var(--warn-wash)}
+    .badge-bad{color:var(--bad);background:var(--bad-wash)}
+    .badge-info{color:var(--info);background:var(--info-wash)}
+    .badge-idle{color:var(--fg-faint);background:var(--surface-hover)}
+
+    /* ---------- Controls ----------
+       Three visual tiers, matching what an action can cost: reading is quiet,
+       changing state is accented, and anything that drops the module off the
+       network is warned. The colour is the warning, not a dialog nobody reads. */
+    button {
+      font:inherit; font-size:var(--text-sm); font-weight:600;
+      min-height:var(--touch); padding:0 var(--s3);
+      border-radius:var(--radius); border:1px solid transparent;
+      background:var(--accent); color:var(--accent-ink); cursor:pointer;
+      display:inline-flex; align-items:center; justify-content:center; gap:var(--s2);
+      transition:background .12s ease, border-color .12s ease, color .12s ease;
+    }
+    button:hover:not(:disabled) { background:var(--accent-strong); }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    button.read { background:transparent; color:var(--fg-muted); border-color:var(--line-strong); }
+    button.read:hover:not(:disabled) { background:var(--surface-hover); color:var(--fg); border-color:var(--accent); }
+    button.risk { background:transparent; color:var(--warn); border-color:color-mix(in srgb, var(--warn) 45%, transparent); }
+    button.risk:hover:not(:disabled) { background:var(--warn-wash); }
+    button.small { min-height:32px; padding:0 var(--s2); font-size:var(--text-xs); font-weight:500; }
+
+    input, select {
+      font:inherit; font-size:var(--text-sm); min-height:var(--touch);
+      padding:0 var(--s3); border-radius:var(--radius);
+      border:1px solid var(--line-strong); background:var(--bg); color:var(--fg);
+    }
+    input:focus, select:focus { border-color:var(--accent); outline:none; }
+    input::placeholder { color:var(--fg-faint); }
+    .mono-input { font-family:var(--font-mono); }
+
+    form { display:flex; gap:var(--s2); padding:var(--s3) var(--s4); flex-wrap:wrap; align-items:center; }
+    form > input { flex:1 1 12rem; }
+
+    .quick { display:flex; flex-wrap:wrap; gap:var(--s1); padding:0 var(--s4) var(--s3); }
+
+    /* ---------- Console ----------
+       One stream, not one pane per command type. An operator reads these in the
+       order things happened; splitting them by which endpoint produced them
+       makes a sequence impossible to follow. */
+    pre.stream {
+      margin:0; padding:var(--s3) var(--s4); max-height:24rem; overflow:auto;
+      font-family:var(--font-mono); font-size:var(--text-xs); line-height:1.6;
+      white-space:pre-wrap; word-break:break-word; border-top:1px solid var(--line);
+    }
+    pre.stream:empty::before { content:attr(data-empty); color:var(--fg-faint); }
+    .out-cmd { color:var(--accent); }
+    .out-fail { color:var(--bad); }
+    .out-meta { color:var(--fg-faint); }
+    .out-warn { color:var(--warn); }
+
+    /* ---------- Facts ---------- */
+    .facts { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,14rem),1fr)); gap:0 var(--s4); padding:var(--s3) var(--s4); }
+    .fact { display:flex; justify-content:space-between; gap:var(--s3); padding:var(--s2) 0; border-bottom:1px solid var(--line); font-size:var(--text-sm); }
+    .fact dt { color:var(--fg-muted); }
+    .fact dd { margin:0; font-family:var(--font-mono); font-size:var(--text-xs); text-align:right; word-break:break-all; }
+    .fact dd.absent { color:var(--fg-faint); font-family:inherit; }
+    .fact dd.good { color:var(--ok); }
+    .fact dd.bad { color:var(--bad); }
+
+    table { width:100%; border-collapse:collapse; font-size:var(--text-sm); }
+    th,td { text-align:left; padding:var(--s2) var(--s4); border-bottom:1px solid var(--line); }
+    th { color:var(--fg-faint); font-size:var(--text-xs); text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
+    tbody tr:last-child td { border-bottom:none; }
+    .table-wrap { overflow-x:auto; }
+
+    .empty { padding:var(--s5); text-align:center; color:var(--fg-muted); display:grid; gap:var(--s1); }
+    .empty strong { color:var(--fg); font-weight:600; }
+    .hint { color:var(--fg-muted); font-size:var(--text-xs); padding:0 var(--s4) var(--s3); margin:0; }
+    .hint.risk-note { color:var(--warn); }
+    .target { font-family:var(--font-mono); font-size:var(--text-xs); color:var(--fg-muted); }
+    [hidden] { display:none !important; }
+
+    @media (max-width:640px) {
+      main { padding:var(--s3); }
+      .card-actions { width:100%; }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>VoDoge Edge</h1>
-    <span class="muted">本地调试终端 · 断网可用</span>
-    <span class="offline" id="status-flag">local</span>
+    <span class="brand">
+      <span class="brand-mark" aria-hidden="true">V</span>
+      VoDoge Edge
+      <span class="brand-note">现场调试终端</span>
+    </span>
+    <span class="header-side">
+      <span class="target" id="target-label">未选择模组</span>
+      <span class="badge badge-idle" id="mode-flag">local</span>
+    </span>
   </header>
+
   <main>
-    <section>
-      <h2>模组</h2>
-      <table>
-        <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody id="modems"><tr><td class="empty" colspan="5">加载中</td></tr></tbody>
-      </table>
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">模组</h2>
+        <span class="card-note" id="modem-note">点选一个模组，下面的操作都作用于它</span>
+        <div class="card-actions" id="modem-actions">
+          <button type="button" class="read small" id="refresh">刷新</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="modems" id="modems"><p class="empty">加载中…</p></div>
+      </div>
     </section>
-    <section id="scan-card" hidden>
-      <h2>可见网络 <span class="note" id="scan-target"></span></h2>
-      <table>
-        <thead><tr><th>运营商</th><th>MCC/MNC</th><th>制式</th><th>状态</th></tr></thead>
-        <tbody id="scan-rows"></tbody>
-      </table>
-      <p class="hint danger">扫描期间模组会停止服务，耗时可达两分钟。</p>
-    </section>
-    <section id="esim-card" hidden>
-      <h2>eSIM Profile <span class="note" id="esim-target"></span></h2>
-      <table>
-        <thead><tr><th>名称</th><th>ICCID</th><th>运营商</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody id="esim-rows"></tbody>
-      </table>
-      <p class="hint danger">切换会让模组短暂脱网并触发卡片 REFRESH。</p>
-    </section>
-    <section id="detail-card" hidden>
-      <h2>模组体检 <span class="note" id="detail-target"></span></h2>
+
+    <section class="card" id="detail-card" hidden>
+      <div class="card-head">
+        <h2 class="card-title">体检</h2>
+        <span class="card-note" id="detail-note"></span>
+      </div>
       <div class="facts" id="detail-facts"></div>
       <p class="hint" id="detail-refused"></p>
     </section>
-    <section>
-      <h2>AT 控制台 <span class="note danger">直连模组，命令原样下发</span></h2>
-      <form id="at-form">
-        <select id="at-modem" name="imei"><option value="">默认模组</option></select>
-        <input name="command" required placeholder="AT+CSQ" autocomplete="off" spellcheck="false">
-        <button type="submit">执行</button>
-        <button type="button" class="ghost" id="at-clear">清空</button>
-      </form>
-      <div class="quick" id="at-quick"></div>
-      <pre id="at-log"></pre>
+
+    <section class="card" id="esim-card" hidden>
+      <div class="card-head">
+        <h2 class="card-title">eSIM Profile</h2>
+        <span class="card-note" id="esim-note"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>ICCID</th><th>运营商</th><th>状态</th><th></th></tr></thead>
+          <tbody id="esim-rows"></tbody>
+        </table>
+      </div>
+      <p class="hint risk-note">切换会让模组脱网并触发卡片 REFRESH。</p>
     </section>
-    <section>
-      <h2>USSD <span class="note">向运营商发码，回复以非请求上报到达</span></h2>
-      <form id="ussd-form">
-        <select id="ussd-modem" name="imei"><option value="">默认模组</option></select>
-        <input name="code" required placeholder="*100#" autocomplete="off" spellcheck="false">
-        <button type="submit">发送</button>
-        <button type="button" class="ghost" id="ussd-cancel">取消会话</button>
-      </form>
-      <p class="hint" id="ussd-status"></p>
-      <pre id="ussd-log"></pre>
+
+    <section class="card" id="scan-card" hidden>
+      <div class="card-head">
+        <h2 class="card-title">可见网络</h2>
+        <span class="card-note" id="scan-note"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>运营商</th><th>MCC/MNC</th><th>制式</th><th>状态</th></tr></thead>
+          <tbody id="scan-rows"></tbody>
+        </table>
+      </div>
     </section>
-    <section>
-      <h2>本机发送</h2>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">控制台</h2>
+        <span class="card-note">AT 与 USSD 共用一条时间线</span>
+        <div class="card-actions">
+          <button type="button" class="read small" id="clear-console">清空</button>
+        </div>
+      </div>
+      <form id="console-form">
+        <select id="console-mode" aria-label="命令类型">
+          <option value="at">AT</option>
+          <option value="ussd">USSD</option>
+        </select>
+        <input id="console-input" class="mono-input" required autocomplete="off" spellcheck="false" placeholder="AT+CSQ">
+        <button type="submit" id="console-run">执行</button>
+        <button type="button" class="read" id="ussd-cancel" hidden>取消会话</button>
+      </form>
+      <div class="quick" id="quick"></div>
+      <pre class="stream" id="console-out" data-empty="尚未执行命令"></pre>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">发送短信</h2>
+        <span class="card-note" id="send-note"></span>
+      </div>
       <form id="send-form">
-        <select id="send-modem" name="imei"><option value="">默认模组</option></select>
-        <input name="to" required placeholder="号码">
+        <input name="to" required placeholder="号码" autocomplete="off">
         <input name="body" required placeholder="内容">
         <button type="submit">发送</button>
       </form>
       <p class="hint" id="send-status"></p>
     </section>
-    <section>
-      <h2>运行日志 <span class="note" id="log-note">实时</span>
-        <button type="button" class="ghost" id="log-toggle" style="margin-left:auto">暂停</button>
-      </h2>
-      <pre id="run-log"></pre>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">本地短信</h2>
+        <span class="card-note">断网也保留在本机</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>对端</th><th>内容</th><th>承载</th><th>时间</th></tr></thead>
+          <tbody id="messages"><tr><td class="empty" colspan="4">加载中…</td></tr></tbody>
+        </table>
+      </div>
     </section>
-    <section>
-      <h2>本地短信</h2>
-      <table>
-        <thead><tr><th>对端</th><th>内容</th><th>承载</th><th>时间</th></tr></thead>
-        <tbody id="messages"><tr><td class="empty" colspan="4">加载中</td></tr></tbody>
-      </table>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">运行日志</h2>
+        <span class="card-note" id="log-note">实时</span>
+        <div class="card-actions">
+          <button type="button" class="read small" id="log-toggle">暂停</button>
+        </div>
+      </div>
+      <pre class="stream" id="run-log" data-empty="等待日志…"></pre>
     </section>
   </main>
+
   <script>
-    // Commands that answer a question. Anything that changes module state is
-    // deliberately absent: a one-click AT+CFUN=1,1 is how a module ends up
-    // wedged with its data session gone.
+    "use strict";
+
+    /* Read-only probes only. A one-click AT+CFUN=1,1 is how a module ends up
+       wedged with its data session gone, which happened here during
+       development; anything that changes state has to be typed. */
     const QUICK = [
-      ["信号", "AT+CSQ"],
-      ["注册(CS)", "AT+CREG?"],
-      ["注册(PS)", "AT+CEREG?"],
-      ["运营商", "AT+COPS?"],
-      ["SIM", "AT+CPIN?"],
-      ["ICCID", "AT+QCCID"],
-      ["IMSI", "AT+CIMI"],
-      ["本机号", "AT+CNUM"],
-      ["固件", "AT+QGMR"],
-      ["载波配置", "AT+QMBNCFG=\"list\""],
-      ["短信中心", "AT+CSCA?"],
-      ["IMS", "AT+QCFG=\"ims\""],
+      ["信号","AT+CSQ"], ["注册 CS","AT+CREG?"], ["注册 PS","AT+CEREG?"],
+      ["运营商","AT+COPS?"], ["SIM","AT+CPIN?"], ["ICCID","AT+QCCID"],
+      ["IMSI","AT+CIMI"], ["本机号","AT+CNUM"], ["固件","AT+QGMR"],
+      ["短信中心","AT+CSCA?"], ["IMS",'AT+QCFG="ims"'],
     ];
 
-    function cell(text) { const td = document.createElement("td"); td.textContent = text; return td; }
-    function fill(id, rows, cols, empty) {
-      const body = document.getElementById(id);
-      body.replaceChildren();
-      if (!rows.length) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = cols;
-        td.className = "empty";
-        td.textContent = empty;
-        tr.append(td);
-        body.append(tr);
-        return;
-      }
-      for (const row of rows) body.append(row);
-    }
+    const REG_LABEL = {
+      home:"已注册(本网)", roaming:"已注册(漫游)", searching:"搜网中",
+      denied:"被拒绝", not_registered:"未注册", unknown:"未知",
+    };
+    const STATE_TONE = {
+      Registered:"badge-ok", Busy:"badge-warn", Offline:"badge-idle",
+      Searching:"badge-warn", NotRegistered:"badge-bad",
+    };
 
-    function syncModemOptions(modems) {
-      for (const id of ["at-modem", "send-modem", "ussd-modem"]) {
-        const select = document.getElementById(id);
-        const chosen = select.value;
-        select.replaceChildren();
-        const any = document.createElement("option");
-        any.value = "";
-        any.textContent = "默认模组";
-        select.append(any);
-        for (const modem of modems) {
-          const option = document.createElement("option");
-          option.value = modem.imei;
-          const label = modem.iccid ? modem.iccid.slice(-8) : modem.state;
-          option.textContent = modem.imei + " · " + label;
-          select.append(option);
-        }
-        if (chosen && modems.some((m) => m.imei === chosen)) select.value = chosen;
-      }
-    }
+    /** The modem every action below is aimed at. */
+    let active = null;
+    let modems = [];
 
-    function log(node) {
-      const pre = document.getElementById("at-log");
-      pre.append(node);
+    const $ = (id) => document.getElementById(id);
+
+    function out(text, cls) {
+      const pre = $("console-out");
+      const span = document.createElement("span");
+      if (cls) span.className = cls;
+      span.textContent = text + "\n";
+      pre.append(span);
       pre.scrollTop = pre.scrollHeight;
     }
 
-    function logLine(text, className) {
-      const span = document.createElement("span");
-      if (className) span.className = className;
-      span.textContent = text + "\n";
-      log(span);
+    async function post(path, body) {
+      const response = await fetch(path, {
+        method:"POST",
+        headers:{ "content-type":"application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
+      return data;
     }
 
-    async function runAt(command) {
-      const imei = document.getElementById("at-modem").value;
-      logLine("> " + command, "sent");
-      let result;
-      try {
-        const response = await fetch("/api/at", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ command, imei: imei || null }),
-        });
-        result = await response.json();
-        if (!response.ok) {
-          logLine(result.error || ("HTTP " + response.status), "fail");
-          return;
-        }
-      } catch (error) {
-        logLine(String(error), "fail");
+    /** Runs work with the button disabled, so a slow probe cannot be queued twice. */
+    async function busy(button, label, work) {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = label;
+      try { await work(); }
+      catch (error) { out("  " + String(error.message || error), "out-fail"); }
+      finally { button.disabled = false; button.textContent = original; }
+    }
+
+    function requireActive() {
+      if (active) return true;
+      out("先选择一个模组", "out-warn");
+      return false;
+    }
+
+    /* ---------- Modems ---------- */
+
+    function setActive(imei) {
+      active = imei;
+      $("target-label").textContent = imei ? imei : "未选择模组";
+      $("send-note").textContent = imei ? "经 " + imei + " 发出" : "未选择模组";
+      renderModems();
+      // The panels below describe the previous modem, and leaving them up
+      // beside a new selection is how someone reads one stick's numbers as
+      // another's.
+      for (const id of ["detail-card","esim-card","scan-card"]) $(id).hidden = true;
+    }
+
+    function renderModems() {
+      const host = $("modems");
+      host.replaceChildren();
+      if (!modems.length) {
+        const p = document.createElement("p");
+        p.className = "empty";
+        p.innerHTML = "<strong>没有检测到模组</strong>插上 USB 模组后会自动出现。";
+        host.append(p);
         return;
       }
-      for (const line of result.lines || []) logLine(line);
-      logLine(result.terminator, result.ok ? "meta" : "fail");
-      logLine("  " + result.port + " · " + result.elapsed_ms + "ms", "meta");
-    }
+      for (const modem of modems) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "modem";
+        card.setAttribute("aria-pressed", String(modem.imei === active));
+        // The card's content is several nested elements, so without this a
+        // screen reader announces only "button" and there is no way to tell
+        // the sticks apart.
+        card.setAttribute(
+          "aria-label",
+          "选择模组 " + modem.imei + "，" + modem.state +
+            (modem.iccid ? "，ICCID " + modem.iccid : ""),
+        );
+        card.addEventListener("click", () => setActive(modem.imei));
 
-    const REG_LABEL = {
-      home: "已注册(本网)", roaming: "已注册(漫游)", searching: "搜网中",
-      denied: "被拒绝", not_registered: "未注册", unknown: "未知",
-    };
+        const top = document.createElement("div");
+        top.className = "modem-top";
+        const imei = document.createElement("span");
+        imei.className = "modem-imei";
+        imei.textContent = modem.imei;
+        const state = document.createElement("span");
+        state.className = "badge " + (STATE_TONE[modem.state] || "badge-idle");
+        state.textContent = modem.state;
+        top.append(imei, state);
 
-    function fact(list, label, value, tone) {
-      const row = document.createElement("div");
-      row.className = "fact";
-      const dt = document.createElement("dt");
-      dt.textContent = label;
-      const dd = document.createElement("dd");
-      if (value === null || value === undefined || value === "") {
-        dd.textContent = "—";
-        dd.className = "absent";
-      } else {
-        dd.textContent = value;
-        if (tone) dd.className = tone;
+        const meta = document.createElement("div");
+        meta.className = "modem-meta";
+        const iccid = document.createElement("span");
+        iccid.className = "mono";
+        iccid.textContent = modem.iccid ? "ICCID " + modem.iccid : "ICCID —";
+        const family = document.createElement("span");
+        family.textContent = modem.family;
+        meta.append(iccid, family);
+
+        card.append(top, meta);
+        host.append(card);
       }
-      row.append(dt, dd);
-      list.append(row);
     }
 
-    async function runReport(imei, button) {
-      const card = document.getElementById("detail-card");
-      const facts = document.getElementById("detail-facts");
-      const label = button.textContent;
-      button.disabled = true;
-      button.textContent = "读取中…";
-      try {
-        const response = await fetch("/api/report", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei }),
-        });
-        const r = await response.json();
-        if (!response.ok) {
-          logLine("体检失败: " + (r.error || response.status), "fail");
-          return;
-        }
-        document.getElementById("detail-target").textContent = imei + " · " + r.port;
+    /* ---------- Actions on the active modem ---------- */
+
+    async function runReport(button) {
+      if (!requireActive()) return;
+      await busy(button, "读取中…", async () => {
+        const r = await post("/api/report", { imei: active });
+        $("detail-note").textContent = active + " · " + r.port;
+        const facts = $("detail-facts");
         facts.replaceChildren();
+        const fact = (label, value, tone) => {
+          const row = document.createElement("div"); row.className = "fact";
+          const dt = document.createElement("dt"); dt.textContent = label;
+          const dd = document.createElement("dd");
+          if (value === null || value === undefined || value === "") { dd.textContent = "—"; dd.className = "absent"; }
+          else { dd.textContent = value; if (tone) dd.className = tone; }
+          row.append(dt, dd); facts.append(row);
+        };
         const dbm = r.signal_dbm;
-        fact(facts, "信号", dbm === null ? null : dbm + " dBm (CSQ " + r.signal_index + ")",
-             dbm === null ? null : (dbm > -85 ? "good" : dbm > -100 ? null : "bad"));
-        // CS and PS are shown separately on purpose: a module can be attached
-        // for data and still have no circuit-switched domain, which is exactly
-        // the state in which SMS silently fails.
-        for (const [key, name] of [["cs_registration", "注册 CS"], ["ps_registration", "注册 PS"]]) {
-          const state = r[key];
-          fact(facts, name, state ? (REG_LABEL[state] || state) : null,
-               state === "home" || state === "roaming" ? "good" : state ? "bad" : null);
+        fact("信号", dbm === null ? null : dbm + " dBm (CSQ " + r.signal_index + ")",
+             dbm === null ? null : dbm > -85 ? "good" : dbm > -100 ? null : "bad");
+        // CS and PS are shown apart on purpose: a modem can be attached for
+        // data with no circuit-switched domain, which is exactly the state in
+        // which SMS quietly fails.
+        for (const [key,name] of [["cs_registration","注册 CS"],["ps_registration","注册 PS"]]) {
+          const v = r[key];
+          fact(name, v ? (REG_LABEL[v] || v) : null,
+               v === "home" || v === "roaming" ? "good" : v ? "bad" : null);
         }
-        fact(facts, "运营商", r.operator);
-        fact(facts, "接入制式", r.access_technology);
-        fact(facts, "ICCID", r.iccid);
-        fact(facts, "IMSI", r.imsi);
-        fact(facts, "本机号", r.msisdn);
-        fact(facts, "短信中心", r.sms_centre, r.sms_centre ? "good" : "bad");
-        fact(facts, "固件", r.firmware);
-        const refused = document.getElementById("detail-refused");
-        refused.textContent = (r.refused || []).length
-          ? "模组拒绝了: " + r.refused.join("、")
-          : "";
-        card.hidden = false;
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      } catch (error) {
-        logLine("体检失败: " + String(error), "fail");
-      } finally {
-        button.disabled = false;
-        button.textContent = label;
-      }
+        fact("运营商", r.operator); fact("接入制式", r.access_technology);
+        fact("ICCID", r.iccid); fact("IMSI", r.imsi); fact("本机号", r.msisdn);
+        fact("短信中心", r.sms_centre, r.sms_centre ? "good" : "bad");
+        fact("固件", r.firmware);
+        $("detail-refused").textContent = (r.refused || []).length
+          ? "模组拒绝了: " + r.refused.join("、") : "";
+        $("detail-card").hidden = false;
+        out("体检 " + active + " 完成", "out-meta");
+      });
     }
 
-    async function setRadio(imei, button) {
-      const online = button.textContent === "开射频";
-      if (!confirm((online ? "恢复" : "关闭") + " " + imei + " 的射频？")) return;
-      button.disabled = true;
-      try {
-        const response = await fetch("/api/radio", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei, online }),
-        });
-        const result = await response.json();
-        if (response.ok) {
-          button.textContent = online ? "关射频" : "开射频";
-        } else {
-          logLine("射频切换失败: " + (result.error || response.status), "fail");
+    async function runEsim(button) {
+      if (!requireActive()) return;
+      await busy(button, "读取中…", async () => {
+        const r = await post("/api/esim", { imei: active });
+        const rows = $("esim-rows");
+        rows.replaceChildren();
+        const list = r.profiles || [];
+        $("esim-note").textContent = active + " · " + list.length + " 个 profile";
+        if (!list.length) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 5; td.className = "empty"; td.textContent = "卡上没有 profile";
+          tr.append(td); rows.append(tr);
         }
-      } catch (error) {
-        logLine("射频切换失败: " + String(error), "fail");
-      } finally {
-        button.disabled = false;
-        setTimeout(() => load().catch(() => {}), 4000);
+        for (const p of list) {
+          const tr = document.createElement("tr");
+          const cell = (t) => { const td = document.createElement("td"); td.textContent = t; return td; };
+          const stateTd = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "badge " + (p.enabled ? "badge-ok" : "badge-idle");
+          badge.textContent = p.enabled ? "已启用" : "未启用";
+          stateTd.append(badge);
+          const actTd = document.createElement("td");
+          const act = document.createElement("button");
+          act.type = "button";
+          act.className = "risk small";
+          act.textContent = p.enabled ? "停用" : "启用";
+          act.addEventListener("click", () => switchProfile(p.iccid, !p.enabled, act));
+          actTd.append(act);
+          tr.append(cell(p.nickname || p.name || "—"), cell(p.iccid), cell(p.provider || "—"));
+          tr.append(stateTd, actTd);
+          rows.append(tr);
+        }
+        $("esim-card").hidden = false;
+      });
+    }
+
+    async function switchProfile(iccid, enable, button) {
+      // Disabling the only enabled profile takes the card off the network with
+      // nothing to fall back to, so this one asks first.
+      if (!confirm((enable ? "启用" : "停用") + " profile " + iccid + "？\n模组会短暂脱网并触发卡片 REFRESH。")) return;
+      await busy(button, "执行中…", async () => {
+        await post("/api/esim/switch", { imei: active, iccid, enable });
+        out("profile " + iccid + (enable ? " 已启用" : " 已停用"), "out-meta");
+        setTimeout(() => { load(); }, 8000);
+      });
+    }
+
+    async function runScan(button) {
+      if (!requireActive()) return;
+      if (!confirm("对 " + active + " 全频段扫网？\n模组会停止服务，最长两分钟。")) return;
+      out("> 扫网 " + active + "（耗时较久）", "out-cmd");
+      await busy(button, "扫描中…", async () => {
+        const r = await post("/api/scan", { imei: active });
+        const rows = $("scan-rows");
+        rows.replaceChildren();
+        const found = r.operators || [];
+        $("scan-note").textContent = active + " · " + Math.round(r.elapsed_ms/1000) + "s · " + found.length + " 个网络";
+        if (!found.length) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 4; td.className = "empty"; td.textContent = "没有扫到网络";
+          tr.append(td); rows.append(tr);
+        }
+        for (const op of found) {
+          const tr = document.createElement("tr");
+          const cell = (t) => { const td = document.createElement("td"); td.textContent = t; return td; };
+          const st = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "badge " + (op.status === "current" ? "badge-ok" : op.status === "forbidden" ? "badge-bad" : "badge-idle");
+          badge.textContent = { current:"当前", available:"可用", forbidden:"禁止" }[op.status] || op.status;
+          st.append(badge);
+          tr.append(cell(op.long_name || op.short_name), cell(op.numeric), cell(op.access_technology || "—"), st);
+          rows.append(tr);
+        }
+        $("scan-card").hidden = false;
+        out("  扫到 " + found.length + " 个网络", "out-meta");
+      });
+    }
+
+    async function toggleRadio(button) {
+      if (!requireActive()) return;
+      const goOnline = button.dataset.online === "false";
+      if (!confirm((goOnline ? "恢复" : "关闭") + " " + active + " 的射频？")) return;
+      await busy(button, "执行中…", async () => {
+        await post("/api/radio", { imei: active, online: goOnline });
+        button.dataset.online = String(goOnline);
+        button.textContent = goOnline ? "关射频" : "开射频";
+        out("射频已" + (goOnline ? "恢复" : "关闭"), "out-warn");
+        setTimeout(load, 5000);
+      });
+    }
+
+    async function usbReset(button) {
+      if (!requireActive()) return;
+      if (!confirm("重新枚举 " + active + " 的 USB 设备？\nQMI 栈卡死时这是唯一能恢复的手段。")) return;
+      await busy(button, "复位中…", async () => {
+        const r = await post("/api/usb-reset", { imei: active });
+        out("USB " + r.device + " 已重新枚举（" + r.node + "）", "out-warn");
+        setTimeout(load, 12000);
+      });
+    }
+
+    /* ---------- Console ---------- */
+
+    async function runAt(command) {
+      out("> " + command, "out-cmd");
+      const r = await post("/api/at", { command, imei: active || null });
+      for (const line of r.lines || []) out(line);
+      out(r.terminator, r.ok ? "out-meta" : "out-fail");
+      out("  " + r.port + " · " + r.elapsed_ms + "ms", "out-meta");
+    }
+
+    async function runUssd(code) {
+      out("> USSD " + code, "out-cmd");
+      const r = await post("/api/ussd", { code, imei: active || null });
+      if (r.text) out(r.text);
+      out("  " + r.stage + " · " + Math.round(r.elapsed_ms/100)/10 + "s", "out-meta");
+      if (r.expects_reply) out("  运营商在等待回复——把选项填进输入框再发一次", "out-warn");
+      $("ussd-cancel").hidden = !r.expects_reply;
+    }
+
+    /* ---------- Loading ---------- */
+
+    async function load() {
+      const [status, inbox] = await Promise.all([
+        fetch("/api/status").then((r) => r.json()),
+        fetch("/api/messages").then((r) => r.json()),
+      ]);
+      const flag = $("mode-flag");
+      flag.textContent = status.mode || "local";
+      flag.className = "badge " + (status.mode === "cloud" ? "badge-ok" : "badge-idle");
+
+      modems = status.modems || [];
+      // A modem that was unplugged stops being a valid target; keeping it
+      // selected would aim every action at something that is not there.
+      if (active && !modems.some((m) => m.imei === active)) setActive(null);
+      else renderModems();
+
+      const rows = $("messages");
+      rows.replaceChildren();
+      const list = inbox.messages || [];
+      if (!list.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 4; td.className = "empty";
+        td.innerHTML = "<strong>还没有本地短信</strong>模组收到短信后会立刻出现在这里。";
+        tr.append(td); rows.append(tr);
+      }
+      for (const m of list) {
+        const tr = document.createElement("tr");
+        const cell = (t) => { const td = document.createElement("td"); td.textContent = t; return td; };
+        const bearer = document.createElement("td");
+        const badge = document.createElement("span");
+        badge.className = "badge badge-info"; badge.textContent = m.bearer;
+        bearer.append(badge);
+        tr.append(cell(m.peer), cell(m.body));
+        tr.append(bearer);
+        tr.append(cell(m.received_at ? new Date(m.received_at).toISOString().replace("T"," ").slice(0,19) : "—"));
+        rows.append(tr);
       }
     }
 
@@ -327,344 +640,94 @@
         const response = await fetch("/api/logs?after=" + logCursor);
         if (!response.ok) return;
         const result = await response.json();
-        const pre = document.getElementById("run-log");
+        const pre = $("run-log");
         for (const line of result.lines || []) {
           const span = document.createElement("span");
-          const when = new Date(line.at).toTimeString().slice(0, 8);
-          span.textContent = when + "  " + line.text + "\n";
-          if (/FAIL|error|failed|unavailable/i.test(line.text)) span.className = "fail";
+          span.textContent = new Date(line.at).toTimeString().slice(0,8) + "  " + line.text + "\n";
+          if (/FAIL|error|failed|unavailable/i.test(line.text)) span.className = "out-fail";
           pre.append(span);
         }
-        // Keep the view bounded; the ring on the server is bounded too.
         while (pre.childNodes.length > 400) pre.removeChild(pre.firstChild);
-        if (result.lines && result.lines.length) pre.scrollTop = pre.scrollHeight;
+        if ((result.lines || []).length) pre.scrollTop = pre.scrollHeight;
         logCursor = result.cursor || logCursor;
-      } catch (error) {
-        // A dropped poll costs one interval; the cursor makes the next one
-        // pick up exactly where this left off.
-      }
+      } catch { /* one dropped poll costs one interval; the cursor resumes it */ }
     }
 
-    document.getElementById("log-toggle").addEventListener("click", (event) => {
-      logPaused = !logPaused;
-      event.currentTarget.textContent = logPaused ? "继续" : "暂停";
-      document.getElementById("log-note").textContent = logPaused ? "已暂停" : "实时";
-    });
+    /* ---------- Wiring ---------- */
 
-    function ussdLine(text, className) {
-      const pre = document.getElementById("ussd-log");
-      const span = document.createElement("span");
-      if (className) span.className = className;
-      span.textContent = text + "\n";
-      pre.append(span);
-      pre.scrollTop = pre.scrollHeight;
-    }
-
-    async function runUssd(code) {
-      const imei = document.getElementById("ussd-modem").value;
-      const status = document.getElementById("ussd-status");
-      ussdLine("> " + code, "sent");
-      status.textContent = "等待运营商回复…";
-      try {
-        const response = await fetch("/api/ussd", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ code, imei: imei || null }),
-        });
-        const result = await response.json();
-        if (!response.ok) {
-          ussdLine(result.error || ("HTTP " + response.status), "fail");
-          status.textContent = "失败";
-          return;
-        }
-        if (result.text) ussdLine(result.text);
-        ussdLine("  " + result.stage + " · " + Math.round(result.elapsed_ms / 100) / 10 + "s", "meta");
-        // A menu keeps the session open; the reply goes back on the same
-        // session, so tell the operator rather than leaving it hanging.
-        status.textContent = result.expects_reply
-          ? "运营商在等待回复——直接把选项填进输入框再发一次。"
-          : "会话已结束";
-      } catch (error) {
-        ussdLine(String(error), "fail");
-        status.textContent = "失败";
-      }
-    }
-
-    document.getElementById("ussd-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const input = event.currentTarget.elements.code;
-      const code = input.value.trim();
-      if (!code) return;
-      await runUssd(code);
-    });
-
-    document.getElementById("ussd-cancel").addEventListener("click", async () => {
-      const imei = document.getElementById("ussd-modem").value;
-      const status = document.getElementById("ussd-status");
-      const response = await fetch("/api/ussd/cancel", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ imei: imei || null }),
-      });
-      ussdLine("> 取消会话", "sent");
-      status.textContent = response.ok ? "已取消" : "取消失败";
-    });
-
-    async function scanOperators(imei, button) {
-      if (!confirm("对 " + imei + " 全频段扫网？\n模组会停止服务，最长两分钟。")) return;
-      const card = document.getElementById("scan-card");
-      const rows = document.getElementById("scan-rows");
-      const label = button.textContent;
-      button.disabled = true;
-      button.textContent = "扫描中…";
-      logLine("> 扫网 " + imei + "（可能耗时较久）", "sent");
-      try {
-        const response = await fetch("/api/scan", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei }),
-        });
-        const result = await response.json();
-        if (!response.ok) {
-          logLine("  扫网失败: " + (result.error || response.status), "fail");
-          return;
-        }
-        document.getElementById("scan-target").textContent =
-          imei + " · " + Math.round(result.elapsed_ms / 1000) + "s";
-        rows.replaceChildren();
-        const found = result.operators || [];
-        if (!found.length) {
-          const tr = document.createElement("tr");
-          const td = document.createElement("td");
-          td.colSpan = 4; td.className = "empty"; td.textContent = "没有扫到网络";
-          tr.append(td); rows.append(tr);
-        }
-        for (const op of found) {
-          const tr = document.createElement("tr");
-          const state = document.createElement("td");
-          state.textContent = { current: "当前", available: "可用", forbidden: "禁止" }[op.status] || op.status;
-          state.className = op.status === "current" ? "sent" : op.status === "forbidden" ? "fail" : "meta";
-          tr.append(cell(op.long_name || op.short_name), cell(op.numeric), cell(op.access_technology || "—"));
-          tr.append(state);
-          rows.append(tr);
-        }
-        logLine("  扫到 " + found.length + " 个网络", "meta");
-        card.hidden = false;
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      } catch (error) {
-        logLine("  扫网失败: " + String(error), "fail");
-      } finally {
-        button.disabled = false;
-        button.textContent = label;
-      }
-    }
-
-    async function listProfiles(imei, button) {
-      const card = document.getElementById("esim-card");
-      const rows = document.getElementById("esim-rows");
-      const label = button.textContent;
-      button.disabled = true;
-      button.textContent = "读取中…";
-      try {
-        const response = await fetch("/api/esim", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei }),
-        });
-        const result = await response.json();
-        if (!response.ok) {
-          logLine("eSIM 读取失败: " + (result.error || response.status), "fail");
-          return;
-        }
-        document.getElementById("esim-target").textContent = imei;
-        rows.replaceChildren();
-        const profiles = result.profiles || [];
-        if (!profiles.length) {
-          const tr = document.createElement("tr");
-          const td = document.createElement("td");
-          td.colSpan = 5; td.className = "empty"; td.textContent = "卡上没有 profile";
-          tr.append(td); rows.append(tr);
-        }
-        for (const profile of profiles) {
-          const tr = document.createElement("tr");
-          const state = document.createElement("td");
-          state.textContent = profile.enabled ? "已启用" : "已停用";
-          state.className = profile.enabled ? "sent" : "meta";
-          const action = document.createElement("td");
-          const toggle = document.createElement("button");
-          toggle.type = "button";
-          toggle.className = "ghost";
-          toggle.textContent = profile.enabled ? "停用" : "启用";
-          toggle.addEventListener("click", () =>
-            switchProfile(imei, profile.iccid, !profile.enabled, toggle));
-          action.append(toggle);
-          tr.append(cell(profile.label), cell(profile.iccid), cell(profile.provider || "—"));
-          tr.append(state, action);
-          rows.append(tr);
-        }
-        card.hidden = false;
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      } catch (error) {
-        logLine("eSIM 读取失败: " + String(error), "fail");
-      } finally {
-        button.disabled = false;
-        button.textContent = label;
-      }
-    }
-
-    async function switchProfile(imei, iccid, enable, button) {
-      const verb = enable ? "启用" : "停用";
-      if (!confirm(verb + " profile " + iccid + "？\n模组会短暂脱网。")) return;
-      button.disabled = true;
-      button.textContent = verb + "中…";
-      logLine("> eSIM " + verb + " " + iccid, "sent");
-      try {
-        const response = await fetch("/api/esim/switch", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei, iccid, enable }),
-        });
-        const result = await response.json();
-        logLine(response.ok ? "  完成" : "  " + (result.error || response.status),
-                response.ok ? "meta" : "fail");
-      } catch (error) {
-        logLine("  " + String(error), "fail");
-      }
-      // The card refreshes and the module re-registers; give it time before
-      // showing a list that would otherwise still say the old thing.
-      setTimeout(() => {
-        const trigger = document.getElementById("esim-card");
-        if (!trigger.hidden) listProfiles(imei, button);
-        load().catch(() => {});
-      }, 8000);
-    }
-
-    async function usbReset(imei, button) {
-      button.disabled = true;
-      button.textContent = "复位中…";
-      logLine("> USB 复位 " + imei, "sent");
-      try {
-        const response = await fetch("/api/usb-reset", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ imei }),
-        });
-        const result = await response.json();
-        if (response.ok) {
-          logLine("  " + result.device + " 已重新枚举 (" + result.node + ")", "meta");
-        } else {
-          logLine("  " + (result.error || ("HTTP " + response.status)), "fail");
-        }
-      } catch (error) {
-        logLine("  " + String(error), "fail");
-      }
-      // Re-enumeration takes several seconds; the poll loop rediscovers the
-      // character device on its own, so just let the next refresh show it.
-      setTimeout(() => load().catch(() => {}), 12000);
-    }
-
-    async function load() {
-      const [status, inbox] = await Promise.all([
-        fetch("/api/status").then((r) => r.json()),
-        fetch("/api/messages").then((r) => r.json()),
-      ]);
-      document.getElementById("status-flag").textContent = status.mode || "local";
-      const modems = status.modems || [];
-      syncModemOptions(modems);
-      fill("modems", modems.map((modem) => {
-        const tr = document.createElement("tr");
-        const action = document.createElement("td");
-        const group = document.createElement("div");
-        group.className = "row-actions";
-        const radio = document.createElement("button");
-        radio.type = "button";
-        radio.className = "ghost";
-        radio.textContent = "关射频";
-        radio.title = "把模组切到低功耗（等价飞行模式），会脱网。再点恢复。";
-        radio.addEventListener("click", () => setRadio(modem.imei, radio));
-        const scan = document.createElement("button");
-        scan.type = "button";
-        scan.className = "ghost";
-        scan.textContent = "扫网";
-        scan.title = "AT+COPS=? 全频段扫描。期间模组停止服务，最长两分钟。";
-        scan.addEventListener("click", () => scanOperators(modem.imei, scan));
-        const esim = document.createElement("button");
-        esim.type = "button";
-        esim.className = "ghost";
-        esim.textContent = "eSIM";
-        esim.title = "读取 eUICC 上的 profile 列表。";
-        esim.addEventListener("click", () => listProfiles(modem.imei, esim));
-        const probe = document.createElement("button");
-        probe.type = "button";
-        probe.className = "ghost";
-        probe.textContent = "体检";
-        probe.title = "下发一批只读 AT 命令，取信号、注册、运营商、卡标识。";
-        probe.addEventListener("click", () => runReport(modem.imei, probe));
-        const reset = document.createElement("button");
-        reset.type = "button";
-        reset.className = "ghost";
-        reset.textContent = "USB 复位";
-        reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
-        reset.addEventListener("click", () => usbReset(modem.imei, reset));
-        group.append(probe, esim, scan, radio, reset);
-        action.append(group);
-        tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
-        tr.append(action);
-        return tr;
-      }), 5, "没有模组");
-      fill("messages", (inbox.messages || []).map((message) => {
-        const tr = document.createElement("tr");
-        const when = message.received_at ? new Date(message.received_at).toISOString() : "—";
-        tr.append(cell(message.peer), cell(message.body), cell(message.bearer), cell(when));
-        return tr;
-      }), 4, "没有本地短信");
-    }
-
-    const quick = document.getElementById("at-quick");
     for (const [label, command] of QUICK) {
       const button = document.createElement("button");
-      button.type = "button";
-      button.className = "ghost";
-      button.textContent = label;
-      button.title = command;
-      button.addEventListener("click", () => runAt(command));
-      quick.append(button);
+      button.type = "button"; button.className = "read small";
+      button.textContent = label; button.title = command;
+      button.addEventListener("click", () => busy(button, "…", () => runAt(command)));
+      $("quick").append(button);
     }
 
-    document.getElementById("at-form").addEventListener("submit", async (event) => {
+    // Per-modem actions live in the card head so they read as "act on the
+    // selected modem" rather than being repeated on every row.
+    const ACTIONS = [
+      ["体检", "read", runReport],
+      ["eSIM", "read", runEsim],
+      ["扫网", "risk", runScan],
+      ["关射频", "risk", toggleRadio],
+      ["USB 复位", "risk", usbReset],
+    ];
+    const actionHost = $("modem-actions");
+    for (const [label, tier, handler] of ACTIONS) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = tier + " small"; button.textContent = label;
+      if (label === "关射频") button.dataset.online = "true";
+      button.addEventListener("click", () => handler(button));
+      actionHost.insertBefore(button, actionHost.firstChild);
+    }
+
+    $("console-mode").addEventListener("change", (event) => {
+      const ussd = event.target.value === "ussd";
+      $("console-input").placeholder = ussd ? "*100#" : "AT+CSQ";
+      $("ussd-cancel").hidden = true;
+    });
+
+    $("console-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const input = event.currentTarget.elements.command;
-      const command = input.value.trim();
-      if (!command) return;
+      const input = $("console-input");
+      const value = input.value.trim();
+      if (!value) return;
       input.value = "";
-      await runAt(command);
+      const ussd = $("console-mode").value === "ussd";
+      await busy($("console-run"), "执行中…", () => (ussd ? runUssd(value) : runAt(value)));
     });
 
-    document.getElementById("at-clear").addEventListener("click", () => {
-      document.getElementById("at-log").replaceChildren();
+    $("ussd-cancel").addEventListener("click", async () => {
+      await post("/api/ussd/cancel", { imei: active || null }).catch(() => {});
+      out("> USSD 会话已取消", "out-cmd");
+      $("ussd-cancel").hidden = true;
     });
 
-    document.getElementById("send-form").addEventListener("submit", async (event) => {
+    $("send-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const form = event.currentTarget;
-      const data = new FormData(form);
-      const status = document.getElementById("send-status");
+      const data = new FormData(event.currentTarget);
+      const status = $("send-status");
       status.textContent = "发送中…";
-      const response = await fetch("/api/send", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          to: data.get("to"),
-          body: data.get("body"),
-          imei: data.get("imei") || null,
-        }),
-      });
-      status.textContent = response.ok ? "已发送" : "发送失败";
+      try {
+        await post("/api/send", {
+          to: data.get("to"), body: data.get("body"), imei: active || null,
+        });
+        status.textContent = "已发送";
+        event.currentTarget.reset();
+      } catch (error) {
+        status.textContent = "发送失败：" + (error.message || error);
+      }
     });
 
-    load().catch(() => {
-      document.getElementById("status-flag").textContent = "error";
+    $("clear-console").addEventListener("click", () => $("console-out").replaceChildren());
+    $("refresh").addEventListener("click", (event) => busy(event.currentTarget, "…", load));
+    $("log-toggle").addEventListener("click", (event) => {
+      logPaused = !logPaused;
+      event.currentTarget.textContent = logPaused ? "继续" : "暂停";
+      $("log-note").textContent = logPaused ? "已暂停" : "实时";
     });
+
+    load().catch(() => { $("mode-flag").textContent = "error"; });
     setInterval(() => load().catch(() => {}), 10000);
     pollLogs();
     setInterval(pollLogs, 2000);

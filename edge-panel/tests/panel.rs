@@ -49,7 +49,9 @@ async fn panel_serves_embedded_html_and_local_json() {
     assert!(page.contains("/api/messages"));
     assert!(page.contains("/api/status"));
     assert!(page.contains("/api/at"));
-    assert!(page.contains("id=\"at-log\""));
+    assert!(page.contains("id=\"console-out\""));
+    assert!(page.contains("/api/report"));
+    assert!(page.contains("/api/logs"));
 
     let status = app
         .clone()
