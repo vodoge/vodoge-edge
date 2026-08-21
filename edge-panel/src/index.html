@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VoDoge Edge</title>
   <style>
-    :root { color-scheme: dark; --bg:#10141c; --raised:#171d28; --fg:#e8eef6; --muted:#93a0b3; --line:#2a3444; --accent:#3ecf8e; }
+    :root { color-scheme: dark; --bg:#10141c; --raised:#171d28; --fg:#e8eef6; --muted:#93a0b3; --line:#2a3444; --accent:#3ecf8e; --warn:#e8a33d; --bad:#e06c6c; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
     header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--raised); display: flex; gap: 1rem; align-items: center; }
@@ -13,35 +13,59 @@
     .muted { color: var(--muted); font-size: .9rem; }
     main { padding: 1.25rem; display: grid; gap: 1.25rem; }
     section { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-    h2 { margin: 0; padding: .8rem 1rem; font-size: .95rem; border-bottom: 1px solid var(--line); }
+    h2 { margin: 0; padding: .8rem 1rem; font-size: .95rem; border-bottom: 1px solid var(--line); display: flex; gap: .6rem; align-items: baseline; }
+    h2 .note { font-weight: 400; font-size: .8rem; color: var(--muted); }
     table { width: 100%; border-collapse: collapse; font-size: .95rem; }
     th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--line); }
     th { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
     .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
     .offline { color: var(--accent); margin-left: auto; font-size: .8rem; }
     form { display: flex; gap: .5rem; padding: .8rem 1rem; flex-wrap: wrap; align-items: center; }
-    input { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: .45rem .6rem; font: inherit; }
+    input, select { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: .45rem .6rem; font: inherit; }
+    input[name="command"] { flex: 1 1 22rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     button { background: var(--accent); color: #102018; border: 0; border-radius: 8px; padding: .45rem .7rem; font: inherit; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    button.ghost:hover { color: var(--fg); border-color: var(--accent); }
+    .quick { display: flex; flex-wrap: wrap; gap: .4rem; padding: 0 1rem .8rem; }
+    .quick button { font-size: .8rem; padding: .3rem .55rem; }
+    pre#at-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
+    pre#at-log:empty::before { content: "尚未执行命令"; color: var(--muted); }
+    .sent { color: var(--accent); }
+    .fail { color: var(--bad); }
+    .meta { color: var(--muted); }
     .hint { color: var(--muted); font-size: .85rem; padding: 0 1rem 1rem; }
+    .danger { color: var(--warn); }
   </style>
 </head>
 <body>
   <header>
     <h1>VoDoge Edge</h1>
-    <span class="muted">本地面板 · 断网可用</span>
+    <span class="muted">本地调试终端 · 断网可用</span>
     <span class="offline" id="status-flag">local</span>
   </header>
   <main>
     <section>
       <h2>模组</h2>
       <table>
-        <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th></tr></thead>
-        <tbody id="modems"><tr><td class="empty" colspan="4">加载中</td></tr></tbody>
+        <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="modems"><tr><td class="empty" colspan="5">加载中</td></tr></tbody>
       </table>
+    </section>
+    <section>
+      <h2>AT 控制台 <span class="note danger">直连模组，命令原样下发</span></h2>
+      <form id="at-form">
+        <select id="at-modem" name="imei"><option value="">默认模组</option></select>
+        <input name="command" required placeholder="AT+CSQ" autocomplete="off" spellcheck="false">
+        <button type="submit">执行</button>
+        <button type="button" class="ghost" id="at-clear">清空</button>
+      </form>
+      <div class="quick" id="at-quick"></div>
+      <pre id="at-log"></pre>
     </section>
     <section>
       <h2>本机发送</h2>
       <form id="send-form">
+        <select id="send-modem" name="imei"><option value="">默认模组</option></select>
         <input name="to" required placeholder="号码">
         <input name="body" required placeholder="内容">
         <button type="submit">发送</button>
@@ -57,6 +81,24 @@
     </section>
   </main>
   <script>
+    // Commands that answer a question. Anything that changes module state is
+    // deliberately absent: a one-click AT+CFUN=1,1 is how a module ends up
+    // wedged with its data session gone.
+    const QUICK = [
+      ["信号", "AT+CSQ"],
+      ["注册(CS)", "AT+CREG?"],
+      ["注册(PS)", "AT+CEREG?"],
+      ["运营商", "AT+COPS?"],
+      ["SIM", "AT+CPIN?"],
+      ["ICCID", "AT+QCCID"],
+      ["IMSI", "AT+CIMI"],
+      ["本机号", "AT+CNUM"],
+      ["固件", "AT+QGMR"],
+      ["载波配置", "AT+QMBNCFG=\"list\""],
+      ["短信中心", "AT+CSCA?"],
+      ["IMS", "AT+QCFG=\"ims\""],
+    ];
+
     function cell(text) { const td = document.createElement("td"); td.textContent = text; return td; }
     function fill(id, rows, cols, empty) {
       const body = document.getElementById(id);
@@ -73,17 +115,110 @@
       }
       for (const row of rows) body.append(row);
     }
+
+    function syncModemOptions(modems) {
+      for (const id of ["at-modem", "send-modem"]) {
+        const select = document.getElementById(id);
+        const chosen = select.value;
+        select.replaceChildren();
+        const any = document.createElement("option");
+        any.value = "";
+        any.textContent = "默认模组";
+        select.append(any);
+        for (const modem of modems) {
+          const option = document.createElement("option");
+          option.value = modem.imei;
+          const label = modem.iccid ? modem.iccid.slice(-8) : modem.state;
+          option.textContent = modem.imei + " · " + label;
+          select.append(option);
+        }
+        if (chosen && modems.some((m) => m.imei === chosen)) select.value = chosen;
+      }
+    }
+
+    function log(node) {
+      const pre = document.getElementById("at-log");
+      pre.append(node);
+      pre.scrollTop = pre.scrollHeight;
+    }
+
+    function logLine(text, className) {
+      const span = document.createElement("span");
+      if (className) span.className = className;
+      span.textContent = text + "\n";
+      log(span);
+    }
+
+    async function runAt(command) {
+      const imei = document.getElementById("at-modem").value;
+      logLine("> " + command, "sent");
+      let result;
+      try {
+        const response = await fetch("/api/at", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ command, imei: imei || null }),
+        });
+        result = await response.json();
+        if (!response.ok) {
+          logLine(result.error || ("HTTP " + response.status), "fail");
+          return;
+        }
+      } catch (error) {
+        logLine(String(error), "fail");
+        return;
+      }
+      for (const line of result.lines || []) logLine(line);
+      logLine(result.terminator, result.ok ? "meta" : "fail");
+      logLine("  " + result.port + " · " + result.elapsed_ms + "ms", "meta");
+    }
+
+    async function usbReset(imei, button) {
+      button.disabled = true;
+      button.textContent = "复位中…";
+      logLine("> USB 复位 " + imei, "sent");
+      try {
+        const response = await fetch("/api/usb-reset", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei }),
+        });
+        const result = await response.json();
+        if (response.ok) {
+          logLine("  " + result.device + " 已重新枚举 (" + result.node + ")", "meta");
+        } else {
+          logLine("  " + (result.error || ("HTTP " + response.status)), "fail");
+        }
+      } catch (error) {
+        logLine("  " + String(error), "fail");
+      }
+      // Re-enumeration takes several seconds; the poll loop rediscovers the
+      // character device on its own, so just let the next refresh show it.
+      setTimeout(() => load().catch(() => {}), 12000);
+    }
+
     async function load() {
       const [status, inbox] = await Promise.all([
         fetch("/api/status").then((r) => r.json()),
         fetch("/api/messages").then((r) => r.json()),
       ]);
       document.getElementById("status-flag").textContent = status.mode || "local";
-      fill("modems", (status.modems || []).map((modem) => {
+      const modems = status.modems || [];
+      syncModemOptions(modems);
+      fill("modems", modems.map((modem) => {
         const tr = document.createElement("tr");
+        const action = document.createElement("td");
+        const reset = document.createElement("button");
+        reset.type = "button";
+        reset.className = "ghost";
+        reset.textContent = "USB 复位";
+        reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
+        reset.addEventListener("click", () => usbReset(modem.imei, reset));
+        action.append(reset);
         tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
+        tr.append(action);
         return tr;
-      }), 4, "没有模组");
+      }), 5, "没有模组");
       fill("messages", (inbox.messages || []).map((message) => {
         const tr = document.createElement("tr");
         const when = message.received_at ? new Date(message.received_at).toISOString() : "—";
@@ -91,21 +226,53 @@
         return tr;
       }), 4, "没有本地短信");
     }
+
+    const quick = document.getElementById("at-quick");
+    for (const [label, command] of QUICK) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      button.textContent = label;
+      button.title = command;
+      button.addEventListener("click", () => runAt(command));
+      quick.append(button);
+    }
+
+    document.getElementById("at-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.command;
+      const command = input.value.trim();
+      if (!command) return;
+      input.value = "";
+      await runAt(command);
+    });
+
+    document.getElementById("at-clear").addEventListener("click", () => {
+      document.getElementById("at-log").replaceChildren();
+    });
+
     document.getElementById("send-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const data = new FormData(form);
       const status = document.getElementById("send-status");
+      status.textContent = "发送中…";
       const response = await fetch("/api/send", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ to: data.get("to"), body: data.get("body") }),
+        body: JSON.stringify({
+          to: data.get("to"),
+          body: data.get("body"),
+          imei: data.get("imei") || null,
+        }),
       });
       status.textContent = response.ok ? "已发送" : "发送失败";
     });
+
     load().catch(() => {
       document.getElementById("status-flag").textContent = "error";
     });
+    setInterval(() => load().catch(() => {}), 10000);
   </script>
 </body>
 </html>

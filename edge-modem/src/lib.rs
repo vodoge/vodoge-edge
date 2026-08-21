@@ -4,6 +4,7 @@
 //! QMI-over-MBIM adapter owns byte I/O, while this crate owns the binary
 //! invariants needed before a frame can be sent or accepted.
 
+mod at;
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
 mod channels;
@@ -20,6 +21,7 @@ mod result;
 mod send;
 mod session;
 mod uim;
+mod usb;
 mod wms;
 
 use std::{
@@ -28,6 +30,8 @@ use std::{
     fmt,
 };
 
+pub use at::{at_port_for_qmi, AtError, AtExchange, AtPort, AT_CONTROL_INTERFACE};
+pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
 pub use channels::LogicalChannels;

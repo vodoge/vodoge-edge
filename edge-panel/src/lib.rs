@@ -38,6 +38,36 @@ pub trait Inbox: Send + Sync {
 pub trait Actions: Send + Sync {
     fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError>;
     fn restart_modem(&self, imei: String) -> Result<(), PanelError>;
+    /// Run one AT command against a modem's control port.
+    ///
+    /// A module that answers `+CME ERROR` has answered, so that comes back as
+    /// `Ok` carrying the error terminator. Only losing the port is an `Err`:
+    /// a console has to show what the module actually said.
+    fn at_command(&self, imei: Option<String>, command: String) -> Result<AtResult, PanelError>;
+    /// Re-enumerate a modem's USB device.
+    ///
+    /// `restart_modem` goes through QMI, so it cannot recover a module whose
+    /// QMI stack has desynced — allocating a client to send the restart is
+    /// itself a QMI request. This is the path that works when that one cannot.
+    fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError>;
+}
+
+/// Where a USB reset landed.
+#[derive(Clone, Debug, Serialize)]
+pub struct UsbResetResult {
+    pub device: String,
+    pub node: String,
+}
+
+/// One AT exchange as the panel reports it.
+#[derive(Clone, Debug, Serialize)]
+pub struct AtResult {
+    pub port: String,
+    pub command: String,
+    pub lines: Vec<String>,
+    pub terminator: String,
+    pub ok: bool,
+    pub elapsed_ms: u64,
 }
 
 /// Errors from the local panel store or a local action.
@@ -137,6 +167,8 @@ pub fn router_with_uplink(
         .route("/api/messages", get(messages))
         .route("/api/send", post(send_sms))
         .route("/api/restart", post(restart_modem))
+        .route("/api/at", post(at_command))
+        .route("/api/usb-reset", post(usb_reset))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -205,6 +237,42 @@ async fn send_sms(
     }
 }
 
+/// Commands the operator types are passed through untouched. This endpoint is
+/// the reason the panel is bound to the LAN and never exposed to the cloud:
+/// `AT+CFUN=1,1` and friends can wedge a module, so the blast radius has to
+/// stay inside the site.
+async fn at_command(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<AtBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local AT is not configured");
+    };
+    let command = body.command.trim().to_string();
+    if command.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "command is required");
+    }
+    match actions.at_command(body.imei, command) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// The character device disappears while the module re-enumerates, so the
+/// caller should expect the modem list to be briefly incomplete afterwards.
+async fn usb_reset(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local reset is not configured");
+    };
+    match actions.usb_reset(body.imei) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
 async fn restart_modem(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<RestartBody>,
@@ -225,6 +293,17 @@ async fn restart_modem(
 struct SendBody {
     to: String,
     body: String,
+    imei: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResetBody {
+    imei: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AtBody {
+    command: String,
     imei: Option<String>,
 }
 

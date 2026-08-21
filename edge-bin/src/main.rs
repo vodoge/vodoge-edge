@@ -31,7 +31,7 @@ mod linux {
     use edge_modem::{
         collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
     };
-    use edge_panel::{serve, Actions, Inbox, PanelError};
+    use edge_panel::{serve, Actions, AtResult, Inbox, PanelError, UsbResetResult};
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
     use edge_uplink::dial::{DialError, Socket};
     use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
@@ -90,6 +90,29 @@ mod linux {
                 _ => map.values().next().cloned(),
             };
             path.ok_or_else(|| SendError::new("modem_not_found", "no matching QMI modem"))
+        }
+
+        /// Run work against the module's AT control port.
+        ///
+        /// This takes the same lock as `with_client`: AT and QMI talk to one
+        /// module over separate USB interfaces, and issuing both at once is how
+        /// a Quectel stack ends up answering a stale transaction.
+        fn with_at_port<T>(
+            &self,
+            imei: Option<&str>,
+            work: impl FnOnce(&mut edge_modem::AtPort) -> Result<T, SendError>,
+        ) -> Result<T, SendError> {
+            let _busy = self.lock.lock().expect("radio");
+            let qmi_path = self.path_for(imei)?;
+            let at_path = edge_modem::at_port_for_qmi(&qmi_path).ok_or_else(|| {
+                SendError::new(
+                    "at_port_not_found",
+                    format!("no AT control port beside {}", qmi_path.display()),
+                )
+            })?;
+            let mut port = edge_modem::AtPort::open(&at_path)
+                .map_err(|error| SendError::new("at_open_failed", error.to_string()))?;
+            work(&mut port)
         }
 
         fn with_client<T>(
@@ -158,6 +181,45 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError> {
+            // Held across the reset so a poll cannot open the character device
+            // while the module is re-enumerating.
+            let _busy = self.radio.lock.lock().expect("radio");
+            let qmi_path = self
+                .radio
+                .path_for(imei.as_deref())
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            let reset = edge_modem::reset_for_qmi(&qmi_path)
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            Ok(UsbResetResult {
+                device: reset.device,
+                node: reset.node.display().to_string(),
+            })
+        }
+
+        fn at_command(
+            &self,
+            imei: Option<String>,
+            command: String,
+        ) -> Result<AtResult, PanelError> {
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    let path = port.path().display().to_string();
+                    let exchange = port
+                        .command(&command)
+                        .map_err(|error| SendError::new("at_failed", error.to_string()))?;
+                    Ok(AtResult {
+                        port: path,
+                        command: exchange.command.clone(),
+                        ok: exchange.succeeded(),
+                        lines: exchange.lines.clone(),
+                        terminator: exchange.terminator.clone(),
+                        elapsed_ms: exchange.elapsed.as_millis() as u64,
+                    })
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
     }
