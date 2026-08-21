@@ -652,7 +652,7 @@ mod linux {
                 .upsert_local_modem(&LocalModem {
                     imei: imei.clone(),
                     family,
-                    iccid,
+                    iccid: iccid.clone(),
                     state: state.clone(),
                     last_seen: Some(now),
                 })
@@ -683,7 +683,7 @@ mod linux {
             let _ = delete_inbound(&mut client, &pass.inbound);
         }
 
-        enqueue_device_state(outbox, &imei, &state, now)?;
+        enqueue_device_state(outbox, &imei, &state, iccid.as_deref(), now)?;
         Ok(imei)
     }
 
@@ -710,6 +710,7 @@ mod linux {
         outbox: &Arc<Mutex<DurableOutbox>>,
         imei: &str,
         state: &str,
+        iccid: Option<&str>,
         now: i64,
     ) -> Result<(), String> {
         let payload = serde_json::json!({
@@ -718,6 +719,11 @@ mod linux {
                 "modem_imei": imei,
                 "state": state,
                 "registration": state,
+                // The cloud cannot tell which SIM a modem is using without
+                // this. On an eUICC it is also the only field that changes
+                // when a profile is switched, so leaving it out makes a switch
+                // invisible upstream.
+                "iccid": iccid,
                 "capability": {
                     "sms_mo": "cellular",
                     "sms_mt": "cellular",
