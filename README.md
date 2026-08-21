@@ -34,6 +34,22 @@ The matrix records real hardware facts such as EC20 plus China Telecom having
 no usable SMS bearer. Unsupported combinations are rejected before a blind
 send attempt.
 
+## Where this actually runs
+
+There is exactly **one** edge deployment today, and **one** cloud host. Nothing
+else exists — no fleet, no staging tier, no second region.
+
+| Role | Host | Notes |
+| --- | --- | --- |
+| Edge agent (this repo) | `192.168.6.83:2222` | Local VMware VM, EC20 modems attached |
+| Cloud control plane | `43.108.53.126` | Gateway + console + PostgreSQL + Redis |
+| Base domain | `vodoge.com` | |
+| First tenant | `a.vodoge.com` | That tenant is us |
+
+`region` appears in the device certificate and in `tenants`, but it is a field,
+not a second site or a second database. Treat any doc that says "regional data
+plane" as describing a possible future split, not current infrastructure.
+
 ## Security baseline
 
 Every future edge-to-cloud connection is WSS with mTLS and TLS 1.3 only. The
