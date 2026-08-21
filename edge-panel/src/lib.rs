@@ -5,12 +5,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_store::{LocalMessage, LocalModem, Store, StoreError};
 use serde::{Deserialize, Serialize};
+
+mod logs;
+pub use logs::{log_error, log_line, LogLine, LogRing};
 
 const INDEX: &str = include_str!("index.html");
 
@@ -68,6 +71,11 @@ pub trait Actions: Send + Sync {
     fn ussd(&self, imei: Option<String>, code: String) -> Result<UssdResult, PanelError>;
     /// Cancel an open USSD session.
     fn ussd_cancel(&self, imei: Option<String>) -> Result<(), PanelError>;
+    /// Put a modem's radio into low power or bring it back online.
+    ///
+    /// This goes through QMI rather than `AT+CFUN`, whose reset form wedges a
+    /// module often enough that it is not worth exposing on a button.
+    fn set_radio(&self, imei: Option<String>, online: bool) -> Result<(), PanelError>;
     /// Modems currently executing an operator-initiated command.
     ///
     /// Such a modem stops answering the poll loop, and a long command outlasts
@@ -258,6 +266,7 @@ pub fn router_with_uplink(
     Router::new()
         .route("/", get(index))
         .route("/api/status", get(status))
+        .route("/api/logs", get(read_logs))
         .route("/api/messages", get(messages))
         .route("/api/send", post(send_sms))
         .route("/api/restart", post(restart_modem))
@@ -269,6 +278,7 @@ pub fn router_with_uplink(
         .route("/api/scan", post(scan_operators))
         .route("/api/ussd", post(ussd))
         .route("/api/ussd/cancel", post(ussd_cancel))
+        .route("/api/radio", post(set_radio))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -319,6 +329,30 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
     }
 }
 
+/// Serve log lines after a cursor.
+///
+/// Polling with a cursor rather than streaming keeps this working through the
+/// kind of flaky link a site panel is reached over: a dropped request costs one
+/// interval, not the session.
+async fn read_logs(uri: Uri) -> Response {
+    let ring = LogRing::global();
+    let lines = ring.since(cursor_from_query(uri.query()));
+    Json(serde_json::json!({ "lines": lines, "cursor": ring.cursor() })).into_response()
+}
+
+/// Read `after=<n>` without pulling in a query-string extractor. The panel
+/// takes exactly one numeric parameter, and the crate deliberately builds axum
+/// with a minimal feature set.
+fn cursor_from_query(query: Option<&str>) -> u64 {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == "after")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
+}
+
 async fn messages(State(state): State<Arc<PanelState>>) -> Response {
     match state.inbox.list_messages() {
         Ok(rows) => Json(MessagesBody {
@@ -362,6 +396,21 @@ async fn at_command(
     }
     match actions.at_command(body.imei, command) {
         Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// Taking the radio down disconnects the modem from its network, so the caller
+/// states which way it should go rather than toggling blind.
+async fn set_radio(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<RadioBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local radio control is not configured");
+    };
+    match actions.set_radio(body.imei, body.online) {
+        Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -497,6 +546,12 @@ struct SendBody {
 }
 
 #[derive(Deserialize)]
+struct RadioBody {
+    online: bool,
+    imei: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct UssdBody {
     code: String,
     imei: Option<String>,
@@ -605,5 +660,25 @@ impl From<LocalMessage> for MessageBody {
             received_at: value.received_at,
             modem_imei: value.modem_imei,
         }
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::cursor_from_query;
+
+    #[test]
+    fn cursor_is_read_from_the_query() {
+        assert_eq!(cursor_from_query(Some("after=42")), 42);
+        assert_eq!(cursor_from_query(Some("x=1&after=7&y=2")), 7);
+    }
+
+    /// A missing or unusable cursor means "send everything retained", not an
+    /// error: a panel that just loaded has no cursor yet.
+    #[test]
+    fn a_missing_or_bad_cursor_starts_from_the_beginning() {
+        assert_eq!(cursor_from_query(None), 0);
+        assert_eq!(cursor_from_query(Some("")), 0);
+        assert_eq!(cursor_from_query(Some("after=abc")), 0);
     }
 }

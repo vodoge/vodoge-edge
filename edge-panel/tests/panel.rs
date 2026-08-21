@@ -86,6 +86,7 @@ struct RecordingActions {
     at: Mutex<Vec<String>>,
     switched: Mutex<Vec<(String, bool)>>,
     ussd: Mutex<Vec<String>>,
+    radio: Mutex<Vec<bool>>,
 }
 
 impl RecordingActions {
@@ -95,6 +96,7 @@ impl RecordingActions {
             at: Mutex::new(Vec::new()),
             switched: Mutex::new(Vec::new()),
             ussd: Mutex::new(Vec::new()),
+            radio: Mutex::new(Vec::new()),
         }
     }
 }
@@ -191,6 +193,11 @@ impl Actions for RecordingActions {
     }
 
     fn ussd_cancel(&self, _imei: Option<String>) -> Result<(), PanelError> {
+        Ok(())
+    }
+
+    fn set_radio(&self, _imei: Option<String>, online: bool) -> Result<(), PanelError> {
+        self.radio.lock().expect("radio").push(online);
         Ok(())
     }
 }
@@ -305,6 +312,9 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
         }
 
         fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> {
+            Ok(())
+        }
+        fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> {
             Ok(())
         }
     }
@@ -519,6 +529,9 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
         }
 
         fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> {
+            Ok(())
+        }
+        fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> {
             Ok(())
         }
 

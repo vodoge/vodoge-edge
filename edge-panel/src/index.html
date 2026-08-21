@@ -28,9 +28,10 @@
     button.ghost:hover { color: var(--fg); border-color: var(--accent); }
     .quick { display: flex; flex-wrap: wrap; gap: .4rem; padding: 0 1rem .8rem; }
     .quick button { font-size: .8rem; padding: .3rem .55rem; }
-    pre#at-log, pre#ussd-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
+    pre#at-log, pre#ussd-log, pre#run-log { margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.5; white-space: pre-wrap; word-break: break-all; border-top: 1px solid var(--line); }
     pre#at-log:empty::before { content: "尚未执行命令"; color: var(--muted); }
     pre#ussd-log:empty::before { content: "尚未发起会话"; color: var(--muted); }
+    pre#run-log:empty::before { content: "等待日志…"; color: var(--muted); }
     .sent { color: var(--accent); }
     .fail { color: var(--bad); }
     .meta { color: var(--muted); }
@@ -112,6 +113,12 @@
         <button type="submit">发送</button>
       </form>
       <p class="hint" id="send-status"></p>
+    </section>
+    <section>
+      <h2>运行日志 <span class="note" id="log-note">实时</span>
+        <button type="button" class="ghost" id="log-toggle" style="margin-left:auto">暂停</button>
+      </h2>
+      <pre id="run-log"></pre>
     </section>
     <section>
       <h2>本地短信</h2>
@@ -286,6 +293,63 @@
         button.textContent = label;
       }
     }
+
+    async function setRadio(imei, button) {
+      const online = button.textContent === "开射频";
+      if (!confirm((online ? "恢复" : "关闭") + " " + imei + " 的射频？")) return;
+      button.disabled = true;
+      try {
+        const response = await fetch("/api/radio", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imei, online }),
+        });
+        const result = await response.json();
+        if (response.ok) {
+          button.textContent = online ? "关射频" : "开射频";
+        } else {
+          logLine("射频切换失败: " + (result.error || response.status), "fail");
+        }
+      } catch (error) {
+        logLine("射频切换失败: " + String(error), "fail");
+      } finally {
+        button.disabled = false;
+        setTimeout(() => load().catch(() => {}), 4000);
+      }
+    }
+
+    let logCursor = 0;
+    let logPaused = false;
+
+    async function pollLogs() {
+      if (logPaused) return;
+      try {
+        const response = await fetch("/api/logs?after=" + logCursor);
+        if (!response.ok) return;
+        const result = await response.json();
+        const pre = document.getElementById("run-log");
+        for (const line of result.lines || []) {
+          const span = document.createElement("span");
+          const when = new Date(line.at).toTimeString().slice(0, 8);
+          span.textContent = when + "  " + line.text + "\n";
+          if (/FAIL|error|failed|unavailable/i.test(line.text)) span.className = "fail";
+          pre.append(span);
+        }
+        // Keep the view bounded; the ring on the server is bounded too.
+        while (pre.childNodes.length > 400) pre.removeChild(pre.firstChild);
+        if (result.lines && result.lines.length) pre.scrollTop = pre.scrollHeight;
+        logCursor = result.cursor || logCursor;
+      } catch (error) {
+        // A dropped poll costs one interval; the cursor makes the next one
+        // pick up exactly where this left off.
+      }
+    }
+
+    document.getElementById("log-toggle").addEventListener("click", (event) => {
+      logPaused = !logPaused;
+      event.currentTarget.textContent = logPaused ? "继续" : "暂停";
+      document.getElementById("log-note").textContent = logPaused ? "已暂停" : "实时";
+    });
 
     function ussdLine(text, className) {
       const pre = document.getElementById("ussd-log");
@@ -512,6 +576,12 @@
         const action = document.createElement("td");
         const group = document.createElement("div");
         group.className = "row-actions";
+        const radio = document.createElement("button");
+        radio.type = "button";
+        radio.className = "ghost";
+        radio.textContent = "关射频";
+        radio.title = "把模组切到低功耗（等价飞行模式），会脱网。再点恢复。";
+        radio.addEventListener("click", () => setRadio(modem.imei, radio));
         const scan = document.createElement("button");
         scan.type = "button";
         scan.className = "ghost";
@@ -536,7 +606,7 @@
         reset.textContent = "USB 复位";
         reset.title = "重新枚举 USB 设备。QMI 栈卡死时这是唯一能恢复的手段。";
         reset.addEventListener("click", () => usbReset(modem.imei, reset));
-        group.append(probe, esim, scan, reset);
+        group.append(probe, esim, scan, radio, reset);
         action.append(group);
         tr.append(cell(modem.imei), cell(modem.family), cell(modem.iccid || "—"), cell(modem.state));
         tr.append(action);
@@ -596,6 +666,8 @@
       document.getElementById("status-flag").textContent = "error";
     });
     setInterval(() => load().catch(() => {}), 10000);
+    pollLogs();
+    setInterval(pollLogs, 2000);
   </script>
 </body>
 </html>

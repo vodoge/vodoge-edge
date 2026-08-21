@@ -32,7 +32,7 @@ mod linux {
         collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
     };
     use edge_panel::{
-        serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
+        log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
         ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
     };
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
@@ -239,6 +239,21 @@ mod linux {
                 radio: self.radio.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn set_radio(&self, imei: Option<String>, online: bool) -> Result<(), PanelError> {
+            let mode = if online {
+                OperatingMode::Online
+            } else {
+                OperatingMode::LowPower
+            };
+            self.radio
+                .with_client(imei.as_deref(), |client| {
+                    client
+                        .set_operating_mode(mode)
+                        .map_err(|error| SendError::new("radio_failed", error.to_string()))
+                })
                 .map_err(|error| PanelError::Action(error.to_string()))
         }
 
@@ -551,7 +566,7 @@ mod linux {
             if let Err(error) =
                 runtime.block_on(serve(panel_bind, panel_store, Some(panel_actions), panel_online))
             {
-                eprintln!("panel: {error}");
+                log_error(format!("panel: {error}"));
             }
         });
 
@@ -559,10 +574,13 @@ mod linux {
         let uplink_executor = executor.clone();
         std::thread::spawn(move || uplink_loop(uplink_outbox, uplink_executor, uplink_online));
 
-        println!("vodoge-edge panel on {} device_id={DEVICE_ID}", env("VODOGE_EDGE_PANEL", "0.0.0.0:8743"));
+        log_line(format!(
+            "vodoge-edge panel on {} device_id={DEVICE_ID}",
+            env("VODOGE_EDGE_PANEL", "0.0.0.0:8743")
+        ));
         loop {
             if let Err(error) = poll_modems(&shared, &outbox, &radio) {
-                eprintln!("poll: {error}");
+                log_error(format!("poll: {error}"));
             }
             std::thread::sleep(Duration::from_secs(8));
         }
@@ -590,8 +608,8 @@ mod linux {
         }
         for path in paths {
             match probe_one(&path, shared, outbox, radio) {
-                Ok(imei) => println!("poll {} imei={imei} ok", path.display()),
-                Err(error) => eprintln!("poll {} FAIL {error}", path.display()),
+                Ok(imei) => log_line(format!("poll {} imei={imei} ok", path.display())),
+                Err(error) => log_error(format!("poll {} FAIL {error}", path.display())),
             }
         }
         Ok(())
@@ -617,7 +635,7 @@ mod linux {
         let iccid = match client.read_iccid() {
             Ok(value) => Some(value),
             Err(error) => {
-                eprintln!("iccid {} unavailable: {error}", path.display());
+                log_error(format!("iccid {} unavailable: {error}", path.display()));
                 None
             }
         };
@@ -738,8 +756,8 @@ mod linux {
             let result = uplink_once(&url, &cert_dir, &outbox, &executor, &online);
             online.store(false, Ordering::Relaxed);
             match result {
-                Ok(()) => eprintln!("uplink closed, reconnecting"),
-                Err(error) => eprintln!("uplink: {error}"),
+                Ok(()) => log_error("uplink closed, reconnecting"),
+                Err(error) => log_error(format!("uplink: {error}")),
             }
             std::thread::sleep(Duration::from_secs(5));
         }
@@ -771,7 +789,7 @@ mod linux {
         };
         let config = LinkConfig::new(DEVICE_ID, snapshot).map_err(|e| e.to_string())?;
         let mut worker = UplinkWorker::new(config, SharedOutbox(outbox.clone()));
-        println!("uplink connecting {url}");
+        log_line(format!("uplink connecting {url}"));
         let now = Instant::now();
         worker.start(&mut socket, now).map_err(|e| e.to_string())?;
         online.store(true, Ordering::Relaxed);
@@ -785,7 +803,7 @@ mod linux {
                         if let Err(error) =
                             handle_command(&deliver, executor, &mut socket, outbox)
                         {
-                            eprintln!("command: {error}");
+                            log_error(format!("command: {error}"));
                         }
                     }
                     if worker.session().phase() == Phase::Backoff {
