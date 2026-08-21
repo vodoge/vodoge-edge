@@ -79,6 +79,7 @@ pub trait SendPort {
 #[derive(Clone, Debug, Default)]
 pub struct FakeSendPort {
     sent: Vec<SmsSend>,
+    restarted: Vec<String>,
     error: Option<SendError>,
 }
 
@@ -94,6 +95,10 @@ impl FakeSendPort {
     pub fn sent(&self) -> &[SmsSend] {
         &self.sent
     }
+
+    pub fn restarted(&self) -> &[String] {
+        &self.restarted
+    }
 }
 
 impl SendPort for FakeSendPort {
@@ -102,6 +107,14 @@ impl SendPort for FakeSendPort {
             return Err(error);
         }
         self.sent.push(send.clone());
+        Ok(())
+    }
+
+    fn restart_modem(&mut self, imei: &str) -> Result<(), SendError> {
+        if let Some(error) = self.error.clone() {
+            return Err(error);
+        }
+        self.restarted.push(imei.to_string());
         Ok(())
     }
 }

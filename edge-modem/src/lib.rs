@@ -12,6 +12,7 @@ mod dms;
 mod fake;
 mod inbox;
 mod nas;
+mod pdu;
 mod port;
 mod qmi_port;
 mod restore;
@@ -35,6 +36,7 @@ pub use fake::FakeModem;
 pub use inbox::{collect_inbound, delete_inbound, CollectedMessage, InboxPass};
 pub use port::{ModemPort, PortError, TransportKind, UnsupportedPort};
 pub use restore::with_restore;
+pub use pdu::{encode_submit, PduError};
 pub use send::{send_with_plan, SendOutcome};
 pub use dms::{
     empty_request, get_manufacturer_request, get_model_request, get_operating_mode_request,

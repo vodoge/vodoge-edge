@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use edge_panel::{router, MemoryInbox};
+use std::sync::Mutex;
+
+use edge_panel::{router, router_with_actions, Actions, MemoryInbox, PanelError};
 use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -70,4 +72,43 @@ async fn panel_serves_embedded_html_and_local_json() {
     let inbox_json: serde_json::Value =
         serde_json::from_slice(&messages.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(inbox_json["messages"][0]["body"], "hello");
+}
+
+struct RecordingActions {
+    sent: Mutex<Vec<(String, String)>>,
+}
+
+impl Actions for RecordingActions {
+    fn send_sms(&self, to: String, body: String, _imei: Option<String>) -> Result<(), PanelError> {
+        self.sent.lock().expect("sent").push((to, body));
+        Ok(())
+    }
+
+    fn restart_modem(&self, _imei: String) -> Result<(), PanelError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn panel_sends_sms_locally() {
+    let actions = Arc::new(RecordingActions {
+        sent: Mutex::new(Vec::new()),
+    });
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/send")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"to":"10086","body":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        actions.sent.lock().expect("sent").as_slice(),
+        &[("10086".into(), "hi".into())]
+    );
 }

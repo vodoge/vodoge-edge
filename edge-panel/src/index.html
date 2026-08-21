@@ -19,6 +19,10 @@
     th { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
     .empty { color: var(--muted); text-align: center; padding: 1.5rem; }
     .offline { color: var(--accent); margin-left: auto; font-size: .8rem; }
+    form { display: flex; gap: .5rem; padding: .8rem 1rem; flex-wrap: wrap; align-items: center; }
+    input { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: .45rem .6rem; font: inherit; }
+    button { background: var(--accent); color: #102018; border: 0; border-radius: 8px; padding: .45rem .7rem; font: inherit; cursor: pointer; }
+    .hint { color: var(--muted); font-size: .85rem; padding: 0 1rem 1rem; }
   </style>
 </head>
 <body>
@@ -34,6 +38,15 @@
         <thead><tr><th>IMEI</th><th>型号</th><th>ICCID</th><th>状态</th></tr></thead>
         <tbody id="modems"><tr><td class="empty" colspan="4">加载中</td></tr></tbody>
       </table>
+    </section>
+    <section>
+      <h2>本机发送</h2>
+      <form id="send-form">
+        <input name="to" required placeholder="号码">
+        <input name="body" required placeholder="内容">
+        <button type="submit">发送</button>
+      </form>
+      <p class="hint" id="send-status"></p>
     </section>
     <section>
       <h2>本地短信</h2>
@@ -78,6 +91,18 @@
         return tr;
       }), 4, "没有本地短信");
     }
+    document.getElementById("send-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const status = document.getElementById("send-status");
+      const response = await fetch("/api/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ to: data.get("to"), body: data.get("body") }),
+      });
+      status.textContent = response.ok ? "已发送" : "发送失败";
+    });
     load().catch(() => {
       document.getElementById("status-flag").textContent = "error";
     });

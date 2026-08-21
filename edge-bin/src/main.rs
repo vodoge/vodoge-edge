@@ -22,17 +22,23 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use edge_core::CapabilityMatrix;
-    use edge_modem::{collect_inbound, delete_inbound, CdcWdmDevice, QmiClient};
-    use edge_panel::{serve, Inbox, PanelError};
-    use edge_store::{DurableOutbox, LocalMessage, LocalModem, Store};
-    use edge_uplink::dial::Socket;
-    use edge_uplink::session::{Inbound, LinkConfig, ResumeSnapshot};
-    use edge_uplink::tls::client_config;
-    use edge_uplink::worker::UplinkWorker;
-    use edge_uplink::{EnvelopeId, RetentionClass};
-    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use std::collections::BTreeMap;
+    use std::sync::MutexGuard;
 
+    use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
+    use edge_core::CapabilityMatrix;
+    use edge_modem::{
+        collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
+    };
+    use edge_panel::{serve, Actions, Inbox, PanelError};
+    use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
+    use edge_uplink::dial::{DialError, Socket};
+    use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
+    use edge_uplink::tls::client_config;
+    use edge_uplink::worker::{Outbox, RetainedRecord, UplinkWorker};
+    use edge_uplink::{EnvelopeId, RetentionClass, UplinkAck, UplinkError};
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use vodoge_contract::{Envelope, MessageKind, PROTOCOL_VERSION};
 
     const DEVICE_ID: &str = "b0000000-0000-4000-8000-00000000000b";
 
@@ -55,6 +61,150 @@ mod linux {
         }
     }
 
+    #[derive(Clone)]
+    struct Radio {
+        lock: Arc<Mutex<()>>,
+        by_imei: Arc<Mutex<BTreeMap<String, PathBuf>>>,
+    }
+
+    impl Radio {
+        fn new() -> Self {
+            Self {
+                lock: Arc::new(Mutex::new(())),
+                by_imei: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        fn remember(&self, imei: &str, path: &Path) {
+            self.by_imei
+                .lock()
+                .expect("imei map")
+                .insert(imei.to_string(), path.to_path_buf());
+        }
+
+        fn path_for(&self, imei: Option<&str>) -> Result<PathBuf, SendError> {
+            let map = self.by_imei.lock().expect("imei map");
+            let path = match imei {
+                Some(value) if !value.is_empty() => map.get(value).cloned(),
+                _ => map.values().next().cloned(),
+            };
+            path.ok_or_else(|| SendError::new("modem_not_found", "no matching QMI modem"))
+        }
+
+        fn with_client<T>(
+            &self,
+            imei: Option<&str>,
+            work: impl FnOnce(&mut QmiClient<CdcWdmDevice>) -> Result<T, SendError>,
+        ) -> Result<T, SendError> {
+            let _busy = self.lock.lock().expect("radio");
+            let path = self.path_for(imei)?;
+            let device = CdcWdmDevice::open(&path)
+                .map_err(|error| SendError::new("modem_open_failed", error.to_string()))?;
+            let mut client = QmiClient::new(device);
+            client
+                .sync()
+                .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
+            work(&mut client)
+        }
+    }
+
+    struct RadioPort {
+        radio: Radio,
+    }
+
+    impl SendPort for RadioPort {
+        fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError> {
+            let pdu = encode_submit(&send.to, &send.body)
+                .map_err(|error| SendError::new("pdu_encode_failed", error.to_string()))?;
+            self.radio
+                .with_client(send.modem_imei.as_deref(), |client| {
+                    client
+                        .send_sms(0x06, &pdu)
+                        .map(|_| ())
+                        .map_err(|error| SendError::new("send_failed", error.to_string()))
+                })
+        }
+
+        fn restart_modem(&mut self, imei: &str) -> Result<(), SendError> {
+            self.radio.with_client(Some(imei), |client| {
+                client
+                    .set_operating_mode(OperatingMode::Offline)
+                    .and_then(|_| client.set_operating_mode(OperatingMode::Online))
+                    .map_err(|error| SendError::new("restart_failed", error.to_string()))
+            })
+        }
+    }
+
+    impl Actions for RadioPort {
+        fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
+            let mut port = RadioPort {
+                radio: self.radio.clone(),
+            };
+            SendPort::send_sms(
+                &mut port,
+                &SmsSend {
+                    to,
+                    body,
+                    modem_imei: imei,
+                    iccid: None,
+                },
+            )
+            .map_err(|error| PanelError::Action(error.to_string()))
+        }
+
+        fn restart_modem(&self, imei: String) -> Result<(), PanelError> {
+            let mut port = RadioPort {
+                radio: self.radio.clone(),
+            };
+            SendPort::restart_modem(&mut port, &imei)
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+    }
+
+    struct SharedOutbox(Arc<Mutex<DurableOutbox>>);
+
+    impl SharedOutbox {
+        fn lock(&self) -> MutexGuard<'_, DurableOutbox> {
+            self.0.lock().expect("outbox")
+        }
+    }
+
+    impl Outbox for SharedOutbox {
+        type Error = QueueError;
+
+        fn last_allocated(&self) -> u64 {
+            self.lock().last_allocated()
+        }
+
+        fn committed_through(&self) -> u64 {
+            self.lock().committed_through()
+        }
+
+        fn lowest_retained_seq(&self) -> Option<u64> {
+            self.lock().lowest_retained_seq()
+        }
+
+        fn pending_gap_ids(&self) -> Vec<String> {
+            self.lock().pending_gap_ids()
+        }
+
+        fn queue_records(&self) -> i64 {
+            self.lock().queue_records()
+        }
+
+        fn queue_bytes(&self) -> Option<i64> {
+            self.lock().queue_bytes()
+        }
+
+        fn observe_ack(&mut self, ack: UplinkAck) -> Result<Vec<u64>, Self::Error> {
+            self.lock().observe_ack(ack)
+        }
+
+        fn retained(&self) -> Result<Vec<RetainedRecord>, Self::Error> {
+            Outbox::retained(&*self.lock())
+        }
+    }
+
     pub fn run() -> Result<(), String> {
         let data_dir = env("VODOGE_EDGE_DATA", "/var/lib/vodoge-edge");
         std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
@@ -65,22 +215,32 @@ mod linux {
         let outbox = Arc::new(Mutex::new(
             DurableOutbox::open(&outbox_path, 100_000).map_err(|e| e.to_string())?,
         ));
+        let radio = Radio::new();
+        let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
+            radio: radio.clone(),
+        })));
+        let panel_actions = Arc::new(RadioPort {
+            radio: radio.clone(),
+        });
 
         let panel_bind = env("VODOGE_EDGE_PANEL", "0.0.0.0:8743");
         let panel_store = shared.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("tokio");
-            if let Err(error) = runtime.block_on(serve(panel_bind, panel_store)) {
+            if let Err(error) =
+                runtime.block_on(serve(panel_bind, panel_store, Some(panel_actions)))
+            {
                 eprintln!("panel: {error}");
             }
         });
 
         let uplink_outbox = outbox.clone();
-        std::thread::spawn(move || uplink_loop(uplink_outbox));
+        let uplink_executor = executor.clone();
+        std::thread::spawn(move || uplink_loop(uplink_outbox, uplink_executor));
 
         println!("vodoge-edge panel on {} device_id={DEVICE_ID}", env("VODOGE_EDGE_PANEL", "0.0.0.0:8743"));
         loop {
-            if let Err(error) = poll_modems(&shared, &outbox) {
+            if let Err(error) = poll_modems(&shared, &outbox, &radio) {
                 eprintln!("poll: {error}");
             }
             std::thread::sleep(Duration::from_secs(8));
@@ -90,6 +250,7 @@ mod linux {
     fn poll_modems(
         shared: &Arc<SharedStore>,
         outbox: &Arc<Mutex<DurableOutbox>>,
+        radio: &Radio,
     ) -> Result<(), String> {
         let mut paths = std::fs::read_dir("/dev")
             .map_err(|e| e.to_string())?
@@ -107,7 +268,7 @@ mod linux {
             return Err("no /dev/cdc-wdm*".into());
         }
         for path in paths {
-            match probe_one(&path, shared, outbox) {
+            match probe_one(&path, shared, outbox, radio) {
                 Ok(imei) => println!("poll {} imei={imei} ok", path.display()),
                 Err(error) => eprintln!("poll {} FAIL {error}", path.display()),
             }
@@ -119,7 +280,9 @@ mod linux {
         path: &Path,
         shared: &Arc<SharedStore>,
         outbox: &Arc<Mutex<DurableOutbox>>,
+        radio: &Radio,
     ) -> Result<String, String> {
+        let _busy = radio.lock.lock().expect("radio");
         let device = CdcWdmDevice::open(path).map_err(|e| e.to_string())?;
         let mut client = QmiClient::new(device);
         client.sync().map_err(|e| e.to_string())?;
@@ -132,6 +295,7 @@ mod linux {
             None => "unknown".into(),
         };
         let now = unix_ms();
+        radio.remember(&imei, path);
         {
             let store = shared.0.lock().expect("store");
             store
@@ -231,11 +395,14 @@ mod linux {
         Ok(())
     }
 
-    fn uplink_loop(outbox: Arc<Mutex<DurableOutbox>>) {
+    fn uplink_loop(
+        outbox: Arc<Mutex<DurableOutbox>>,
+        executor: Arc<Mutex<CommandExecutor<RadioPort>>>,
+    ) {
         let url = env("VODOGE_UPLINK_URL", "wss://43.108.53.126:444/v1/edge");
         let cert_dir = env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge");
         loop {
-            match uplink_once(&url, &cert_dir, &outbox) {
+            match uplink_once(&url, &cert_dir, &outbox, &executor) {
                 Ok(()) => eprintln!("uplink closed, reconnecting"),
                 Err(error) => eprintln!("uplink: {error}"),
             }
@@ -247,6 +414,7 @@ mod linux {
         url: &str,
         cert_dir: &str,
         outbox: &Arc<Mutex<DurableOutbox>>,
+        executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
     ) -> Result<(), String> {
         let tls = load_tls(Path::new(cert_dir))?;
         let mut socket = Socket::connect(url, tls).map_err(|e| e.to_string())?;
@@ -266,14 +434,102 @@ mod linux {
             }
         };
         let config = LinkConfig::new(DEVICE_ID, snapshot).map_err(|e| e.to_string())?;
-        let held = outbox.lock().expect("outbox");
-        // DurableOutbox is not easily moved out of mutex for worker; clone via re-open is heavy.
-        drop(held);
-        let path = env("VODOGE_EDGE_DATA", "/var/lib/vodoge-edge") + "/outbox.db";
-        let durable = DurableOutbox::open(path, 100_000).map_err(|e| e.to_string())?;
-        let mut worker = UplinkWorker::new(config, durable);
+        let mut worker = UplinkWorker::new(config, SharedOutbox(outbox.clone()));
         println!("uplink connecting {url}");
-        worker.run(&mut socket, Instant::now()).map_err(|e| e.to_string())
+        let now = Instant::now();
+        worker.start(&mut socket, now).map_err(|e| e.to_string())?;
+        loop {
+            match socket.recv_envelope() {
+                Ok(envelope) => {
+                    let inbound = worker
+                        .on_inbound(&mut socket, envelope, Instant::now())
+                        .map_err(|e| e.to_string())?;
+                    if let Inbound::CommandDeliver(deliver) = inbound {
+                        if let Err(error) =
+                            handle_command(&deliver, executor, &mut socket, outbox)
+                        {
+                            eprintln!("command: {error}");
+                        }
+                    }
+                    if worker.session().phase() == Phase::Backoff {
+                        return Ok(());
+                    }
+                }
+                Err(DialError::Timeout) => {
+                    worker
+                        .poll(&mut socket, Instant::now())
+                        .map_err(|e| e.to_string())?;
+                    if worker.session().phase() == Phase::Backoff {
+                        return Ok(());
+                    }
+                }
+                Err(DialError::Closed) => {
+                    worker.on_disconnect(Instant::now());
+                    return Ok(());
+                }
+                Err(error) => {
+                    worker.on_disconnect(Instant::now());
+                    return Err(error.to_string());
+                }
+            }
+        }
+    }
+
+    fn handle_command(
+        envelope: &Envelope,
+        executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
+        socket: &mut Socket,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+    ) -> Result<(), String> {
+        let now = unix_ms();
+        let outcome = executor
+            .lock()
+            .expect("executor")
+            .handle_envelope(envelope, now)
+            .map_err(|error| error.to_string())?;
+        socket
+            .send_envelope(&Envelope {
+                v: PROTOCOL_VERSION,
+                kind: MessageKind::CommandReceipt,
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: now,
+                device_id: DEVICE_ID.into(),
+                seq: None,
+                trace_id: None,
+                payload: serde_json::to_value(&outcome.receipt).map_err(|e| e.to_string())?,
+            })
+            .map_err(|e| e.to_string())?;
+
+        let result_bytes = serde_json::to_vec(&outcome.result).map_err(|e| e.to_string())?;
+        let envelope_id = EnvelopeId::new(format!("command-result:{}", outcome.result.cmd_id))
+            .map_err(|e| e.to_string())?;
+        let sequence = match outbox.lock().expect("outbox").append(
+            envelope_id,
+            "CommandResult",
+            result_bytes,
+            RetentionClass::Protected,
+        ) {
+            Ok((sequence, _)) => sequence,
+            Err(QueueError::Uplink(UplinkError::DuplicateEnvelopeId { sequence, .. })) => sequence,
+            Err(error) => return Err(error.to_string()),
+        };
+        socket
+            .send_envelope(&Envelope {
+                v: PROTOCOL_VERSION,
+                kind: MessageKind::CommandResult,
+                id: format!("command-result:{}", outcome.result.cmd_id),
+                ts: now,
+                device_id: DEVICE_ID.into(),
+                seq: Some(sequence),
+                trace_id: None,
+                payload: serde_json::to_value(&outcome.result).map_err(|e| e.to_string())?,
+            })
+            .map_err(|e| e.to_string())?;
+        println!(
+            "command {} {} seq={sequence}",
+            outcome.result.cmd_id, outcome.result.status
+        );
+        Ok(())
     }
 
     fn load_tls(dir: &Path) -> Result<std::sync::Arc<rustls::ClientConfig>, String> {
