@@ -23,6 +23,7 @@ fn main() {
 mod linux {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
@@ -223,12 +224,17 @@ mod linux {
             radio: radio.clone(),
         });
 
+        // The panel reads this to report cloud vs local, so what it shows is the
+        // real uplink rather than a fixed assumption.
+        let uplink_online = Arc::new(AtomicBool::new(false));
+
         let panel_bind = env("VODOGE_EDGE_PANEL", "0.0.0.0:8743");
         let panel_store = shared.clone();
+        let panel_online = uplink_online.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("tokio");
             if let Err(error) =
-                runtime.block_on(serve(panel_bind, panel_store, Some(panel_actions)))
+                runtime.block_on(serve(panel_bind, panel_store, Some(panel_actions), panel_online))
             {
                 eprintln!("panel: {error}");
             }
@@ -236,7 +242,7 @@ mod linux {
 
         let uplink_outbox = outbox.clone();
         let uplink_executor = executor.clone();
-        std::thread::spawn(move || uplink_loop(uplink_outbox, uplink_executor));
+        std::thread::spawn(move || uplink_loop(uplink_outbox, uplink_executor, uplink_online));
 
         println!("vodoge-edge panel on {} device_id={DEVICE_ID}", env("VODOGE_EDGE_PANEL", "0.0.0.0:8743"));
         loop {
@@ -289,6 +295,17 @@ mod linux {
         let serials = client.get_serial_numbers().map_err(|e| e.to_string())?;
         let imei = serials.imei.clone().ok_or_else(|| "missing IMEI".to_string())?;
         let family = client.get_model().unwrap_or_else(|_| "Quectel".into());
+        // EF_ICCID identifies the active profile. On an eUICC that changes when a
+        // different profile is enabled, so it is the only field that says which
+        // SIM the modem is actually using. Failing to read it is not fatal, but
+        // swallowing the error leaves a blank column with no way to find out why.
+        let iccid = match client.read_iccid() {
+            Ok(value) => Some(value),
+            Err(error) => {
+                eprintln!("iccid {} unavailable: {error}", path.display());
+                None
+            }
+        };
         let serving = client.get_serving_system().ok();
         let state = match serving.as_ref() {
             Some(s) => format!("{:?}", s.registration_state),
@@ -302,7 +319,7 @@ mod linux {
                 .upsert_local_modem(&LocalModem {
                     imei: imei.clone(),
                     family,
-                    iccid: None,
+                    iccid,
                     state: state.clone(),
                     last_seen: Some(now),
                 })
@@ -398,11 +415,14 @@ mod linux {
     fn uplink_loop(
         outbox: Arc<Mutex<DurableOutbox>>,
         executor: Arc<Mutex<CommandExecutor<RadioPort>>>,
+        online: Arc<AtomicBool>,
     ) {
         let url = env("VODOGE_UPLINK_URL", "wss://43.108.53.126:444/v1/edge");
         let cert_dir = env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge");
         loop {
-            match uplink_once(&url, &cert_dir, &outbox, &executor) {
+            let result = uplink_once(&url, &cert_dir, &outbox, &executor, &online);
+            online.store(false, Ordering::Relaxed);
+            match result {
                 Ok(()) => eprintln!("uplink closed, reconnecting"),
                 Err(error) => eprintln!("uplink: {error}"),
             }
@@ -415,6 +435,7 @@ mod linux {
         cert_dir: &str,
         outbox: &Arc<Mutex<DurableOutbox>>,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
+        online: &Arc<AtomicBool>,
     ) -> Result<(), String> {
         let tls = load_tls(Path::new(cert_dir))?;
         let mut socket = Socket::connect(url, tls).map_err(|e| e.to_string())?;
@@ -438,6 +459,7 @@ mod linux {
         println!("uplink connecting {url}");
         let now = Instant::now();
         worker.start(&mut socket, now).map_err(|e| e.to_string())?;
+        online.store(true, Ordering::Relaxed);
         loop {
             match socket.recv_envelope() {
                 Ok(envelope) => {

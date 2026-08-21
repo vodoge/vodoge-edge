@@ -1,6 +1,8 @@
 //! Local LAN panel. It reads only the SQLite cache so it still works offline.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
@@ -11,6 +13,20 @@ use edge_store::{LocalMessage, LocalModem, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
 const INDEX: &str = include_str!("index.html");
+
+/// How long a modem row stays trustworthy after its last successful poll.
+///
+/// A modem that stops answering keeps its row in the store. Without an age check
+/// the panel presents a stick that was unplugged hours ago as if it were still
+/// searching for a network, which is worse than saying nothing about it.
+const STALE_AFTER_MS: i64 = 60_000;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Read-only view of locally cached modems and SMS.
 pub trait Inbox: Send + Sync {
@@ -93,6 +109,7 @@ impl Inbox for StoreInbox {
 struct PanelState {
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
 }
 
 /// HTTP router for the offline panel. Bind it on the LAN; it does not call the cloud.
@@ -102,13 +119,29 @@ pub fn router(inbox: Arc<dyn Inbox>) -> Router {
 
 /// HTTP router with optional local send/restart actions.
 pub fn router_with_actions(inbox: Arc<dyn Inbox>, actions: Option<Arc<dyn Actions>>) -> Router {
+    router_with_uplink(inbox, actions, Arc::new(AtomicBool::new(false)))
+}
+
+/// HTTP router whose reported mode follows a live uplink flag.
+///
+/// The panel used to report `local` unconditionally, so it kept claiming the
+/// device was offline long after the cloud session was established.
+pub fn router_with_uplink(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
+) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/status", get(status))
         .route("/api/messages", get(messages))
         .route("/api/send", post(send_sms))
         .route("/api/restart", post(restart_modem))
-        .with_state(Arc::new(PanelState { inbox, actions }))
+        .with_state(Arc::new(PanelState {
+            inbox,
+            actions,
+            uplink_online,
+        }))
 }
 
 /// Serve the panel until the process exits.
@@ -116,9 +149,10 @@ pub async fn serve(
     bind: impl tokio::net::ToSocketAddrs,
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, router_with_actions(inbox, actions)).await
+    axum::serve(listener, router_with_uplink(inbox, actions, uplink_online)).await
 }
 
 async fn index() -> Html<&'static str> {
@@ -126,10 +160,19 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn status(State(state): State<Arc<PanelState>>) -> Response {
+    let mode = if state.uplink_online.load(Ordering::Relaxed) {
+        "cloud"
+    } else {
+        "local"
+    };
+    let now = now_ms();
     match state.inbox.list_modems() {
         Ok(modems) => Json(StatusBody {
-            mode: "local",
-            modems: modems.into_iter().map(ModemBody::from).collect(),
+            mode,
+            modems: modems
+                .into_iter()
+                .map(|modem| ModemBody::observed(modem, now))
+                .collect(),
         })
         .into_response(),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
@@ -215,13 +258,23 @@ struct ModemBody {
     last_seen: Option<i64>,
 }
 
-impl From<LocalModem> for ModemBody {
-    fn from(value: LocalModem) -> Self {
+impl ModemBody {
+    /// Report a modem that has gone quiet as offline rather than repeating the
+    /// registration state it happened to have when it was last reachable.
+    fn observed(value: LocalModem, now: i64) -> Self {
+        let stale = value
+            .last_seen
+            .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
+            .unwrap_or(true);
         Self {
             imei: value.imei,
             family: value.family,
             iccid: value.iccid,
-            state: value.state,
+            state: if stale {
+                "Offline".to_string()
+            } else {
+                value.state
+            },
             last_seen: value.last_seen,
         }
     }

@@ -8,6 +8,7 @@ use crate::{
 pub const SEND_APDU: MessageId = MessageId::new(0x003b);
 pub const CLOSE_LOGICAL_CHANNEL: MessageId = MessageId::new(0x003f);
 pub const OPEN_LOGICAL_CHANNEL: MessageId = MessageId::new(0x0042);
+pub const READ_TRANSPARENT: MessageId = MessageId::new(0x0020);
 
 const SLOT_TLV: u8 = 0x01;
 const APDU_COMMAND_TLV: u8 = 0x02;
@@ -15,6 +16,14 @@ const CHANNEL_TLV: u8 = 0x10;
 const AID_TLV: u8 = 0x10;
 const APDU_RESPONSE_TLV: u8 = 0x10;
 const TERMINATE_APPLICATION_TLV: u8 = 0x13;
+const SESSION_TLV: u8 = 0x01;
+const FILE_TLV: u8 = 0x02;
+const READ_INFO_TLV: u8 = 0x03;
+const READ_RESULT_TLV: u8 = 0x11;
+
+/// `EF_ICCID` sits directly under the MF, outside any application.
+pub const EF_ICCID_FILE_ID: u16 = 0x2fe2;
+pub const EF_ICCID_PATH: &[u16] = &[0x3f00];
 
 /// GSMA SGP.22 ISD-R AID used to open an eUICC logical channel.
 pub const ISD_R_AID: &[u8] = &[
@@ -170,6 +179,74 @@ pub fn parse_eid(response: &ApduResponse) -> Result<String, UimError> {
     Ok(bcd_digits(&bytes))
 }
 
+/// Read a transparent EF. `path` holds the parent DF identifiers, most
+/// significant first; each is encoded little-endian on the wire.
+pub fn read_transparent_request(
+    assignment: ClientAssignment,
+    transaction: TransactionId,
+    file_id: u16,
+    path: &[u16],
+) -> Result<QmiRequest, UimError> {
+    ensure_uim(assignment)?;
+    // Session type 0x00 is primary GW provisioning with a zero-length AID,
+    // which is what reaches the MF on the modems this crate targets.
+    let session_tlv = Tlv::new(SESSION_TLV, vec![0x00, 0x00])?;
+
+    let mut file_value = Vec::with_capacity(3 + path.len() * 2);
+    file_value.extend_from_slice(&file_id.to_le_bytes());
+    file_value.push((path.len() * 2) as u8);
+    for entry in path {
+        file_value.extend_from_slice(&entry.to_le_bytes());
+    }
+    let file_tlv = Tlv::new(FILE_TLV, file_value)?;
+
+    // Offset 0, length 0 asks the card for the whole file.
+    let read_tlv = Tlv::new(READ_INFO_TLV, vec![0x00, 0x00, 0x00, 0x00])?;
+
+    Ok(QmiRequest::from_tlvs(
+        ServiceId::UIM,
+        assignment.client_id(),
+        transaction,
+        READ_TRANSPARENT,
+        &[session_tlv, file_tlv, read_tlv],
+    )?)
+}
+
+pub fn parse_read_transparent(response: &QmiResponse) -> Result<Vec<u8>, UimError> {
+    let tlvs = expect_uim(response, READ_TRANSPARENT)?;
+    let tlv = unique_tlv(&tlvs, READ_RESULT_TLV)?;
+    if tlv.value.len() < 2 {
+        return Err(UimError::TruncatedReadResult { actual: tlv.value.len() });
+    }
+    let declared = u16::from_le_bytes([tlv.value[0], tlv.value[1]]) as usize;
+    if tlv.value.len() < 2 + declared {
+        return Err(UimError::TruncatedReadResult { actual: tlv.value.len() });
+    }
+    Ok(tlv.value[2..2 + declared].to_vec())
+}
+
+/// Decode `EF_ICCID`. Unlike the EID its nibbles are swapped per byte, and a
+/// 19-digit ICCID is padded to 20 with a trailing `f`.
+pub fn decode_iccid(bytes: &[u8]) -> Result<String, UimError> {
+    if bytes.is_empty() {
+        return Err(UimError::EmptyIccid);
+    }
+    let mut digits = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        digits.push(nibble_char(byte & 0x0f));
+        digits.push(nibble_char(byte >> 4));
+    }
+    let trimmed = digits.trim_end_matches('f').to_string();
+    if trimmed.is_empty() || trimmed.chars().any(|c| !c.is_ascii_digit()) {
+        return Err(UimError::EmptyIccid);
+    }
+    Ok(trimmed)
+}
+
+fn nibble_char(value: u8) -> char {
+    char::from_digit(u32::from(value), 16).unwrap_or('f')
+}
+
 fn parse_rapdu(bytes: &[u8]) -> Result<ApduResponse, UimError> {
     if bytes.len() < 2 {
         return Err(UimError::TruncatedApdu { actual: bytes.len() });
@@ -251,6 +328,8 @@ pub enum UimError {
     TruncatedEid,
     MissingEidTag,
     UnexpectedEidLength { actual: usize },
+    TruncatedReadResult { actual: usize },
+    EmptyIccid,
     ApduFailed { sw1: u8, sw2: u8 },
 }
 
@@ -281,6 +360,10 @@ impl fmt::Display for UimError {
             Self::UnexpectedEidLength { actual } => {
                 write!(formatter, "EID has {actual} bytes, expected 16")
             }
+            Self::TruncatedReadResult { actual } => {
+                write!(formatter, "read result TLV has {actual} bytes")
+            }
+            Self::EmptyIccid => formatter.write_str("EF_ICCID is empty or not numeric"),
             Self::ApduFailed { sw1, sw2 } => {
                 write!(formatter, "APDU failed with SW {sw1:02x}{sw2:02x}")
             }

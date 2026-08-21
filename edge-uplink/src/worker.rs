@@ -37,11 +37,24 @@ pub trait Outbox {
 }
 
 /// Drives Resume, replay, heartbeat, and reconnect against one outbox.
+/// Unacknowledged records allowed on the wire at once.
+///
+/// Replay used to send the whole retained set in one uninterrupted loop. With a
+/// large backlog the peer's acks filled this side's receive buffer while this
+/// side was still writing, so the peer blocked on write and stopped reading,
+/// and both directions stalled with full buffers. A per-pass batch alone does
+/// not fix it: the peer acks each record, and replaying a fresh batch on every
+/// ack multiplies the backlog instead of draining it. Capping what is in flight
+/// makes each ack free exactly the room it retires.
+const REPLAY_WINDOW: u64 = 256;
+
 pub struct UplinkWorker<O> {
     session: LinkSession,
     outbox: O,
     next_connection: u64,
     last_connection_id: Option<String>,
+    /// Highest sequence handed to the transport on this connection.
+    replay_through: u64,
 }
 
 /// Failures while running one uplink attempt.
@@ -95,6 +108,7 @@ impl<O: Outbox> UplinkWorker<O> {
             outbox,
             next_connection: 0,
             last_connection_id: None,
+            replay_through: 0,
         }
     }
 
@@ -182,6 +196,7 @@ impl<O: Outbox> UplinkWorker<O> {
             }
             Inbound::UplinkAck(ack) => {
                 self.apply_ack(ack.committed_through, &ack.missing_ranges, ack.more_missing)?;
+                self.replay(conn, now)?;
             }
             Inbound::IgnoredStale | Inbound::Pong(_) | Inbound::CommandDeliver(_) => {}
             Inbound::ProtocolError(_) => {}
@@ -199,6 +214,7 @@ impl<O: Outbox> UplinkWorker<O> {
         if let Some(ref envelope) = ping {
             conn.send_envelope(envelope)?;
         }
+        self.replay(conn, now)?;
         Ok(ping)
     }
 
@@ -208,17 +224,28 @@ impl<O: Outbox> UplinkWorker<O> {
 
     fn replay<C: FrameConn>(&mut self, conn: &mut C, now: Instant) -> Result<(), WorkerError> {
         let committed_through = self.outbox.committed_through();
+        // An ack that moved the cursor forward retires anything already sent.
+        if self.replay_through < committed_through {
+            self.replay_through = committed_through;
+        }
         let mut records = self
             .outbox
             .retained()
             .map_err(|err| WorkerError::Outbox(err.to_string()))?;
         records.sort_by_key(|record| record.sequence);
+        let in_flight = self.replay_through.saturating_sub(committed_through);
+        let mut budget = REPLAY_WINDOW.saturating_sub(in_flight);
         for record in records {
-            if record.sequence <= committed_through {
+            if record.sequence <= self.replay_through {
                 continue;
+            }
+            if budget == 0 {
+                break;
             }
             let envelope = self.sequenced_envelope(&record, now)?;
             conn.send_envelope(&envelope)?;
+            self.replay_through = record.sequence;
+            budget -= 1;
         }
         Ok(())
     }

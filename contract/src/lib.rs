@@ -122,7 +122,7 @@ pub struct ResumePayload {
     pub connection_id: String,
     #[serde(rename = "last_assigned_seq", with = "u64_decimal")]
     pub last_assigned_seq: u64,
-    #[serde(rename = "lowest_retained_seq", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "lowest_retained_seq", default, skip_serializing_if = "Option::is_none", with = "opt_u64_decimal")]
     pub lowest_retained_seq: Option<u64>,
     #[serde(rename = "last_acked_seq", with = "u64_decimal")]
     pub last_acked_seq: u64,

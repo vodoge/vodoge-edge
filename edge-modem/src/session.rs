@@ -215,6 +215,22 @@ impl<T: QmiTransport> QmiClient<T> {
     }
 
     /// Open the ISD-R application, GET DATA tag `5A`, and return the EID digits.
+    /// Read `EF_ICCID` from the active profile. On an eUICC this changes when
+    /// a different profile is enabled, so it identifies the SIM in use rather
+    /// than the chip.
+    pub fn read_iccid(&mut self) -> Result<String, SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::read_transparent_request(
+            assignment,
+            self.allocate_service_transaction(),
+            uim::EF_ICCID_FILE_ID,
+            uim::EF_ICCID_PATH,
+        )?;
+        let response = self.round_trip(&request)?;
+        let bytes = uim::parse_read_transparent(&response)?;
+        Ok(uim::decode_iccid(&bytes)?)
+    }
+
     pub fn read_eid(&mut self, slot: u8) -> Result<String, SessionError> {
         let channel = self.open_logical_channel(slot, uim::ISD_R_AID)?;
         let result = (|| {

@@ -22,6 +22,14 @@ pub const PATH: &str = "/v1/edge";
 
 const MAX_FRAME_BYTES: usize = 1 << 20;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Read timeout during a live session. Expiring is normal: the worker turns it
+/// into `DialError::Timeout` and uses it to drive heartbeat and replay.
+const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Write timeout during a live session. Replaying a large backlog can keep the
+/// socket busy far longer than a connect attempt, and a write that expires is
+/// reported as a fatal handshake error rather than being retried, so this must
+/// not be the connect budget.
+const SESSION_WRITE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Errors from connecting or transferring envelopes.
 #[derive(Debug)]
@@ -143,8 +151,8 @@ impl Socket {
             })
         })?;
         tcp.set_nodelay(true)?;
-        tcp.set_read_timeout(Some(CONNECT_TIMEOUT))?;
-        tcp.set_write_timeout(Some(CONNECT_TIMEOUT))?;
+        tcp.set_read_timeout(Some(SESSION_READ_TIMEOUT))?;
+        tcp.set_write_timeout(Some(SESSION_WRITE_TIMEOUT))?;
 
         let server_name = ServerName::try_from(target.host.clone())
             .map_err(|_| DialError::UnsupportedUrl(target.host.clone()))?;
