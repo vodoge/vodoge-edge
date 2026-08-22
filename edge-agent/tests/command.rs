@@ -267,3 +267,267 @@ fn self_update_keeps_the_new_binary_after_resume() {
     assert_eq!(executor.running_version(), "1.1.0");
     assert!(executor.updater().restored().is_empty());
 }
+
+/// A port that records which relay method was called and answers with a value
+/// the assertion can recognise. It exists to prove routing, not behaviour: the
+/// real implementations live in edge-bin, behind hardware.
+#[derive(Default)]
+struct RecordingPort {
+    calls: Vec<String>,
+}
+
+impl edge_agent::SendPort for RecordingPort {
+    fn send_sms(&mut self, _send: &edge_agent::SmsSend) -> Result<(), edge_agent::SendError> {
+        self.calls.push("send_sms".into());
+        Ok(())
+    }
+
+    fn run_at(
+        &mut self,
+        imei: &str,
+        command: &str,
+        timeout_ms: Option<i64>,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("run_at {imei} {command} {timeout_ms:?}"));
+        Ok(serde_json::json!({"lines": ["+CSQ: 24,99"], "ok": true}))
+    }
+
+    fn send_ussd(
+        &mut self,
+        _imei: &str,
+        code: &str,
+        stage: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("send_ussd {code} {stage}"));
+        Ok(serde_json::json!({"text": "余额 12.34 元"}))
+    }
+
+    fn set_radio(&mut self, _imei: &str, enabled: bool) -> Result<(), edge_agent::SendError> {
+        self.calls.push(format!("set_radio {enabled}"));
+        Ok(())
+    }
+
+    fn scan_operators(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("scan_operators".into());
+        Ok(serde_json::json!({"operators": []}))
+    }
+
+    fn select_operator(
+        &mut self,
+        _imei: &str,
+        mode: &str,
+        plmn: Option<&str>,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("select_operator {mode} {plmn:?}"));
+        Ok(serde_json::Value::Null)
+    }
+
+    fn modem_report(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("modem_report".into());
+        Ok(serde_json::json!({"signal": {"dbm": -51}}))
+    }
+
+    fn reset_usb(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("reset_usb".into());
+        Ok(serde_json::Value::Null)
+    }
+
+    fn list_esim_profiles(
+        &mut self,
+        _imei: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("list_esim_profiles".into());
+        Ok(serde_json::json!({"profiles": []}))
+    }
+
+    fn switch_esim_profile(
+        &mut self,
+        _imei: &str,
+        target: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("switch_esim_profile {target}"));
+        Ok(serde_json::Value::Null)
+    }
+}
+
+fn deliver(command: Command, port: RecordingPort) -> (CommandResultPayload, Vec<String>) {
+    let mut executor = CommandExecutor::new(port);
+    let outcome = executor
+        .deliver(
+            DELIVERY_A,
+            CommandDeliverPayload {
+                cmd_id: CMD_ID.into(),
+                issued_at: 1_000,
+                expires_at: 10_000,
+                attempt: Some(1),
+                command,
+            },
+            1_500,
+        )
+        .expect("deliver");
+    let calls = executor.port().calls.clone();
+    (outcome.result, calls)
+}
+
+const IMEI: &str = "867018069514820";
+
+/// Every relayed command must reach its port method. Before the relay existed
+/// they all fell through to the catch-all and reported `unsupported_command`,
+/// which is exactly what this would catch if a variant were ever dropped from
+/// the match.
+#[test]
+fn every_relayed_command_reaches_the_port() {
+    let cases: Vec<(Command, &str)> = vec![
+        (
+            Command::RunAtCommand {
+                modem_imei: IMEI.into(),
+                command: "AT+CSQ".into(),
+                timeout_ms: None,
+            },
+            "run_at 867018069514820 AT+CSQ None",
+        ),
+        (
+            Command::SendUssd {
+                modem_imei: IMEI.into(),
+                code: "*101#".into(),
+                stage: None,
+            },
+            "send_ussd *101# start",
+        ),
+        (
+            Command::SetRadio {
+                modem_imei: IMEI.into(),
+                enabled: false,
+            },
+            "set_radio false",
+        ),
+        (
+            Command::ScanOperators {
+                modem_imei: IMEI.into(),
+            },
+            "scan_operators",
+        ),
+        (
+            Command::SelectOperator {
+                modem_imei: IMEI.into(),
+                mode: "manual".into(),
+                plmn: Some("460-01".into()),
+            },
+            "select_operator manual Some(\"460-01\")",
+        ),
+        (
+            Command::ModemReport {
+                modem_imei: IMEI.into(),
+            },
+            "modem_report",
+        ),
+        (
+            Command::ResetModemUsb {
+                modem_imei: IMEI.into(),
+            },
+            "reset_usb",
+        ),
+        (
+            Command::ListEsimProfiles {
+                modem_imei: IMEI.into(),
+            },
+            "list_esim_profiles",
+        ),
+        (
+            Command::SwitchEsimProfile {
+                modem_imei: IMEI.into(),
+                target_iccid: "89852351225042214201".into(),
+            },
+            "switch_esim_profile 89852351225042214201",
+        ),
+    ];
+
+    for (command, expected_call) in cases {
+        let (result, calls) = deliver(command, RecordingPort::default());
+        assert_eq!(
+            result.status, RESULT_SUCCEEDED,
+            "{expected_call} produced {:?}",
+            result.reason
+        );
+        assert_eq!(calls, vec![expected_call.to_string()]);
+    }
+}
+
+/// A diagnostic is only useful if what it read comes back with it.
+#[test]
+fn a_reading_travels_in_the_result_details() {
+    let (result, _) = deliver(
+        Command::RunAtCommand {
+            modem_imei: IMEI.into(),
+            command: "AT+CSQ".into(),
+            timeout_ms: Some(5_000),
+        },
+        RecordingPort::default(),
+    );
+
+    let details = result_json(&result);
+    assert_eq!(details["details"]["lines"][0], "+CSQ: 24,99");
+    assert_eq!(details["details"]["ok"], true);
+}
+
+/// An action with nothing to report must not invent an empty object: `details`
+/// is absent, which is what "there was no reading" looks like on the wire.
+#[test]
+fn an_action_with_no_reading_sends_no_details() {
+    let (result, _) = deliver(
+        Command::SetRadio {
+            modem_imei: IMEI.into(),
+            enabled: true,
+        },
+        RecordingPort::default(),
+    );
+
+    assert!(result.details.is_none());
+    let encoded = result_json(&result);
+    assert!(
+        encoded.get("details").is_none(),
+        "details should not be serialised at all, got {encoded}",
+    );
+}
+
+/// A port that cannot perform an action reports a failure the console can
+/// read, rather than a success that did nothing.
+#[test]
+fn an_unimplemented_action_fails_with_its_name() {
+    struct BarePort;
+    impl edge_agent::SendPort for BarePort {
+        fn send_sms(&mut self, _send: &edge_agent::SmsSend) -> Result<(), edge_agent::SendError> {
+            Ok(())
+        }
+    }
+
+    let mut executor = CommandExecutor::new(BarePort);
+    let outcome = executor
+        .deliver(
+            DELIVERY_A,
+            CommandDeliverPayload {
+                cmd_id: CMD_ID.into(),
+                issued_at: 1_000,
+                expires_at: 10_000,
+                attempt: Some(1),
+                command: Command::ScanOperators {
+                    modem_imei: IMEI.into(),
+                },
+            },
+            1_500,
+        )
+        .expect("deliver");
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert_eq!(outcome.result.reason_code.as_deref(), Some("unsupported_command"));
+    assert!(
+        outcome
+            .result
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("scan_operators"),
+        "the reason must name the action: {:?}",
+        outcome.result.reason,
+    );
+}

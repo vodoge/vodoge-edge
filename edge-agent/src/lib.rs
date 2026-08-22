@@ -11,6 +11,7 @@ use std::fmt;
 use edge_core::CapabilityMatrix;
 use edge_uplink::update::UpdateGuard;
 use edge_uplink::{EnvelopeId, RetentionClass, UplinkError, UplinkState};
+use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use vodoge_contract::{
     Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload, ContextValue,
@@ -68,11 +69,73 @@ impl Error for SendError {}
 pub trait SendPort {
     fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError>;
     fn restart_modem(&mut self, _imei: &str) -> Result<(), SendError> {
-        Err(SendError::new(
-            "unsupported_command",
-            "restart_modem is not implemented",
-        ))
+        Err(unsupported("restart_modem"))
     }
+
+    // The diagnostic actions below already existed on the edge panel, where
+    // they could only be driven by someone with a shell on the box. Reaching
+    // them from the cloud is the whole point of the relay.
+    //
+    // Each returns the JSON that goes into the result's `details`, so a
+    // console can render an AT response or a scan list without a second
+    // round trip. Defaults refuse rather than pretend: a port that cannot do
+    // one of these must say so, not report a success with no effect.
+
+    fn run_at(
+        &mut self,
+        _imei: &str,
+        _command: &str,
+        _timeout_ms: Option<i64>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("run_at_command"))
+    }
+
+    /// `stage` is one of `start`, `continue` or `cancel`.
+    fn send_ussd(&mut self, _imei: &str, _code: &str, _stage: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("send_ussd"))
+    }
+
+    fn set_radio(&mut self, _imei: &str, _enabled: bool) -> Result<(), SendError> {
+        Err(unsupported("set_radio"))
+    }
+
+    fn scan_operators(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("scan_operators"))
+    }
+
+    /// `plmn` is present only for manual selection.
+    fn select_operator(
+        &mut self,
+        _imei: &str,
+        _mode: &str,
+        _plmn: Option<&str>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("select_operator"))
+    }
+
+    fn modem_report(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("modem_report"))
+    }
+
+    fn reset_usb(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("reset_modem_usb"))
+    }
+
+    fn list_esim_profiles(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("list_esim_profiles"))
+    }
+
+    fn switch_esim_profile(
+        &mut self,
+        _imei: &str,
+        _target_iccid: &str,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("switch_esim_profile"))
+    }
+}
+
+fn unsupported(what: &str) -> SendError {
+    SendError::new("unsupported_command", format!("{what} is not implemented"))
 }
 
 /// In-memory send target used by command tests.
@@ -546,6 +609,106 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     )),
                 }
             }
+            // The diagnostic relay. Each of these already worked on the edge
+            // panel; the executor simply routes the cloud's request to the
+            // same port and puts whatever came back into `details`.
+            //
+            // All are marked executed: even a failed AT command consumed the
+            // radio and must not be retried behind the caller's back.
+            Command::RunAtCommand {
+                modem_imei,
+                command,
+                timeout_ms,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.run_at(modem_imei, command, *timeout_ms);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SendUssd {
+                modem_imei,
+                code,
+                stage,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let stage = stage.as_deref().unwrap_or("start");
+                let outcome = self.port.send_ussd(modem_imei, code, stage);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SetRadio {
+                modem_imei,
+                enabled,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self
+                    .port
+                    .set_radio(modem_imei, *enabled)
+                    .map(|()| JsonValue::Null);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ScanOperators { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.scan_operators(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SelectOperator {
+                modem_imei,
+                mode,
+                plmn,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.select_operator(modem_imei, mode, plmn.as_deref());
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ModemReport { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.modem_report(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ResetModemUsb { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.reset_usb(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ListEsimProfiles { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.list_esim_profiles(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SwitchEsimProfile {
+                modem_imei,
+                target_iccid,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.switch_esim_profile(modem_imei, target_iccid);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
             _ => Ok((
                 terminal_result(
                     &payload.cmd_id,
@@ -675,6 +838,61 @@ fn hex_sha256(bytes: &[u8]) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
+}
+
+/// Bridges a diagnostic result into the contract's own JSON tree.
+///
+/// `ContextValue` is generated code and cannot grow a `From` impl of its own.
+/// Numbers that are not finite have no JSON representation at all, so they
+/// become null rather than silently serialising as something else.
+fn context_value(value: JsonValue) -> ContextValue {
+    match value {
+        JsonValue::Null => ContextValue::Null,
+        JsonValue::Bool(inner) => ContextValue::Bool(inner),
+        JsonValue::Number(inner) => match inner.as_f64() {
+            Some(number) if number.is_finite() => ContextValue::Number(number),
+            _ => ContextValue::Null,
+        },
+        JsonValue::String(inner) => ContextValue::String(inner),
+        JsonValue::Array(items) => {
+            ContextValue::Array(items.into_iter().map(context_value).collect())
+        }
+        JsonValue::Object(entries) => ContextValue::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, context_value(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// One diagnostic action's outcome, in the shape every branch of `execute`
+/// needs it. Written once because there are now ten of them and each was
+/// otherwise twenty lines of the same match.
+fn diagnostic_result(
+    cmd_id: &str,
+    now_ms: i64,
+    attempts: i64,
+    outcome: Result<JsonValue, SendError>,
+) -> CommandResultPayload {
+    match outcome {
+        Ok(details) => {
+            let mut result =
+                terminal_result(cmd_id, RESULT_SUCCEEDED, now_ms, attempts, None, None);
+            if !details.is_null() {
+                result.details = Some(context_value(details));
+            }
+            result
+        }
+        Err(error) => terminal_result(
+            cmd_id,
+            RESULT_FAILED,
+            now_ms,
+            attempts,
+            Some(error.reason_code.as_str()),
+            Some(error.message.as_str()),
+        ),
+    }
 }
 
 fn terminal_result(

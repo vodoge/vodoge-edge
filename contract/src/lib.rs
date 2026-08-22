@@ -406,6 +406,92 @@ pub struct RestartModemCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunAtCommandCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "command")]
+    pub command: String,
+    #[serde(rename = "timeout_ms", default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendUssdCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "code")]
+    pub code: String,
+    #[serde(rename = "stage", default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetRadioCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanOperatorsCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectOperatorCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "mode")]
+    pub mode: String,
+    #[serde(rename = "plmn", default, skip_serializing_if = "Option::is_none")]
+    pub plmn: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModemReportCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetModemUsbCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListEsimProfilesCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SwitchEsimProfileCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -506,6 +592,55 @@ pub enum Command {
         modem_imei: String,
         #[serde(rename = "target_iccid")]
         target_iccid: String,
+    },
+    ListEsimProfiles {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    RunAtCommand {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "command")]
+        command: String,
+        #[serde(rename = "timeout_ms")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<i64>,
+    },
+    SendUssd {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "code")]
+        code: String,
+        #[serde(rename = "stage")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+    },
+    SetRadio {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "enabled")]
+        enabled: bool,
+    },
+    ScanOperators {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    SelectOperator {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "mode")]
+        mode: String,
+        #[serde(rename = "plmn")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plmn: Option<String>,
+    },
+    ModemReport {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    ResetModemUsb {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
     },
     UpdateCardPolicy {
         #[serde(rename = "policy_version")]

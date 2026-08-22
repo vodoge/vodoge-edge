@@ -37,6 +37,7 @@ mod linux {
         ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
     };
     use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
+    use serde_json::Value as JsonValue;
     use edge_uplink::dial::{DialError, Socket};
     use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
     use edge_uplink::tls::client_config;
@@ -216,6 +217,134 @@ mod linux {
                     .map_err(|error| SendError::new("restart_failed", error.to_string()))
             })
         }
+
+        // The relay. Each of these routes a cloud command into the very same
+        // `Actions` method the local panel calls, so a diagnostic run from the
+        // console and one from the panel cannot behave differently — there is
+        // one implementation, not two.
+
+        fn run_at(
+            &mut self,
+            imei: &str,
+            command: &str,
+            timeout_ms: Option<i64>,
+        ) -> Result<JsonValue, SendError> {
+            // The panel's AT action uses the port's own default timeout. A
+            // command that asks for a longer one gets it here rather than
+            // silently running with the default.
+            let result = match timeout_ms {
+                Some(millis) => self.radio.with_at_port(Some(imei), |port| {
+                    let started = Instant::now();
+                    let exchange = port
+                        .command_with_timeout(command, Duration::from_millis(millis as u64))
+                        .map_err(|error| SendError::new("at_failed", error.to_string()))?;
+                    Ok(AtResult {
+                        port: String::new(),
+                        command: exchange.command,
+                        lines: exchange.lines,
+                        ok: exchange.terminator == "OK",
+                        terminator: exchange.terminator,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    })
+                })?,
+                None => Actions::at_command(self, Some(imei.to_string()), command.to_string())
+                    .map_err(action_failed)?,
+            };
+            json_details(&result)
+        }
+
+        fn send_ussd(&mut self, imei: &str, code: &str, stage: &str) -> Result<JsonValue, SendError> {
+            match stage {
+                "cancel" => {
+                    Actions::ussd_cancel(self, Some(imei.to_string())).map_err(action_failed)?;
+                    Ok(JsonValue::Null)
+                }
+                // A continue is the same request on an open session: the
+                // module distinguishes them by whether one is already running,
+                // not by a different command.
+                _ => {
+                    let result = Actions::ussd(self, Some(imei.to_string()), code.to_string())
+                        .map_err(action_failed)?;
+                    json_details(&result)
+                }
+            }
+        }
+
+        fn set_radio(&mut self, imei: &str, enabled: bool) -> Result<(), SendError> {
+            Actions::set_radio(self, Some(imei.to_string()), enabled).map_err(action_failed)
+        }
+
+        fn scan_operators(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result =
+                Actions::scan_operators(self, Some(imei.to_string())).map_err(action_failed)?;
+            json_details(&result)
+        }
+
+        fn select_operator(
+            &mut self,
+            imei: &str,
+            mode: &str,
+            plmn: Option<&str>,
+        ) -> Result<JsonValue, SendError> {
+            // 27.007: `AT+COPS=0` hands selection back to the module,
+            // `AT+COPS=1,2,"46001"` pins it to one network in numeric format.
+            let command = match (mode, plmn) {
+                ("manual", Some(plmn)) => {
+                    format!("AT+COPS=1,2,\"{}\"", plmn.replace('-', ""))
+                }
+                ("manual", None) => {
+                    return Err(SendError::new(
+                        "plmn_required",
+                        "manual selection needs a plmn",
+                    ))
+                }
+                _ => "AT+COPS=0".to_string(),
+            };
+            // Registering on a chosen network takes far longer than a normal
+            // AT round trip, and the module stays silent until it settles.
+            self.run_at(imei, &command, Some(120_000))
+        }
+
+        fn modem_report(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result =
+                Actions::modem_report(self, Some(imei.to_string())).map_err(action_failed)?;
+            json_details(&result)
+        }
+
+        fn reset_usb(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result = Actions::usb_reset(self, Some(imei.to_string())).map_err(action_failed)?;
+            json_details(&result)
+        }
+
+        fn list_esim_profiles(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result =
+                Actions::list_profiles(self, Some(imei.to_string())).map_err(action_failed)?;
+            json_details(&result)
+        }
+
+        fn switch_esim_profile(
+            &mut self,
+            imei: &str,
+            target_iccid: &str,
+        ) -> Result<JsonValue, SendError> {
+            Actions::switch_profile(self, Some(imei.to_string()), target_iccid.to_string(), true)
+                .map_err(action_failed)?;
+            Ok(JsonValue::Null)
+        }
+    }
+
+    fn action_failed(error: PanelError) -> SendError {
+        SendError::new("action_failed", error.to_string())
+    }
+
+    /// Serialises an action's own result type into the command result.
+    ///
+    /// A diagnostic whose output cannot be encoded is a failure, not a success
+    /// with an empty body: the console would otherwise show a green tick for a
+    /// reading nobody can see.
+    fn json_details<T: serde::Serialize>(value: &T) -> Result<JsonValue, SendError> {
+        serde_json::to_value(value)
+            .map_err(|error| SendError::new("details_encode_failed", error.to_string()))
     }
 
     impl Actions for RadioPort {
