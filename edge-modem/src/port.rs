@@ -1,5 +1,6 @@
 use edge_core::{Bearer, RegistrationEvidence};
 
+use crate::wms::StorageType;
 use crate::{ListedMessage, RawMessage, SessionError};
 
 /// How a modem control channel is reached. Implementations must not share a
@@ -29,9 +30,17 @@ pub trait ModemPort {
     fn imei(&mut self) -> Result<String, PortError>;
     fn firmware(&mut self) -> Result<String, PortError>;
     fn registration_evidence(&mut self) -> Result<Vec<RegistrationEvidence>, PortError>;
+    /// Every stored message, from every store the modem keeps them in.
+    ///
+    /// Both stores, not just the SIM. A modem decides for itself where a
+    /// received message goes, and these EC20s put them in their own memory —
+    /// so a reader that only looked at the SIM saw an empty inbox while five
+    /// messages sat on the device.
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError>;
-    fn read_sms(&mut self, index: u32) -> Result<RawMessage, PortError>;
-    fn delete_sms(&mut self, index: u32) -> Result<(), PortError>;
+    /// Reads one message from the store it was listed in. Indexes are per
+    /// store, so the same number means a different message in the other one.
+    fn read_sms(&mut self, storage: StorageType, index: u32) -> Result<RawMessage, PortError>;
+    fn delete_sms(&mut self, storage: StorageType, index: u32) -> Result<(), PortError>;
     fn send_pdu(&mut self, pdu: &[u8]) -> Result<(), PortError> {
         self.send_on(Bearer::Cellular, pdu)
     }
@@ -84,11 +93,11 @@ impl ModemPort for UnsupportedPort {
         Err(PortError::Unsupported(self.kind))
     }
 
-    fn read_sms(&mut self, _index: u32) -> Result<RawMessage, PortError> {
+    fn read_sms(&mut self, _storage: StorageType, _index: u32) -> Result<RawMessage, PortError> {
         Err(PortError::Unsupported(self.kind))
     }
 
-    fn delete_sms(&mut self, _index: u32) -> Result<(), PortError> {
+    fn delete_sms(&mut self, _storage: StorageType, _index: u32) -> Result<(), PortError> {
         Err(PortError::Unsupported(self.kind))
     }
 

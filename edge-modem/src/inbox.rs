@@ -1,3 +1,4 @@
+use crate::wms::StorageType;
 use crate::{
     retain_mobile_terminated, ListedMessage, MessageTag, ModemPort, PortError, RawMessage,
 };
@@ -14,6 +15,9 @@ pub struct InboxPass {
 pub struct CollectedMessage {
     pub index: u32,
     pub tag: MessageTag,
+    /// Which store it came from. Carried so the delete afterwards targets the
+    /// right one — the same index in the other store is a different message.
+    pub storage: StorageType,
     pub raw: RawMessage,
 }
 
@@ -30,10 +34,11 @@ pub fn collect_inbound<P: ModemPort>(port: &mut P) -> Result<InboxPass, PortErro
 
     let mut inbound = Vec::with_capacity(inbound_listed.len());
     for message in inbound_listed {
-        let raw = port.read_sms(message.index)?;
+        let raw = port.read_sms(message.storage, message.index)?;
         inbound.push(CollectedMessage {
             index: message.index,
             tag: message.tag,
+            storage: message.storage,
             raw,
         });
     }
@@ -50,7 +55,7 @@ pub fn delete_inbound<P: ModemPort>(
     inbound: &[CollectedMessage],
 ) -> Result<(), PortError> {
     for message in inbound {
-        port.delete_sms(message.index)?;
+        port.delete_sms(message.storage, message.index)?;
     }
     Ok(())
 }

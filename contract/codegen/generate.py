@@ -427,6 +427,47 @@ def emit_rust(schema: dict) -> str:
     return "\n".join(lines)
 
 
+def collect_constraints(schema: dict, defs: dict) -> list:
+    """Every enum-constrained field in a payload, as a flat list of paths.
+
+    Emitted so the gateway can check what a device sends against the contract
+    without a second, hand-written copy of the vocabulary. The first version of
+    that check was hand-written, and the three values it was written to catch
+    were themselves only found after twenty thousand envelopes had been stored
+    with values outside the enum.
+
+    Paths use dots for objects and `[]` for arrays, e.g. `modems[].state`.
+    """
+    found = []
+
+    def walk(node: dict, path: str, seen: frozenset) -> None:
+        if "$ref" in node:
+            name = node["$ref"].split("/")[-1]
+            # ContextValue refers to itself, so a definition already on this
+            # branch is not followed again. Without this the walk never ends.
+            if name in seen:
+                return
+            walk(defs[name], path, seen | {name})
+            return
+        if "anyOf" in node:
+            for item in node["anyOf"]:
+                if item.get("type") != "null":
+                    walk(item, path, seen)
+            return
+        values = node.get("enum")
+        if values and node.get("type") == "string":
+            found.append((path, values))
+            return
+        if node.get("type") == "array" and "items" in node:
+            walk(node["items"], path + "[]", seen)
+            return
+        for field, spec in (node.get("properties") or {}).items():
+            walk(spec, f"{path}.{field}" if path else field, seen)
+
+    walk(schema, "", frozenset())
+    return found
+
+
 def emit_go(schema: dict) -> str:
     defs = schema["$defs"]
     catalog = schema["x-vodoge-message-catalog"]
@@ -510,7 +551,48 @@ def emit_go(schema: dict) -> str:
         lines.append("")
 
     lines += [
-        "type Command json.RawMessage",
+        "// Command is the payload of a CommandDeliver, passed through untouched.",
+        "//",
+        "// An alias, not a defined type. `type Command json.RawMessage` does not",
+        "// inherit RawMessage's MarshalJSON, so encoding/json fell back to the",
+        "// []byte rule and emitted the command as a base64 string. Every device",
+        "// rejected every command it was ever sent with \"expected internally",
+        "// tagged enum Command\", and since nothing read that log the commands",
+        "// simply stayed queued.",
+        "type Command = json.RawMessage",
+        "",
+        "// FieldConstraint is one enum-constrained field inside a payload.",
+        "//",
+        "// Path uses dots for objects and `[]` for arrays, e.g. `modems[].state`.",
+        "type FieldConstraint struct {",
+        "\tPath  string",
+        "\tEnum  []string",
+        "}",
+        "",
+        "// PayloadConstraints lists, per message kind, every field the schema",
+        "// constrains to a fixed set of values.",
+        "//",
+        "// Generated rather than written by hand: the hand-written version of this",
+        "// check knew about three fields, and those three were only discovered after",
+        "// twenty thousand envelopes had been stored with values outside the enum.",
+        "// A field added to the schema is covered here without anyone remembering to",
+        "// extend it.",
+        "var PayloadConstraints = map[MessageKind][]FieldConstraint{",
+    ]
+    for kind in kinds:
+        payload_name = f"{kind}Payload"
+        if payload_name not in defs:
+            continue
+        constraints = collect_constraints(defs[payload_name], defs)
+        if not constraints:
+            continue
+        lines.append(f"\tMessageKind{kind}: {{")
+        for path, values in constraints:
+            encoded = ", ".join(json.dumps(value) for value in values)
+            lines.append(f"\t\t{{Path: {json.dumps(path)}, Enum: []string{{{encoded}}}}},")
+        lines.append("\t},")
+    lines += [
+        "}",
         "",
     ]
     return "\n".join(lines)

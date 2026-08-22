@@ -19,8 +19,12 @@ const DELETE_INDEX_TLV: u8 = 0x10;
 const DELETE_MODE_TLV: u8 = 0x12;
 const SEND_MESSAGE_ID_TLV: u8 = 0x01;
 
-/// WMS storage type. UIM is the SIM/USIM store used for received SMS.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// WMS storage type.
+///
+/// `Uim` is the SIM's own store and `Nv` is the modem's memory. Which one a
+/// received message lands in is the modem's choice, not the caller's, so
+/// anything reading an inbox has to look at both.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum StorageType {
     Uim,
     Nv,
@@ -92,6 +96,10 @@ impl MessageTag {
 pub struct ListedMessage {
     pub index: u32,
     pub tag: MessageTag,
+    /// Where the message is held. Indexes are per storage, so reading or
+    /// deleting one requires knowing which store it came from — the same
+    /// index means a different message in the other.
+    pub storage: StorageType,
 }
 
 /// Raw PDU plus the tag when the modem includes one.
@@ -122,12 +130,15 @@ pub fn list_messages_request(
     )?)
 }
 
-pub fn parse_list_messages(response: &QmiResponse) -> Result<Vec<ListedMessage>, WmsError> {
+pub fn parse_list_messages(
+    response: &QmiResponse,
+    storage: StorageType,
+) -> Result<Vec<ListedMessage>, WmsError> {
     let tlvs = expect_wms(response, LIST_MESSAGES)?;
     match unique_tlv(&tlvs, LIST_RESULT_TLV) {
         Err(TlvLookupError::Missing { .. }) => Ok(Vec::new()),
         Err(error) => Err(error.into()),
-        Ok(tlv) => parse_list_payload(&tlv.value),
+        Ok(tlv) => parse_list_payload(&tlv.value, storage),
     }
 }
 
@@ -231,7 +242,7 @@ pub fn parse_delete(response: &QmiResponse) -> Result<(), WmsError> {
     expect_wms(response, DELETE).map(|_| ())
 }
 
-fn parse_list_payload(value: &[u8]) -> Result<Vec<ListedMessage>, WmsError> {
+fn parse_list_payload(value: &[u8], storage: StorageType) -> Result<Vec<ListedMessage>, WmsError> {
     if value.len() < 4 {
         return Err(WmsError::TruncatedList { actual: value.len() });
     }
@@ -249,7 +260,7 @@ fn parse_list_payload(value: &[u8]) -> Result<Vec<ListedMessage>, WmsError> {
             value[offset + 3],
         ]);
         let tag = MessageTag::from_wire(value[offset + 4]);
-        messages.push(ListedMessage { index, tag });
+        messages.push(ListedMessage { index, tag, storage });
         offset += 5;
     }
     Ok(messages)

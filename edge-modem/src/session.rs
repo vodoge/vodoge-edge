@@ -123,7 +123,7 @@ impl<T: QmiTransport> QmiClient<T> {
             mode,
         )?;
         let response = self.round_trip(&request)?;
-        Ok(wms::parse_list_messages(&response)?)
+        Ok(wms::parse_list_messages(&response, storage)?)
     }
 
     pub fn read_sms(

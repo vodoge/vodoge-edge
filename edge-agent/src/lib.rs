@@ -855,8 +855,20 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
     }
 }
 
+/// The envelope id for a command's result.
+///
+/// The command id itself. It has to be a UUID — the contract says so and the
+/// cloud's journal stores it in a uuid column — and it has to be the same on
+/// every replay, because the outbox deduplicates by it and a reconnect resends
+/// the result.
+///
+/// `command-result:{cmd_id}` satisfied the second and not the first, so every
+/// result the cloud received was rejected by PostgreSQL, which ended the device
+/// session; the edge reconnected, replayed the same result and was cut off
+/// again, forever. There is exactly one result per command, so the command's
+/// own id is unique here.
 fn result_envelope_id(cmd_id: &str) -> Result<EnvelopeId, CommandError> {
-    EnvelopeId::new(format!("command-result:{cmd_id}")).map_err(CommandError::Uplink)
+    EnvelopeId::new(cmd_id.to_string()).map_err(CommandError::Uplink)
 }
 
 fn receipt(

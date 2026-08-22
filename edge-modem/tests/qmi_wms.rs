@@ -43,21 +43,24 @@ fn list_parser_keeps_returned_tags_not_the_request_filter() {
         &mixed_list_payload(),
     );
     let response = QmiResponse::decode(&frame).expect("list frame");
-    let listed = parse_list_messages(&response).expect("parse list");
+    let listed = parse_list_messages(&response, StorageType::Nv).expect("parse list");
     assert_eq!(
         listed,
         vec![
             ListedMessage {
                 index: 1,
                 tag: MessageTag::MoSent,
+                storage: StorageType::Nv,
             },
             ListedMessage {
                 index: 2,
                 tag: MessageTag::MtUnread,
+                storage: StorageType::Nv,
             },
             ListedMessage {
                 index: 3,
                 tag: MessageTag::MoUnsent,
+                storage: StorageType::Nv,
             },
         ]
     );
@@ -66,6 +69,7 @@ fn list_parser_keeps_returned_tags_not_the_request_filter() {
         vec![ListedMessage {
             index: 2,
             tag: MessageTag::MtUnread,
+            storage: StorageType::Nv,
         }]
     );
 }

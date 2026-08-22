@@ -27,7 +27,7 @@ mod linux {
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
-    use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
+    use edge_core::{assemble, CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
     use edge_modem::{
         collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, NasRegistrationState,
         OperatingMode, QmiClient,
@@ -1032,12 +1032,43 @@ mod linux {
         }
 
         let pass = collect_inbound(&mut client).map_err(|e| e.to_string())?;
+
+        // Fragments are joined before anything else sees them. A long message
+        // arrives as several PDUs, and storing each one separately gives the
+        // operator three truncated messages where the sender wrote one.
+        let mut parts = Vec::with_capacity(pass.inbound.len());
         for message in &pass.inbound {
-            let (peer, body) = decode_deliver(&message.raw.pdu);
+            let decoded = decode_deliver(&message.raw.pdu);
+            let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
+            parts.push(ConcatPart {
+                sender: decoded.peer,
+                ref_id,
+                total,
+                seq,
+                body: decoded.body,
+            });
+        }
+        let (assembled, pending) = assemble(&parts);
+
+        // A fragment whose siblings have not arrived stays on the modem, so
+        // the next pass can complete it. Deleting it would lose half a message
+        // permanently, which is worse than reading it twice.
+        let incomplete: std::collections::BTreeSet<(String, u16)> = pending
+            .iter()
+            .map(|part| (part.sender.clone(), part.ref_id))
+            .collect();
+        if !incomplete.is_empty() {
+            log_line(format!(
+                "{} sms fragment(s) awaiting the rest, left on the modem",
+                pending.len()
+            ));
+        }
+
+        for (index, message) in assembled.iter().enumerate() {
             let local = LocalMessage {
-                seq: u64::from(message.index) + (now as u64 % 1_000_000) * 1000,
-                peer: peer.clone(),
-                body: body.clone(),
+                seq: (index as u64) + (now as u64 % 1_000_000) * 1000,
+                peer: message.sender.clone(),
+                body: message.body.clone(),
                 bearer: "cellular".into(),
                 direction: "inbound".into(),
                 received_at: now,
@@ -1049,10 +1080,24 @@ mod linux {
                 .expect("store")
                 .insert_local_message(&local)
                 .map_err(|e| e.to_string())?;
-            enqueue_sms(outbox, &imei, &peer, &body, now)?;
+            enqueue_sms(outbox, &imei, &message.sender, &message.body, now)?;
         }
-        if !pass.inbound.is_empty() {
-            let _ = delete_inbound(&mut client, &pass.inbound);
+
+        // Delete only what was fully assembled.
+        let complete: Vec<_> = pass
+            .inbound
+            .iter()
+            .filter(|message| {
+                let decoded = decode_deliver(&message.raw.pdu);
+                match decoded.concat {
+                    None => true,
+                    Some((ref_id, _, _)) => !incomplete.contains(&(decoded.peer, ref_id)),
+                }
+            })
+            .cloned()
+            .collect();
+        if !complete.is_empty() {
+            let _ = delete_inbound(&mut client, &complete);
         }
 
         enqueue_device_state(
@@ -1302,7 +1347,10 @@ mod linux {
             .map_err(|e| e.to_string())?;
 
         let result_bytes = serde_json::to_vec(&outcome.result).map_err(|e| e.to_string())?;
-        let envelope_id = EnvelopeId::new(format!("command-result:{}", outcome.result.cmd_id))
+        // The command's own id: it is a UUID, it is the same on every replay
+        // so the outbox deduplicates correctly, and there is exactly one
+        // result per command. See result_envelope_id in edge-agent.
+        let envelope_id = EnvelopeId::new(outcome.result.cmd_id.clone())
             .map_err(|e| e.to_string())?;
         let sequence = match outbox.lock().expect("outbox").append(
             envelope_id,
@@ -1318,7 +1366,7 @@ mod linux {
             .send_envelope(&Envelope {
                 v: PROTOCOL_VERSION,
                 kind: MessageKind::CommandResult,
-                id: format!("command-result:{}", outcome.result.cmd_id),
+                id: outcome.result.cmd_id.clone(),
                 ts: now,
                 device_id: DEVICE_ID.into(),
                 seq: Some(sequence),
@@ -1358,9 +1406,23 @@ mod linux {
         .map_err(|e| e.to_string())
     }
 
-    fn decode_deliver(pdu: &[u8]) -> (String, String) {
+    /// One decoded SMS-DELIVER: who sent it, what it says, and which part of
+    /// a longer message it is.
+    struct Decoded {
+        peer: String,
+        body: String,
+        /// Present when the message is one fragment of a longer one.
+        concat: Option<(u16, u8, u8)>,
+    }
+
+    fn decode_deliver(pdu: &[u8]) -> Decoded {
+        let empty = || Decoded {
+            peer: String::new(),
+            body: String::new(),
+            concat: None,
+        };
         if pdu.is_empty() {
-            return (String::new(), String::new());
+            return empty();
         }
         let mut i = 0usize;
         let smsc_len = pdu[0] as usize;
@@ -1368,18 +1430,35 @@ mod linux {
             i = 1 + smsc_len;
         }
         if i + 2 >= pdu.len() {
-            return (String::new(), hex(pdu));
+            return Decoded {
+                peer: String::new(),
+                body: hex(pdu),
+                concat: None,
+            };
         }
+        // The first octet carries TP-UDHI in bit 6. It was skipped unread,
+        // which is why every concatenated message arrived with its header
+        // decoded as text — `Ԁϒȁ` is the six-byte UDH read as UCS-2.
+        let first_octet = pdu[i];
+        let has_udh = first_octet & 0x40 != 0;
         i += 1;
         let oa_digits = pdu[i] as usize;
         i += 1;
         if i >= pdu.len() {
-            return (String::new(), hex(pdu));
+            return Decoded {
+                peer: String::new(),
+                body: hex(pdu),
+                concat: None,
+            };
         }
         i += 1;
         let oa_bytes = oa_digits.div_ceil(2);
         if i + oa_bytes + 9 > pdu.len() {
-            return (String::new(), hex(pdu));
+            return Decoded {
+                peer: String::new(),
+                body: hex(pdu),
+                concat: None,
+            };
         }
         let peer = bcd(&pdu[i..i + oa_bytes], oa_digits);
         i += oa_bytes;
@@ -1390,9 +1469,15 @@ mod linux {
         let udl = pdu[i] as usize;
         i += 1;
         let ud = if i <= pdu.len() { &pdu[i..] } else { &[] };
+
+        // Strip the header before decoding, and keep what it says about which
+        // fragment this is.
+        let (concat, payload) = split_user_data_header(has_udh, ud);
+
         let body = match dcs & 0x0c {
             0x08 => String::from_utf16_lossy(
-                &ud.chunks(2)
+                &payload
+                    .chunks(2)
                     .filter_map(|c| {
                         if c.len() == 2 {
                             Some(u16::from_be_bytes([c[0], c[1]]))
@@ -1402,9 +1487,59 @@ mod linux {
                     })
                     .collect::<Vec<_>>(),
             ),
-            _ => String::from_utf8_lossy(ud).chars().take(udl).collect(),
+            _ => String::from_utf8_lossy(payload).chars().take(udl).collect(),
         };
-        (peer, body)
+        Decoded {
+            peer,
+            body,
+            concat,
+        }
+    }
+
+    /// Splits the user data header off the payload.
+    ///
+    /// Returns the concatenation parameters when the header carries them —
+    /// information element 0x00 is an 8-bit reference, 0x08 a 16-bit one — and
+    /// the remaining bytes either way. A header this does not understand is
+    /// still removed: leaving it in puts binary in the message body, which is
+    /// the one outcome nobody wants to read.
+    fn split_user_data_header(has_udh: bool, ud: &[u8]) -> (Option<(u16, u8, u8)>, &[u8]) {
+        if !has_udh || ud.is_empty() {
+            return (None, ud);
+        }
+        let header_len = ud[0] as usize;
+        let end = 1 + header_len;
+        if end > ud.len() {
+            return (None, &[]);
+        }
+        let header = &ud[1..end];
+        let payload = &ud[end..];
+
+        let mut concat = None;
+        let mut offset = 0usize;
+        while offset + 2 <= header.len() {
+            let iei = header[offset];
+            let length = header[offset + 1] as usize;
+            let value_start = offset + 2;
+            let value_end = value_start + length;
+            if value_end > header.len() {
+                break;
+            }
+            let value = &header[value_start..value_end];
+            match (iei, value.len()) {
+                (0x00, 3) => concat = Some((u16::from(value[0]), value[1], value[2])),
+                (0x08, 4) => {
+                    concat = Some((
+                        u16::from_be_bytes([value[0], value[1]]),
+                        value[2],
+                        value[3],
+                    ))
+                }
+                _ => {}
+            }
+            offset = value_end;
+        }
+        (concat, payload)
     }
 
     fn bcd(bytes: &[u8], digits: usize) -> String {

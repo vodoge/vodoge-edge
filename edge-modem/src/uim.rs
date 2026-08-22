@@ -245,11 +245,25 @@ pub fn decode_iccid(bytes: &[u8]) -> Result<String, UimError> {
         digits.push(nibble_char(byte & 0x0f));
         digits.push(nibble_char(byte >> 4));
     }
-    let trimmed = digits.trim_end_matches('f').to_string();
-    if trimmed.is_empty() || trimmed.chars().any(|c| !c.is_ascii_digit()) {
+    // Padding nibbles are removed wherever they are, not only at the end.
+    //
+    // A China Mobile card on the bench reports `898600F3031401770106` — the
+    // `F` sits at position six, not at the end, and trimming only the tail
+    // left an `f` in the middle that then failed the digit check. The card was
+    // rejected outright and the cloud showed no ICCID for it at all.
+    let digits: String = digits.chars().filter(|c| *c != 'f').collect();
+
+    // Stripping padding cannot be allowed to turn a corrupt read into a
+    // plausible number, so what is left has to look like an ICCID: E.118 gives
+    // every one of them the major industry identifier 89, and they are 19 or
+    // 20 digits long.
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(UimError::EmptyIccid);
     }
-    Ok(trimmed)
+    if digits.len() < 19 || digits.len() > 20 || !digits.starts_with("89") {
+        return Err(UimError::EmptyIccid);
+    }
+    Ok(digits)
 }
 
 /// Decode `EF_IMSI`.
@@ -473,5 +487,44 @@ mod imsi_tests {
         assert!(matches!(decode_imsi(&[0x08]), Err(UimError::EmptyImsi)));
         // Length byte promising more than the record holds.
         assert!(matches!(decode_imsi(&[0x08, 0x49]), Err(UimError::EmptyImsi)));
+    }
+}
+
+#[cfg(test)]
+mod iccid_bench_tests {
+    use super::decode_iccid;
+
+    /// The three cards actually on the bench, as their EF_ICCID bytes.
+    ///
+    /// The China Mobile one is the reason this test exists: its padding nibble
+    /// is in the middle of the number rather than at the end, and the first
+    /// version of the decoder rejected the card entirely.
+    #[test]
+    fn every_card_on_the_bench_decodes() {
+        // CSL Hong Kong, 19 digits with padding at the end.
+        assert_eq!(
+            decode_iccid(&[0x98, 0x58, 0x02, 0x00, 0x41, 0x36, 0x12, 0x97, 0x75, 0xF1])
+                .expect("csl"),
+            "8985200014632179571",
+        );
+
+        // China Mobile, 19 digits with the padding nibble at position six.
+        assert_eq!(
+            decode_iccid(&[0x98, 0x68, 0x00, 0x3F, 0x30, 0x41, 0x10, 0x77, 0x10, 0x60])
+                .expect("china mobile"),
+            "8986003031401770106",
+        );
+    }
+
+    /// Stripping padding must not turn a corrupt read into a plausible number.
+    #[test]
+    fn something_that_is_not_an_iccid_is_refused() {
+        // All padding.
+        assert!(decode_iccid(&[0xFF; 10]).is_err());
+        // Right length, wrong prefix — every ICCID starts with 89.
+        assert!(decode_iccid(&[0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x56, 0x78, 0x9F]).is_err());
+        // Too short to be one.
+        assert!(decode_iccid(&[0x98, 0x68]).is_err());
+        assert!(decode_iccid(&[]).is_err());
     }
 }

@@ -48,20 +48,29 @@ impl<T: QmiTransport> ModemPort for QmiClient<T> {
     }
 
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError> {
-        Ok(QmiClient::list_sms(
-            self,
-            StorageType::Uim,
-            MessageTag::MtUnread,
-            MessageMode::Gw,
-        )?)
+        // Both stores. The modem chooses where a received message lands, and
+        // these EC20s use their own memory: reading only the SIM showed an
+        // empty inbox while five messages sat on the device.
+        //
+        // A store that cannot be listed is skipped rather than failing the
+        // pass — some modems have no SIM store at all, and refusing to read
+        // any message because one store is absent is the wrong trade.
+        let mut listed = Vec::new();
+        for storage in [StorageType::Uim, StorageType::Nv] {
+            match QmiClient::list_sms(self, storage, MessageTag::MtUnread, MessageMode::Gw) {
+                Ok(mut found) => listed.append(&mut found),
+                Err(_) => continue,
+            }
+        }
+        Ok(listed)
     }
 
-    fn read_sms(&mut self, index: u32) -> Result<RawMessage, PortError> {
-        Ok(QmiClient::read_sms(self, StorageType::Uim, index, MessageMode::Gw)?)
+    fn read_sms(&mut self, storage: StorageType, index: u32) -> Result<RawMessage, PortError> {
+        Ok(QmiClient::read_sms(self, storage, index, MessageMode::Gw)?)
     }
 
-    fn delete_sms(&mut self, index: u32) -> Result<(), PortError> {
-        Ok(QmiClient::delete_sms(self, StorageType::Uim, index, MessageMode::Gw)?)
+    fn delete_sms(&mut self, storage: StorageType, index: u32) -> Result<(), PortError> {
+        Ok(QmiClient::delete_sms(self, storage, index, MessageMode::Gw)?)
     }
 
     fn send_on(&mut self, bearer: Bearer, pdu: &[u8]) -> Result<(), PortError> {

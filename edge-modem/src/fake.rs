@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use edge_core::{Bearer, RegistrationEvidence};
 
+use crate::wms::StorageType;
 use crate::{
     ListedMessage, MessageTag, ModemPort, PortError, RawMessage, TransportKind,
 };
@@ -13,8 +14,8 @@ pub struct FakeModem {
     pub firmware: String,
     pub evidence: Vec<RegistrationEvidence>,
     messages: Vec<FakeSms>,
-    reads: Vec<u32>,
-    deletes: Vec<u32>,
+    reads: Vec<(StorageType, u32)>,
+    deletes: Vec<(StorageType, u32)>,
     radio_on: bool,
     fail_bearers: HashSet<Bearer>,
     sent: Vec<(Bearer, Vec<u8>)>,
@@ -50,8 +51,21 @@ impl FakeModem {
     }
 
     pub fn push_sms(&mut self, index: u32, tag: MessageTag, pdu: impl Into<Vec<u8>>) {
+        self.push_sms_in(StorageType::Uim, index, tag, pdu)
+    }
+
+    /// Adds a message to a named store, for the case that matters in the
+    /// field: a modem that keeps received SMS in its own memory rather than
+    /// on the SIM.
+    pub fn push_sms_in(
+        &mut self,
+        storage: StorageType,
+        index: u32,
+        tag: MessageTag,
+        pdu: impl Into<Vec<u8>>,
+    ) {
         self.messages.push(FakeSms {
-            listed: ListedMessage { index, tag },
+            listed: ListedMessage { index, tag, storage },
             raw: RawMessage {
                 tag: Some(tag),
                 format: 0x06,
@@ -60,11 +74,11 @@ impl FakeModem {
         });
     }
 
-    pub fn reads(&self) -> &[u32] {
+    pub fn reads(&self) -> &[(StorageType, u32)] {
         &self.reads
     }
 
-    pub fn deletes(&self) -> &[u32] {
+    pub fn deletes(&self) -> &[(StorageType, u32)] {
         &self.deletes
     }
 
@@ -95,26 +109,30 @@ impl ModemPort for FakeModem {
     }
 
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError> {
-        let deleted: BTreeSet<u32> = self.deletes.iter().copied().collect();
+        // Deletion is tracked per store, because an index alone does not
+        // identify a message when there is more than one.
+        let deleted: BTreeSet<(StorageType, u32)> = self.deletes.iter().copied().collect();
         Ok(self
             .messages
             .iter()
-            .filter(|message| !deleted.contains(&message.listed.index))
+            .filter(|message| {
+                !deleted.contains(&(message.listed.storage, message.listed.index))
+            })
             .map(|message| message.listed)
             .collect())
     }
 
-    fn read_sms(&mut self, index: u32) -> Result<RawMessage, PortError> {
-        self.reads.push(index);
+    fn read_sms(&mut self, storage: StorageType, index: u32) -> Result<RawMessage, PortError> {
+        self.reads.push((storage, index));
         self.messages
             .iter()
-            .find(|message| message.listed.index == index)
+            .find(|message| message.listed.storage == storage && message.listed.index == index)
             .map(|message| message.raw.clone())
-            .ok_or_else(|| PortError::Session(format!("no SMS at index {index}")))
+            .ok_or_else(|| PortError::Session(format!("no SMS at {storage:?} index {index}")))
     }
 
-    fn delete_sms(&mut self, index: u32) -> Result<(), PortError> {
-        self.deletes.push(index);
+    fn delete_sms(&mut self, storage: StorageType, index: u32) -> Result<(), PortError> {
+        self.deletes.push((storage, index));
         Ok(())
     }
 

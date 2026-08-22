@@ -7,6 +7,7 @@ use edge_core::{
 use edge_modem::{
     collect_inbound, delete_inbound, discover, send_with_plan, with_restore, DiscoveredModem,
     FakeEnumerator, FakeModem, MessageTag, ModemPort, TransportKind, UnsupportedPort,
+    StorageType,
 };
 
 #[test]
@@ -20,10 +21,44 @@ fn mixed_list_does_not_read_or_delete_mo() {
     assert_eq!(pass.inbound.len(), 1);
     assert_eq!(pass.inbound[0].index, 2);
     assert_eq!(pass.skipped_mo.len(), 2);
-    assert_eq!(modem.reads(), &[2]);
+    assert_eq!(modem.reads(), &[(StorageType::Uim, 2)]);
 
     delete_inbound(&mut modem, &pass.inbound).expect("delete inbound only");
-    assert_eq!(modem.deletes(), &[2]);
+    assert_eq!(modem.deletes(), &[(StorageType::Uim, 2)]);
+}
+
+/// A modem that keeps received messages in its own memory rather than on the
+/// SIM. These EC20s do exactly that, and a reader that looked only at the SIM
+/// reported an empty inbox while five messages sat on the device.
+#[test]
+fn messages_in_the_modems_own_memory_are_collected() {
+    let mut modem = FakeModem::new("867018069509705", "EC20");
+    modem.push_sms_in(StorageType::Nv, 1, MessageTag::MtUnread, b"from the network");
+
+    let pass = collect_inbound(&mut modem).expect("collect");
+    assert_eq!(pass.inbound.len(), 1, "a message on the device was missed");
+    assert_eq!(pass.inbound[0].storage, StorageType::Nv);
+    assert_eq!(modem.reads(), &[(StorageType::Nv, 1)]);
+
+    // And the delete has to target the same store: index 1 on the SIM is a
+    // different message entirely.
+    delete_inbound(&mut modem, &pass.inbound).expect("delete");
+    assert_eq!(modem.deletes(), &[(StorageType::Nv, 1)]);
+}
+
+/// The same index in two stores is two messages, and both must survive the
+/// round trip intact.
+#[test]
+fn the_same_index_in_two_stores_is_two_messages() {
+    let mut modem = FakeModem::new("867018069509705", "EC20");
+    modem.push_sms_in(StorageType::Uim, 1, MessageTag::MtUnread, b"on the sim");
+    modem.push_sms_in(StorageType::Nv, 1, MessageTag::MtUnread, b"on the device");
+
+    let pass = collect_inbound(&mut modem).expect("collect");
+    assert_eq!(pass.inbound.len(), 2);
+    let bodies: Vec<&[u8]> = pass.inbound.iter().map(|m| m.raw.pdu.as_slice()).collect();
+    assert!(bodies.contains(&b"on the sim".as_slice()));
+    assert!(bodies.contains(&b"on the device".as_slice()));
 }
 
 #[test]
