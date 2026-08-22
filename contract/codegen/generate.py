@@ -66,6 +66,36 @@ def resolve(schema: dict, defs: dict) -> dict:
     return schema
 
 
+def resolve_wire(schema: dict, defs: dict) -> dict:
+    """Resolve to the schema that carries the wire type.
+
+    A nullable field is written `anyOf: [<ref>, {"type": "null"}]`, so the
+    x-vodoge-wire-type marker sits one level in. Looking only at the top level
+    silently drops the u64-decimal serializer and emits a bare JSON number.
+    """
+    resolved = resolve(schema, defs)
+    if "anyOf" in resolved:
+        non_null = [item for item in resolved["anyOf"] if item.get("type") != "null"]
+        if len(resolved["anyOf"]) == 2 and len(non_null) == 1:
+            return resolve_wire(non_null[0], defs)
+    return resolved
+
+
+def is_string_scalar(schema: dict) -> bool:
+    """A $def that is nothing but a constrained string.
+
+    Named for readability in the schema (`Iccid`, `Imei`, `Plmn`), it carries
+    no structure a target language can express, so every binding renders it as
+    a plain string. This used to be a hardcoded list of names, which meant a
+    newly added string type generated a reference to a type that was never
+    emitted — and the failure surfaced as a compile error in a downstream repo
+    rather than here.
+    """
+    if schema.get("type") != "string":
+        return False
+    return not any(key in schema for key in ("enum", "const", "anyOf", "oneOf", "allOf"))
+
+
 def rust_type(schema: dict, defs: dict) -> str:
     if is_u64_decimal(schema):
         return "u64"
@@ -74,9 +104,9 @@ def rust_type(schema: dict, defs: dict) -> str:
         target = defs[name]
         if is_u64_decimal(target):
             return "u64"
-        if name in {"Uuid", "Iccid", "Imei", "Sha256", "HttpsUrl", "NullableString"}:
-            if name == "NullableString":
-                return "Option<String>"
+        if name == "NullableString":
+            return "Option<String>"
+        if is_string_scalar(target):
             return "String"
         if name == "EpochMillis":
             return "i64"
@@ -119,7 +149,7 @@ def go_type(schema: dict, defs: dict) -> str:
         target = defs[name]
         if is_u64_decimal(target):
             return "string"
-        if name in {"Uuid", "Iccid", "Imei", "Sha256", "HttpsUrl"}:
+        if is_string_scalar(target):
             return "string"
         if name == "NullableString":
             return "*string"
@@ -168,6 +198,8 @@ def ts_type(schema: dict, defs: dict) -> str:
             return "string | null"
         if name == "EpochMillis":
             return "number"
+        # TypeScript keeps the named alias: it emits one for every scalar $def,
+        # and `Iccid` reads better than `string` at the call site.
         return name
     if "anyOf" in schema:
         return " | ".join(ts_type(item, defs) for item in schema["anyOf"])
@@ -318,9 +350,7 @@ def emit_rust(schema: dict) -> str:
             if optional:
                 ty = f"Option<{ty}>"
             attrs = [f'rename = "{field}"']
-            resolved = spec
-            if "$ref" in spec:
-                resolved = defs[spec["$ref"].split("/")[-1]]
+            resolved = resolve_wire(spec, defs)
             if is_u64_decimal(spec) or is_u64_decimal(resolved):
                 if ty.startswith("Option<"):
                     attrs.append("default")
@@ -497,14 +527,19 @@ def emit_ts(schema: dict) -> str:
         f"export const SCHEMA_ID = {json.dumps(schema['$id'])} as const;",
         f"export const WS_SUBPROTOCOL = {json.dumps(schema['x-vodoge-contract']['wire']['websocket_subprotocol'])} as const;",
         "",
-        "export type Uuid = string;",
-        "export type Iccid = string;",
-        "export type Imei = string;",
-        "export type Sha256 = string;",
-        "export type HttpsUrl = string;",
         "export type EpochMillis = number;",
         "export type SequenceNumber = string;",
         "export type SequenceCursor = string;",
+    ]
+    # One alias per string scalar in the schema, rather than a list kept in
+    # step by hand: a scalar that is referenced but not declared is valid
+    # Python here and a broken import for whoever consumes the binding.
+    lines += [
+        f"export type {name} = string;"
+        for name, target in defs.items()
+        if is_string_scalar(target) and not is_u64_decimal(target)
+    ]
+    lines += [
         "",
         "export type MessageKind =",
     ]

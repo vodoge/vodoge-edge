@@ -56,6 +56,7 @@
     "CommandResult": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
     "EsimInventory": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
     "Alert": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
+    "ProxyTraffic": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 65536 },
     "ProtocolError": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 4096 }
   },
   "$defs": {
@@ -198,6 +199,7 @@
         "CommandResult",
         "EsimInventory",
         "Alert",
+        "ProxyTraffic",
         "ProtocolError"
       ]
     },
@@ -241,6 +243,15 @@
     "Iccid": {
       "type": "string",
       "pattern": "^[0-9]{19,20}$"
+    },
+    "Imsi": {
+      "type": "string",
+      "pattern": "^[0-9]{14,15}$"
+    },
+    "Plmn": {
+      "type": "string",
+      "description": "Network as MCC-MNC, e.g. 460-01. Operator brands are neither unique nor stable; the numeric pair is.",
+      "pattern": "^[0-9]{3}-[0-9]{2,3}$"
     },
     "Imei": {
       "type": "string",
@@ -452,6 +463,30 @@
         "modem_storage_index": { "type": "integer", "minimum": 0, "maximum": 65535 }
       }
     },
+    "ProxyTrafficPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reported_at", "instances"],
+      "properties": {
+        "reported_at": { "$ref": "#/$defs/EpochMillis" },
+        "instances": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProxyTrafficEntry" }
+        }
+      }
+    },
+    "ProxyTrafficEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "bytes_up", "bytes_down", "connections"],
+      "properties": {
+        "instance_id": { "$ref": "#/$defs/Uuid" },
+        "bytes_up": { "type": "integer", "minimum": 0 },
+        "bytes_down": { "type": "integer", "minimum": 0 },
+        "connections": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 }
+      }
+    },
     "DeviceStatePayload": {
       "type": "object",
       "additionalProperties": false,
@@ -483,6 +518,30 @@
         "signal_dbm": {
           "anyOf": [
             { "type": "integer", "minimum": -160, "maximum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "family": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 64 },
+            { "type": "null" }
+          ]
+        },
+        "imsi": {
+          "anyOf": [
+            { "$ref": "#/$defs/Imsi" },
+            { "type": "null" }
+          ]
+        },
+        "home_plmn": {
+          "anyOf": [
+            { "$ref": "#/$defs/Plmn" },
+            { "type": "null" }
+          ]
+        },
+        "serving_plmn": {
+          "anyOf": [
+            { "$ref": "#/$defs/Plmn" },
             { "type": "null" }
           ]
         },
@@ -570,6 +629,18 @@
         { "$ref": "#/$defs/SendSmsCommand" },
         { "$ref": "#/$defs/RestartModemCommand" },
         { "$ref": "#/$defs/SwitchEsimProfileCommand" },
+      { "$ref": "#/$defs/ListEsimProfilesCommand" },
+      { "$ref": "#/$defs/RunAtCommandCommand" },
+      { "$ref": "#/$defs/SendUssdCommand" },
+      { "$ref": "#/$defs/SetRadioCommand" },
+      { "$ref": "#/$defs/ScanOperatorsCommand" },
+      { "$ref": "#/$defs/SelectOperatorCommand" },
+      { "$ref": "#/$defs/ModemReportCommand" },
+      { "$ref": "#/$defs/ResetModemUsbCommand" },
+      { "$ref": "#/$defs/ConfigureProxyCommand" },
+      { "$ref": "#/$defs/ProxyLifecycleCommand" },
+      { "$ref": "#/$defs/ProbeUpstreamProxyCommand" },
+      { "$ref": "#/$defs/RotateIpCommand" },
         { "$ref": "#/$defs/UpdateCardPolicyCommand" },
         { "$ref": "#/$defs/UpdateCapabilityMatrixCommand" },
         { "$ref": "#/$defs/SelfUpdateCommand" }
@@ -597,6 +668,161 @@
       "required": ["kind", "modem_imei"],
       "properties": {
         "kind": { "const": "RestartModem" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "RunAtCommandCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "command"],
+      "properties": {
+        "kind": { "const": "RunAtCommand" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "command": { "type": "string", "minLength": 2, "maxLength": 1024 },
+        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 300000 }
+      }
+    },
+    "SendUssdCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "code"],
+      "properties": {
+        "kind": { "const": "SendUssd" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 182 },
+        "stage": { "type": "string", "enum": ["start", "continue", "cancel"] }
+      }
+    },
+    "SetRadioCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "enabled"],
+      "properties": {
+        "kind": { "const": "SetRadio" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ScanOperatorsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ScanOperators" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "SelectOperatorCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "mode"],
+      "properties": {
+        "kind": { "const": "SelectOperator" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "mode": { "type": "string", "enum": ["automatic", "manual"] },
+        "plmn": { "$ref": "#/$defs/Plmn" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "manual" } }, "required": ["mode"] },
+          "then": { "required": ["plmn"] }
+        }
+      ]
+    },
+    "ModemReportCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ModemReport" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "ResetModemUsbCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ResetModemUsb" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "ListEsimProfilesCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ListEsimProfiles" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "ConfigureProxyCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "instances", "upstreams"],
+      "properties": {
+        "kind": { "const": "ConfigureProxy" },
+        "instances": { "type": "array", "items": { "$ref": "#/$defs/ProxyInstanceSpec" } },
+        "upstreams": { "type": "array", "items": { "$ref": "#/$defs/ProxyUpstreamSpec" } }
+      }
+    },
+    "ProxyInstanceSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "modem_imei", "protocol", "listen_addr", "listen_port", "enabled"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "name": { "type": "string", "maxLength": 128 },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "protocol": { "type": "string", "enum": ["socks5", "http"] },
+        "listen_addr": { "type": "string", "maxLength": 64 },
+        "listen_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "auth_enabled": { "type": "boolean" },
+        "username": { "type": "string", "maxLength": 128 },
+        "password": { "type": "string", "maxLength": 256 },
+        "upstream_id": { "type": "string", "maxLength": 64 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ProxyUpstreamSpec": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "address", "protocol"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "name": { "type": "string", "maxLength": 128 },
+        "address": { "type": "string", "maxLength": 256 },
+        "protocol": { "type": "string", "enum": ["socks5", "http"] },
+        "username": { "type": "string", "maxLength": 128 },
+        "password": { "type": "string", "maxLength": 256 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ProxyLifecycleCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "instance_id", "action"],
+      "properties": {
+        "kind": { "const": "ProxyLifecycle" },
+        "instance_id": { "$ref": "#/$defs/Uuid" },
+        "action": { "type": "string", "enum": ["start", "stop", "restart"] }
+      }
+    },
+    "ProbeUpstreamProxyCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "upstream_id"],
+      "properties": {
+        "kind": { "const": "ProbeUpstreamProxy" },
+        "upstream_id": { "$ref": "#/$defs/Uuid" }
+      }
+    },
+    "RotateIpCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "RotateIp" },
         "modem_imei": { "$ref": "#/$defs/Imei" }
       }
     },
