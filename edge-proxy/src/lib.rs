@@ -85,6 +85,16 @@ pub struct Counters {
     pub errors: AtomicU64,
 }
 
+/// What one instance carried since the previous report.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrafficDelta {
+    pub instance_id: String,
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+    pub connections: u64,
+    pub errors: u64,
+}
+
 /// A snapshot of the counters, for reporting.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CounterSnapshot {
@@ -130,6 +140,8 @@ pub struct ProxyManager {
     running: Mutex<HashMap<String, Running>>,
     failed: Mutex<HashMap<String, (InstanceSpec, String)>>,
     upstreams: Mutex<HashMap<String, UpstreamSpec>>,
+    /// The counter values at the last report, so the next one is a delta.
+    reported: Mutex<HashMap<String, CounterSnapshot>>,
     /// Maps a modem IMEI to the network interface its data session uses.
     resolver: Arc<dyn InterfaceResolver>,
 }
@@ -157,6 +169,7 @@ impl ProxyManager {
             running: Mutex::new(HashMap::new()),
             failed: Mutex::new(HashMap::new()),
             upstreams: Mutex::new(HashMap::new()),
+            reported: Mutex::new(HashMap::new()),
             resolver,
         }
     }
@@ -360,6 +373,41 @@ impl ProxyManager {
             error: Some(reason.clone()),
             counters: CounterSnapshot::default(),
         })
+    }
+
+    /// Traffic counted since the last call, per instance.
+    ///
+    /// Deltas rather than totals: the cloud folds these into hourly buckets,
+    /// and sending cumulative counters would make every report re-add the
+    /// whole history of the listener. Taking the delta here rather than in the
+    /// cloud also means a listener that restarts — resetting its counters —
+    /// contributes zero rather than a negative.
+    pub async fn drain_traffic(&self) -> Vec<TrafficDelta> {
+        let mut out = Vec::new();
+        let running = self.running.lock().await;
+        let mut reported = self.reported.lock().await;
+        for (id, instance) in running.iter() {
+            let now = instance.counters.snapshot();
+            let previous = reported.get(id).copied().unwrap_or_default();
+            let delta = TrafficDelta {
+                instance_id: id.clone(),
+                bytes_up: now.bytes_up.saturating_sub(previous.bytes_up),
+                bytes_down: now.bytes_down.saturating_sub(previous.bytes_down),
+                connections: now.connections.saturating_sub(previous.connections),
+                errors: now.errors.saturating_sub(previous.errors),
+            };
+            reported.insert(id.clone(), now);
+            if delta.bytes_up > 0
+                || delta.bytes_down > 0
+                || delta.connections > 0
+                || delta.errors > 0
+            {
+                out.push(delta);
+            }
+        }
+        // A listener that has gone away should not keep a baseline forever.
+        reported.retain(|id, _| running.contains_key(id));
+        out
     }
 
     /// Every instance's status, running or failed.

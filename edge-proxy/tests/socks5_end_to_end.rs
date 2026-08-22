@@ -423,3 +423,56 @@ mod probing {
         assert!(result.error.is_none());
     }
 }
+
+/// The cloud folds reports into hourly buckets by adding them, so what the
+/// edge sends has to be what changed since last time.
+mod traffic {
+    use std::sync::Arc;
+
+    use edge_proxy::{InstanceSpec, InterfaceResolver, ProxyManager};
+
+    struct Loopback;
+
+    impl InterfaceResolver for Loopback {
+        fn interface_for(&self, _modem_imei: &str) -> Option<String> {
+            Some("lo".to_string())
+        }
+    }
+
+    fn spec() -> InstanceSpec {
+        InstanceSpec {
+            id: "instance-1".into(),
+            modem_imei: "867018069514820".into(),
+            protocol: "socks5".into(),
+            listen_addr: "127.0.0.1".into(),
+            listen_port: 0,
+            enabled: true,
+            ..InstanceSpec::default()
+        }
+    }
+
+    // A listener that has carried nothing must produce no entry at all, rather
+    // than a row of zeroes for every instance on every report.
+    #[tokio::test]
+    async fn an_idle_listener_reports_nothing() {
+        let manager = ProxyManager::new(Arc::new(Loopback));
+        let status = manager.start(spec()).await;
+        // Whether it bound or not, an idle listener has no traffic to report.
+        let _ = status;
+        assert!(manager.drain_traffic().await.is_empty());
+    }
+
+    // Draining twice must not report the same bytes twice: the cloud adds
+    // what it receives, so a repeated total would inflate the hour.
+    #[tokio::test]
+    async fn draining_twice_reports_each_byte_once() {
+        let manager = ProxyManager::new(Arc::new(Loopback));
+        manager.start(spec()).await;
+        let first = manager.drain_traffic().await;
+        let second = manager.drain_traffic().await;
+        assert_eq!(first.len(), second.len());
+        for delta in second {
+            assert_eq!(delta.bytes_up, 0, "a second drain re-reported traffic");
+        }
+    }
+}

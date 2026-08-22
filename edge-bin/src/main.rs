@@ -867,12 +867,47 @@ mod linux {
             "vodoge-edge panel on {} device_id={DEVICE_ID}",
             env("VODOGE_EDGE_PANEL", "0.0.0.0:8743")
         ));
+        // Traffic is reported far less often than modems are polled. The
+        // cloud buckets it by hour, so a minute's resolution is already finer
+        // than anything asked of it, and an idle listener sends nothing at all.
+        let mut since_traffic_report = Duration::ZERO;
         loop {
             if let Err(error) = poll_modems(&shared, &outbox, &radio) {
                 log_error(format!("poll: {error}"));
             }
+            since_traffic_report += Duration::from_secs(8);
+            if since_traffic_report >= TRAFFIC_REPORT_INTERVAL {
+                since_traffic_report = Duration::ZERO;
+                if let Err(error) = report_proxy_traffic(&proxies, &outbox) {
+                    log_error(format!("proxy traffic: {error}"));
+                }
+            }
             std::thread::sleep(Duration::from_secs(8));
         }
+    }
+
+    const TRAFFIC_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// Sends what the listeners carried since the last report.
+    ///
+    /// Nothing is queued when nothing moved: an envelope per minute per device
+    /// saying "zero" would be the bulk of the uplink on a quiet deployment.
+    fn report_proxy_traffic(
+        proxies: &Arc<ProxyRuntime>,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+    ) -> Result<(), String> {
+        let manager = proxies.manager.clone();
+        let deltas = proxies
+            .runtime
+            .block_on(async move { manager.drain_traffic().await });
+        if deltas.is_empty() {
+            return Ok(());
+        }
+        let payload = serde_json::json!({
+            "reported_at": unix_ms(),
+            "instances": deltas,
+        });
+        append_kind(outbox, "ProxyTraffic", payload)
     }
 
     fn poll_modems(

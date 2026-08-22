@@ -25,6 +25,7 @@ pub enum MessageKind {
     CommandResult,
     EsimInventory,
     Alert,
+    ProxyTraffic,
     ProtocolError,
 }
 
@@ -45,6 +46,7 @@ impl MessageKind {
             Self::CommandResult => "CommandResult",
             Self::EsimInventory => "EsimInventory",
             Self::Alert => "Alert",
+            Self::ProxyTraffic => "ProxyTraffic",
             Self::ProtocolError => "ProtocolError",
         }
     }
@@ -65,6 +67,7 @@ impl MessageKind {
             Self::CommandResult => true,
             Self::EsimInventory => true,
             Self::Alert => true,
+            Self::ProxyTraffic => true,
             Self::ProtocolError => false,
         }
     }
@@ -273,6 +276,30 @@ pub struct SmsReceivedPayload {
     pub encoding: String,
     #[serde(rename = "modem_storage_index", default, skip_serializing_if = "Option::is_none")]
     pub modem_storage_index: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyTrafficPayload {
+    #[serde(rename = "reported_at")]
+    pub reported_at: i64,
+    #[serde(rename = "instances")]
+    pub instances: Vec<ProxyTrafficEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyTrafficEntry {
+    #[serde(rename = "instance_id")]
+    pub instance_id: String,
+    #[serde(rename = "bytes_up")]
+    pub bytes_up: i64,
+    #[serde(rename = "bytes_down")]
+    pub bytes_down: i64,
+    #[serde(rename = "connections")]
+    pub connections: i64,
+    #[serde(rename = "errors", default, skip_serializing_if = "Option::is_none")]
+    pub errors: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
