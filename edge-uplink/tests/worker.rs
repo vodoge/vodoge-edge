@@ -519,3 +519,85 @@ fn an_ack_without_a_gap_resends_nothing() {
     let sent: Vec<u64> = conn.sequenced().iter().filter_map(|e| e.seq).collect();
     assert_eq!(sent, vec![2, 3], "a clean ack resent something: {sent:?}");
 }
+
+/// Repeated reports of the same gap must not each trigger a fresh resend.
+///
+/// The peer acknowledges every record it receives, and while the records that
+/// would close a gap are still in flight, each of those acks still names the
+/// same gap. Rewinding on all of them refills the replay budget every time and
+/// resends the same window again, so the link runs at full speed and commits
+/// nothing. That is what deadlocked the deployment: nine thousand records
+/// ingested, the committed cursor unmoved, and the socket in TCP persist with
+/// both buffers full.
+#[test]
+fn the_same_gap_reported_repeatedly_is_resent_once() {
+    let mut worker = worker_with(persist_123());
+    let mut conn = FakeConn::script([
+        Scripted::ResumeAck {
+            committed_through: 1,
+        },
+        // Four acks in a row, all naming the identical hole -- exactly what a
+        // peer sends while the resend is still in flight.
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::Closed,
+    ]);
+
+    worker.run(&mut conn, Instant::now()).expect("run");
+
+    let sent: Vec<u64> = conn.sequenced().iter().filter_map(|e| e.seq).collect();
+    let resends = sent.iter().filter(|seq| **seq == 2).count();
+    assert!(
+        resends >= 2,
+        "the gap was never resent at all; sent: {sent:?}",
+    );
+    assert!(
+        resends <= 2,
+        "each repeat of the same gap triggered another resend, which is the \
+         flood: record 2 went out {resends} times; sent: {sent:?}",
+    );
+}
+
+/// A gap that moves on is a different gap, and does deserve its own resend.
+#[test]
+fn a_new_gap_head_is_resent_again() {
+    let mut worker = worker_with(persist_123());
+    let mut conn = FakeConn::script([
+        Scripted::ResumeAck {
+            committed_through: 0,
+        },
+        Scripted::UplinkAckWithGap {
+            committed_through: 0,
+            gaps: vec![(1, 1)],
+        },
+        // 1 landed, so the head advances to 2. That is new information.
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::Closed,
+    ]);
+
+    worker.run(&mut conn, Instant::now()).expect("run");
+
+    let sent: Vec<u64> = conn.sequenced().iter().filter_map(|e| e.seq).collect();
+    let resends = sent.iter().filter(|seq| **seq == 2).count();
+    assert!(
+        resends >= 2,
+        "a gap at a new head was not resent; sent: {sent:?}",
+    );
+}

@@ -265,6 +265,7 @@ dependencies = [
 name = "edge-uplink"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rcgen",
  "rustls",
  "serde_json",

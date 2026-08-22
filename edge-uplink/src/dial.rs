@@ -30,6 +30,32 @@ const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// reported as a fatal handshake error rather than being retried, so this must
 /// not be the connect budget.
 const SESSION_WRITE_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long the kernel may hold unacknowledged data before it fails the
+/// connection outright.
+///
+/// SO_SNDTIMEO is not enough, and the reason is worth recording. It does expire,
+/// but it surfaces as WouldBlock, and every layer above -- rustls, tungstenite,
+/// this crate -- correctly treats WouldBlock as "not yet", so the write is
+/// retried forever. Nothing in userspace ever concludes the peer is gone.
+///
+/// What was actually observed: the cloud publishes the device port through
+/// docker-proxy. Replacing the gateway container leaves docker-proxy holding
+/// the outside connection with nothing behind it, so it stops reading and
+/// advertises a zero window. The socket enters TCP persist and probes it
+/// forever -- `timer:(persist,1min26sec,0)` -- while the agent sits in writev
+/// with 368 KB queued. It stayed there for over five minutes, uplink dead,
+/// device apparently online, and only recovered by accident.
+///
+/// TCP_USER_TIMEOUT is the only mechanism that ends this, because it acts in
+/// the kernel: unacknowledged data older than this fails the connection with a
+/// hard error rather than a retryable one. It covers zero-window probing, which
+/// is exactly the case here.
+///
+/// Two minutes: longer than any legitimate stall behind a busy gateway, short
+/// enough that a device recovers on its own. Reconnecting is cheap -- Resume
+/// replays from the committed cursor and nothing is lost.
+#[cfg(target_os = "linux")]
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Errors from connecting or transferring envelopes.
 #[derive(Debug)]
@@ -130,6 +156,39 @@ pub struct Socket {
     inner: WebSocket<StreamOwned<ClientConnection, TcpStream>>,
 }
 
+/// Bounds how long the kernel will keep retrying unacknowledged data.
+///
+/// Linux only. Other platforms get the std timeouts alone, which is a real gap
+/// rather than an equivalent -- see TCP_USER_TIMEOUT above for why they are not
+/// sufficient. The edge agent runs on Linux; this exists so the crate still
+/// builds and tests anywhere.
+#[cfg(target_os = "linux")]
+fn set_user_timeout(sock: &TcpStream) -> Result<(), DialError> {
+    use std::os::fd::AsRawFd;
+
+    let millis = TCP_USER_TIMEOUT.as_millis() as libc::c_uint;
+    // SAFETY: the fd is owned by `sock` and outlives the call, and the value
+    // pointer and its length describe the c_uint immediately above.
+    let result = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            std::ptr::addr_of!(millis).cast(),
+            std::mem::size_of::<libc::c_uint>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(DialError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_user_timeout(_sock: &TcpStream) -> Result<(), DialError> {
+    Ok(())
+}
+
 impl Socket {
     /// Dials `wss://` with the supplied TLS 1.3 mTLS config.
     pub fn connect(url: &str, tls: Arc<ClientConfig>) -> Result<Self, DialError> {
@@ -153,6 +212,7 @@ impl Socket {
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(SESSION_READ_TIMEOUT))?;
         tcp.set_write_timeout(Some(SESSION_WRITE_TIMEOUT))?;
+        set_user_timeout(&tcp)?;
 
         let server_name = ServerName::try_from(target.host.clone())
             .map_err(|_| DialError::UnsupportedUrl(target.host.clone()))?;

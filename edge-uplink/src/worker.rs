@@ -66,6 +66,22 @@ pub struct UplinkWorker<O> {
     last_connection_id: Option<String>,
     /// Highest sequence handed to the transport on this connection.
     replay_through: u64,
+    /// The gap head this worker has already rewound to and resent from.
+    ///
+    /// Without it, rewinding on every ack that mentions a gap is a flood: the
+    /// peer acks each record it receives, every one of those acks still reports
+    /// the same gap because the records fixing it are still in flight, each
+    /// report rewinds the cursor, and each rewind refills the replay budget and
+    /// resends the same window again. The link then runs at full speed and
+    /// makes no progress at all -- observed as nine thousand records ingested
+    /// with the committed cursor unmoved, both sides' buffers full, and the
+    /// socket in TCP persist.
+    ///
+    /// One rewind per distinct gap head is enough. The resend either closes the
+    /// gap, in which case the head moves and the next ack rewinds to the new
+    /// one, or it does not, in which case sending it a third time inside the
+    /// same round would not have helped either.
+    gap_resent_from: Option<u64>,
 }
 
 /// Failures while running one uplink attempt.
@@ -120,6 +136,7 @@ impl<O: Outbox> UplinkWorker<O> {
             next_connection: 0,
             last_connection_id: None,
             replay_through: 0,
+            gap_resent_from: None,
         }
     }
 
@@ -305,11 +322,21 @@ impl<O: Outbox> UplinkWorker<O> {
         // Rewinding to just before the lowest missing sequence is enough:
         // everything below it is genuinely committed, and everything above is
         // resent in sequence order anyway.
-        if let Some(lowest) = ranges.iter().map(|range| range.start()).min() {
-            let resume_from = lowest.saturating_sub(1);
-            if resume_from < self.replay_through {
-                self.replay_through = resume_from;
+        //
+        // Once per gap head, though. See `gap_resent_from`: repeating the
+        // rewind on every ack that names the same head turns one gap into an
+        // unbounded resend loop.
+        match ranges.iter().map(|range| range.start()).min() {
+            Some(lowest) if self.gap_resent_from != Some(lowest) => {
+                let resume_from = lowest.saturating_sub(1);
+                if resume_from < self.replay_through {
+                    self.replay_through = resume_from;
+                }
+                self.gap_resent_from = Some(lowest);
             }
+            // No gap left to chase; the next one starts fresh.
+            None => self.gap_resent_from = None,
+            _ => {}
         }
 
         let ack = UplinkAck::new(committed_through, ranges, more_missing)?;
