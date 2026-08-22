@@ -40,7 +40,8 @@ pub use ussd::{
     UssdStage,
 };
 pub use report::{
-    collect as collect_report, parse_cops_scan, ModemReport, Registration, ScannedOperator, Signal,
+    collect as collect_report, parse_cops_scan, parse_csq, ModemReport, Registration,
+    ScannedOperator, Signal,
 };
 pub use es10c::{Es10cError, Profile};
 #[cfg(target_os = "linux")]

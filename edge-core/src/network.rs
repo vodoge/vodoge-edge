@@ -46,6 +46,29 @@ impl Network {
             .map(|(_, name)| *name)
     }
 
+    /// The capability-matrix carrier key for this network.
+    ///
+    /// Derived from the same table as `label`, not a second list of MNCs: two
+    /// lists drift, and the one that drifts silently is the one that decides
+    /// whether we claim a card can send SMS.
+    ///
+    /// 中国广电 and 中国铁通 ride China Mobile's radio network — Tietong is a
+    /// CMCC subsidiary and Broadnet shares CMCC's network by agreement — so
+    /// they behave like CN-Mobile for everything the matrix decides. Anything
+    /// we cannot name is `Generic-International`, whose matrix entries are
+    /// `probe`: the honest answer for a card we have never characterised.
+    pub fn carrier_profile(self) -> &'static str {
+        if self.mcc != 460 {
+            return "Generic-International";
+        }
+        match self.label().as_str() {
+            "中国移动" | "中国广电" | "中国铁通" => "CN-Mobile",
+            "中国联通" => "CN-Unicom",
+            "中国电信" => "CN-Telecom",
+            _ => "Generic-International",
+        }
+    }
+
     /// A single line for a card that has room for one: operator plus where the
     /// subscription is from, which together say whether a card is roaming.
     pub fn describe(self) -> String {
@@ -145,5 +168,26 @@ mod tests {
     #[test]
     fn describe_omits_an_unknown_territory() {
         assert_eq!(Network::new(999, 42).describe(), "999-42");
+    }
+
+    /// Every mainland MNC the label table knows must also land on a carrier
+    /// profile. A network we can name but cannot classify would silently take
+    /// the international fallback and report `unknown` capabilities for a card
+    /// we actually support.
+    #[test]
+    fn known_mainland_networks_all_map_to_a_carrier() {
+        for (mcc, mnc, name) in NETWORKS.iter().filter(|(mcc, _, _)| *mcc == 460) {
+            let profile = Network::new(*mcc, *mnc).carrier_profile();
+            assert_ne!(
+                profile, "Generic-International",
+                "{name} ({mcc}-{mnc}) fell through to the international fallback",
+            );
+        }
+    }
+
+    #[test]
+    fn networks_outside_the_mainland_are_international() {
+        assert_eq!(Network::new(454, 0).carrier_profile(), "Generic-International");
+        assert_eq!(Network::new(310, 260).carrier_profile(), "Generic-International");
     }
 }

@@ -32,6 +32,39 @@ impl ModemFamily {
     }
 }
 
+impl ModemFamily {
+    /// Detects the family from what the module reports about itself.
+    ///
+    /// The QMI model TLV on these sticks is the USB descriptor string —
+    /// "QUECTEL Mobile Broadband Module" on the bench EC20s — so the model
+    /// alone cannot key the capability matrix. The firmware revision is the
+    /// reliable source: Quectel starts it with the model name
+    /// ("EC20CEHCLGR06A08M1G_AUD"), and AT+CGMM agrees ("EC20F") when it is
+    /// readable. Both are checked, model first.
+    ///
+    /// EC25 needs the region letter: "EC25C…" is the CN variant the matrix
+    /// characterises; an EC25-E is a different radio and mapping it onto the
+    /// CN rules would claim capabilities nobody measured. Unrecognised
+    /// hardware stays `Other`, which the matrix answers with `probe`.
+    pub fn detect(model: &str, revision: &str) -> Self {
+        for source in [model, revision] {
+            if source.starts_with("EG25G") || source.starts_with("EG25-G") {
+                return Self::Eg25G;
+            }
+            if source.starts_with("EC25C") || source.starts_with("EC25-CN") {
+                return Self::Ec25Cn;
+            }
+            if source.starts_with("EC20") {
+                return Self::Ec20;
+            }
+            if source.starts_with("UFI103S") {
+                return Self::Ufi103s;
+            }
+        }
+        Self::Other(model.to_owned())
+    }
+}
+
 impl From<&str> for ModemFamily {
     fn from(value: &str) -> Self {
         match value {
@@ -274,6 +307,20 @@ impl BearerSupport {
             reason: reason.into(),
         }
     }
+
+    /// The value the edge-cloud contract expects for this support state.
+    ///
+    /// `Probe` means the matrix has no entry and nothing has been measured, so
+    /// the wire value is `unknown` — not `unsupported`. Reporting a card as
+    /// incapable because we never characterised it would make the cloud hide
+    /// a working modem.
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::Supported(_) => "supported",
+            Self::Unsupported { .. } => "unsupported",
+            Self::Probe => "unknown",
+        }
+    }
 }
 
 /// Capabilities for the current modem and carrier combination.
@@ -321,5 +368,56 @@ impl DeviceContext {
             carrier_profile,
             vertical,
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{Bearer, BearerSupport};
+
+    /// These four strings are the contract's enum. A typo here is not a
+    /// compile error anywhere — it becomes a payload the cloud stores and
+    /// nobody notices until a column reads wrong.
+    #[test]
+    fn support_states_use_the_contract_vocabulary() {
+        assert_eq!(BearerSupport::supported(Bearer::Cellular).wire(), "supported");
+        assert_eq!(BearerSupport::unsupported("no_mbn").wire(), "unsupported");
+        assert_eq!(BearerSupport::Probe.wire(), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod family_detect_tests {
+    use super::ModemFamily;
+
+    /// The exact strings the bench hardware reports. The USB descriptor model
+    /// is what QMI actually returns, and it must not decide anything.
+    #[test]
+    fn bench_ec20_is_detected_from_the_revision() {
+        let family =
+            ModemFamily::detect("QUECTEL Mobile Broadband Module", "EC20CEHCLGR06A08M1G_AUD");
+        assert_eq!(family, ModemFamily::Ec20);
+        assert_eq!(ModemFamily::detect("EC20F", "").as_str(), "EC20");
+    }
+
+    #[test]
+    fn ec25_region_variants_are_kept_apart() {
+        assert_eq!(
+            ModemFamily::detect("", "EC25CFAR05A06M4G"),
+            ModemFamily::Ec25Cn,
+        );
+        // The European variant must not inherit the CN matrix rules.
+        assert_eq!(
+            ModemFamily::detect("EC25-E", "EC25EFAR06A01M4G"),
+            ModemFamily::Other("EC25-E".to_owned()),
+        );
+    }
+
+    #[test]
+    fn unknown_hardware_stays_other() {
+        assert_eq!(
+            ModemFamily::detect("QUECTEL Mobile Broadband Module", ""),
+            ModemFamily::Other("QUECTEL Mobile Broadband Module".to_owned()),
+        );
     }
 }

@@ -297,6 +297,14 @@ pub struct ModemState {
     pub iccid: Option<String>,
     #[serde(rename = "signal_dbm", default, skip_serializing_if = "Option::is_none")]
     pub signal_dbm: Option<i64>,
+    #[serde(rename = "family", default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(rename = "imsi", default, skip_serializing_if = "Option::is_none")]
+    pub imsi: Option<String>,
+    #[serde(rename = "home_plmn", default, skip_serializing_if = "Option::is_none")]
+    pub home_plmn: Option<String>,
+    #[serde(rename = "serving_plmn", default, skip_serializing_if = "Option::is_none")]
+    pub serving_plmn: Option<String>,
     #[serde(rename = "capability")]
     pub capability: CapabilitySummary,
 }

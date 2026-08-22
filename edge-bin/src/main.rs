@@ -27,9 +27,10 @@ mod linux {
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
-    use edge_core::CapabilityMatrix;
+    use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
     use edge_modem::{
-        collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, OperatingMode, QmiClient,
+        collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, NasRegistrationState,
+        OperatingMode, QmiClient,
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
@@ -627,7 +628,26 @@ mod linux {
         client.sync().map_err(|e| e.to_string())?;
         let serials = client.get_serial_numbers().map_err(|e| e.to_string())?;
         let imei = serials.imei.clone().ok_or_else(|| "missing IMEI".to_string())?;
-        let family = client.get_model().unwrap_or_else(|_| "Quectel".into());
+        // The model TLV alone is the USB descriptor string on these sticks;
+        // the revision is what actually names the hardware. `detect` sorts
+        // that out and is unit-tested against the bench modules' real strings.
+        let model = client.get_model().unwrap_or_else(|_| "Quectel".into());
+        let revision = client
+            .get_revision()
+            .map(|value| value.device_rev_id)
+            .unwrap_or_default();
+        let family = ModemFamily::detect(&model, &revision);
+        // Unrecognised hardware takes the matrix fallback, so every capability
+        // it reports is `unknown`. That is the honest answer but a useless
+        // one, and without the strings that produced it there is no way to
+        // find out which pattern is missing. Logged only when detection
+        // actually falls through, so it stays quiet once a family is known.
+        if matches!(family, ModemFamily::Other(_)) {
+            log_error(format!(
+                "family unrecognised model={model:?} revision={revision:?}"
+            ));
+        }
+        let family_name = family.as_str().to_string();
         // EF_ICCID identifies the active profile. On an eUICC that changes when a
         // different profile is enabled, so it is the only field that says which
         // SIM the modem is actually using. Failing to read it is not fatal, but
@@ -643,17 +663,28 @@ mod linux {
         // which on a roaming card is a different operator entirely.
         let imsi = client.read_imsi().ok();
         let serving = client.get_serving_system().ok();
-        let state = match serving.as_ref() {
-            Some(s) => format!("{:?}", s.registration_state),
-            None => "unknown".into(),
-        };
+        // `Unknown(255)` is the honest answer when the serving system read
+        // failed: the module is there, its network status is not known.
+        let registration = serving
+            .as_ref()
+            .map(|s| s.registration_state)
+            .unwrap_or(NasRegistrationState::Unknown(255));
+        let state = registration.wire().to_string();
         // MCC is always three digits; the rest of a 15-digit IMSI is a
         // two-digit MNC in every network this runs on.
         let home = imsi.as_ref().and_then(|value| {
             let mcc = value.get(0..3)?.parse::<u16>().ok()?;
             let mnc = value.get(3..5)?.parse::<u16>().ok()?;
-            Some((mcc, mnc))
+            Some(Network::new(mcc, mnc))
         });
+        let serving_plmn = serving
+            .as_ref()
+            .and_then(|s| Some(Network::new(s.mcc?, s.mnc?)));
+        // QMI has no signal-strength read here, and AT+CSQ is one command on
+        // the port that is already paired with this modem. A stick with no
+        // signal and a stick whose strength was never read look identical
+        // upstream otherwise.
+        let signal_dbm = read_signal_dbm(path);
         let now = unix_ms();
         radio.remember(&imei, path);
         {
@@ -661,17 +692,17 @@ mod linux {
             store
                 .upsert_local_modem(&LocalModem {
                     imei: imei.clone(),
-                    family,
+                    family: family_name.clone(),
                     iccid: iccid.clone(),
                     state: state.clone(),
                     last_seen: Some(now),
                     // Already in the serving-system read above; keeping it is
                     // what lets the panel say whose card this is without a
                     // separate probe per stick.
-                    mcc: serving.as_ref().and_then(|s| s.mcc),
-                    mnc: serving.as_ref().and_then(|s| s.mnc),
-                    home_mcc: home.map(|(mcc, _)| mcc),
-                    home_mnc: home.map(|(_, mnc)| mnc),
+                    mcc: serving_plmn.map(|network| network.mcc),
+                    mnc: serving_plmn.map(|network| network.mnc),
+                    home_mcc: home.map(|network| network.mcc),
+                    home_mnc: home.map(|network| network.mnc),
                     imsi: imsi.clone(),
                 })
                 .map_err(|e| e.to_string())?;
@@ -701,7 +732,20 @@ mod linux {
             let _ = delete_inbound(&mut client, &pass.inbound);
         }
 
-        enqueue_device_state(outbox, &imei, &state, iccid.as_deref(), now)?;
+        enqueue_device_state(
+            outbox,
+            &ModemSnapshot {
+                imei: &imei,
+                registration,
+                family: &family_name,
+                iccid: iccid.as_deref(),
+                imsi: imsi.as_deref(),
+                home,
+                serving: serving_plmn,
+                signal_dbm,
+            },
+            now,
+        )?;
         Ok(imei)
     }
 
@@ -724,30 +768,80 @@ mod linux {
         append_kind(outbox, "SmsReceived", payload)
     }
 
+    /// One `AT+CSQ` on the control port paired with this QMI node.
+    ///
+    /// Best effort by design: the poll must not fail because a diagnostic
+    /// reading did not come back. A stick whose AT port is busy simply reports
+    /// no signal this round.
+    fn read_signal_dbm(qmi_path: &Path) -> Option<i16> {
+        let at_path = edge_modem::at_port_for_qmi(qmi_path)?;
+        let mut port = edge_modem::AtPort::open(&at_path).ok()?;
+        let exchange = port.command("AT+CSQ").ok()?;
+        if !exchange.succeeded() {
+            return None;
+        }
+        edge_modem::parse_csq(&exchange.lines).and_then(|signal| signal.dbm)
+    }
+
+    /// Everything the probe learned about one modem, in the shape the snapshot
+    /// needs it. Passing eight positional arguments was how `state` and
+    /// `registration` ended up carrying the same value.
+    struct ModemSnapshot<'a> {
+        imei: &'a str,
+        registration: NasRegistrationState,
+        family: &'a str,
+        iccid: Option<&'a str>,
+        imsi: Option<&'a str>,
+        /// Who issued the card.
+        home: Option<Network>,
+        /// Where it is registered right now. Differs from `home` when roaming.
+        serving: Option<Network>,
+        signal_dbm: Option<i16>,
+    }
+
     fn enqueue_device_state(
         outbox: &Arc<Mutex<DurableOutbox>>,
-        imei: &str,
-        state: &str,
-        iccid: Option<&str>,
+        modem: &ModemSnapshot<'_>,
         now: i64,
     ) -> Result<(), String> {
+        let matrix = CapabilityMatrix::builtin().map_err(|error| error.to_string())?;
+        // The matrix is keyed on the home carrier, not the serving one: what a
+        // card can do is a property of the subscription, and a roaming card
+        // keeps its own operator's rules.
+        let carrier = CarrierProfile::from(
+            modem
+                .home
+                .map(|network| network.carrier_profile())
+                .unwrap_or("Generic-International"),
+        );
+        let capability = matrix
+            .query(&ModemFamily::from(modem.family), &carrier)
+            .capability
+            .clone();
+
         let payload = serde_json::json!({
             "observed_at": now,
             "modems": [{
-                "modem_imei": imei,
-                "state": state,
-                "registration": state,
+                "modem_imei": modem.imei,
+                // The module answered over QMI, so it is present. Whether it
+                // has a network is `registration`, which is a different
+                // question and used to be given the same answer.
+                "state": "online",
+                "registration": modem.registration.wire(),
                 // The cloud cannot tell which SIM a modem is using without
                 // this. On an eUICC it is also the only field that changes
                 // when a profile is switched, so leaving it out makes a switch
                 // invisible upstream.
-                "iccid": iccid,
+                "iccid": modem.iccid,
+                "family": modem.family,
+                "imsi": modem.imsi,
+                "home_plmn": modem.home.map(|network| network.numeric()),
+                "serving_plmn": modem.serving.map(|network| network.numeric()),
+                "signal_dbm": modem.signal_dbm,
                 "capability": {
-                    "sms_mo": "cellular",
-                    "sms_mt": "cellular",
-                    "matrix_version": CapabilityMatrix::builtin()
-                        .map(|m| m.version().to_string())
-                        .unwrap_or_else(|_| "unversioned".into())
+                    "sms_mo": capability.sms_mo.wire(),
+                    "sms_mt": capability.sms_mt.wire(),
+                    "matrix_version": matrix.version()
                 }
             }]
         });

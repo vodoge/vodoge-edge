@@ -46,6 +46,22 @@ impl NasRegistrationState {
     pub fn is_registered(self) -> bool {
         matches!(self, Self::Registered)
     }
+
+    /// The value the edge-cloud contract expects for `registration`.
+    ///
+    /// Not `format!("{self:?}")`. Debug output is capitalised and would render
+    /// `Unknown(7)` verbatim, and neither is in the contract's enum — the
+    /// cloud accepted both for a while and stored `Registered`, which no
+    /// consumer of the schema is written to expect.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Searching => "searching",
+            Self::Denied => "denied",
+            Self::NotRegistered => "unregistered",
+            Self::Unknown(_) => "unknown",
+        }
+    }
 }
 
 /// Parsed `QMI_NAS_GET_SERVING_SYSTEM` body.
@@ -276,5 +292,30 @@ impl From<ResultError> for NasError {
 impl From<TlvLookupError> for NasError {
     fn from(value: TlvLookupError) -> Self {
         Self::Lookup(value)
+    }
+}
+
+#[cfg(test)]
+mod registration_wire_tests {
+    use super::NasRegistrationState;
+
+    /// Every QMI code has to land on one of the contract's five values,
+    /// including codes QMI may add later.
+    #[test]
+    fn every_state_maps_into_the_contract_enum() {
+        const ALLOWED: [&str; 5] = [
+            "registered",
+            "searching",
+            "denied",
+            "unregistered",
+            "unknown",
+        ];
+        for code in 0u8..=255 {
+            let wire = NasRegistrationState::from_wire(code).wire();
+            assert!(ALLOWED.contains(&wire), "code {code} produced {wire}");
+        }
+        assert_eq!(NasRegistrationState::from_wire(1).wire(), "registered");
+        assert_eq!(NasRegistrationState::from_wire(0).wire(), "unregistered");
+        assert_eq!(NasRegistrationState::from_wire(9).wire(), "unknown");
     }
 }
