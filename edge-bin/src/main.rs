@@ -1085,7 +1085,12 @@ mod linux {
             "body": body,
             "received_at": now,
             "iccid": "",
-            "bearer": "cellular",
+            // The contract's bearer is how the message was *delivered* —
+            // `cs`, `ims` or `nas` — not which radio it arrived on. Messages
+            // are read out of modem storage over QMI WMS, which does not say
+            // which of those carried it, so the honest answer is `unknown`.
+            // It used to send "cellular", which is not in the enum at all.
+            "bearer": "unknown",
             "encoding": "gsm7"
         });
         append_kind(outbox, "SmsReceived", payload)
