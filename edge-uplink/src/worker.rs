@@ -46,7 +46,18 @@ pub trait Outbox {
 /// not fix it: the peer acks each record, and replaying a fresh batch on every
 /// ack multiplies the backlog instead of draining it. Capping what is in flight
 /// makes each ack free exactly the room it retires.
-const REPLAY_WINDOW: u64 = 256;
+///
+/// The cap must be small enough that a full window fits in the socket's send
+/// buffer, or it does not cap anything: this side blocks on write before it
+/// has read a single ack, which is the deadlock the cap exists to prevent.
+///
+/// 256 was not small enough. A DeviceState carrying three modems is roughly
+/// 600 bytes, so a full window was about 150 KB against a send buffer of far
+/// less. Measured on the stalled deployment: 267 KB queued to send, 75 KB
+/// waiting to be read, and neither side moving. At 32 a full window is around
+/// 20 KB, which fits with room to spare, and the link still retires 32 records
+/// per round trip.
+const REPLAY_WINDOW: u64 = 32;
 
 pub struct UplinkWorker<O> {
     session: LinkSession,
@@ -280,6 +291,27 @@ impl<O: Outbox> UplinkWorker<O> {
             .iter()
             .map(|range| SequenceRange::new(range.from, range.through))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // A reported gap rewinds the replay cursor so the missing records go
+        // out again.
+        //
+        // Without this the cursor only ever moved forward: a record that was
+        // sent but never stored stayed lost, and the peer's committed_through
+        // could not advance past the hole. In-flight then grew to the window
+        // size, the replay budget reached zero, and the uplink stopped sending
+        // anything at all — three thousand records, including every inbound
+        // message, sat in the outbox while the link looked perfectly healthy.
+        //
+        // Rewinding to just before the lowest missing sequence is enough:
+        // everything below it is genuinely committed, and everything above is
+        // resent in sequence order anyway.
+        if let Some(lowest) = ranges.iter().map(|range| range.start()).min() {
+            let resume_from = lowest.saturating_sub(1);
+            if resume_from < self.replay_through {
+                self.replay_through = resume_from;
+            }
+        }
+
         let ack = UplinkAck::new(committed_through, ranges, more_missing)?;
         self.outbox
             .observe_ack(ack)

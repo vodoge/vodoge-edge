@@ -102,6 +102,11 @@ enum Scripted {
         committed_through: u64,
         connection_id: Option<String>,
     },
+    /// An ack that names sequences the peer never stored.
+    UplinkAckWithGap {
+        committed_through: u64,
+        gaps: Vec<(u64, u64)>,
+    },
     Closed,
 }
 
@@ -170,6 +175,20 @@ impl FrameConn for FakeConn {
                     .map(|envelope| envelope.device_id.clone())
                     .expect("resume");
                 Ok(uplink_ack(device_id, connection_id, committed_through))
+            }
+            Scripted::UplinkAckWithGap {
+                committed_through,
+                gaps,
+            } => {
+                let connection_id = self.last_resume().connection_id;
+                let device_id = self
+                    .outbound
+                    .iter()
+                    .rev()
+                    .find(|envelope| envelope.kind == MessageKind::Resume)
+                    .map(|envelope| envelope.device_id.clone())
+                    .expect("resume");
+                Ok(uplink_ack_with_gap(device_id, connection_id, committed_through, &gaps))
             }
             Scripted::Closed => Err(DialError::Closed),
         }
@@ -410,4 +429,93 @@ fn pong_on_live_session_is_ignored_by_the_outbox() {
         Inbound::Pong(_)
     ));
     assert_eq!(worker.outbox().committed_through(), 1);
+}
+
+fn uplink_ack_with_gap(
+    device_id: String,
+    connection_id: String,
+    committed_through: u64,
+    gaps: &[(u64, u64)],
+) -> Envelope {
+    Envelope {
+        v: 1,
+        kind: MessageKind::UplinkAck,
+        id: format!("uplink-ack-gap-{committed_through}"),
+        ts: 2,
+        device_id,
+        seq: None,
+        trace_id: None,
+        payload: serde_json::to_value(UplinkAckPayload {
+            connection_id,
+            committed_through,
+            missing_ranges: gaps
+                .iter()
+                .map(|(from, through)| vodoge_contract::SequenceRange {
+                    from: *from,
+                    through: *through,
+                })
+                .collect(),
+            more_missing: false,
+            max_in_flight: 32,
+        })
+        .unwrap(),
+    }
+}
+
+/// An ack naming a gap must put those records back on the wire.
+///
+/// The replay cursor only ever moved forward, so a record that was sent and
+/// never stored stayed lost: the peer reported it missing in every ack, this
+/// side acknowledged that, and never resent it. Because the peer's
+/// committed_through cannot advance past a hole, in-flight then grew to the
+/// window size and the replay budget reached zero — the uplink stopped sending
+/// anything at all while the link looked perfectly healthy. On the deployment
+/// that stranded three thousand records, including every inbound message.
+#[test]
+fn a_reported_gap_is_resent() {
+    let mut worker = worker_with(persist_123());
+    let mut conn = FakeConn::script([
+        // Resume acks through 1, so 2 and 3 go out.
+        Scripted::ResumeAck {
+            committed_through: 1,
+        },
+        // The peer stored 3 but never stored 2, so it can only commit through
+        // 1 and reports the hole.
+        Scripted::UplinkAckWithGap {
+            committed_through: 1,
+            gaps: vec![(2, 2)],
+        },
+        Scripted::Closed,
+    ]);
+
+    worker.run(&mut conn, Instant::now()).expect("run");
+
+    let sent: Vec<u64> = conn.sequenced().iter().filter_map(|e| e.seq).collect();
+    let resends = sent.iter().filter(|seq| **seq == 2).count();
+    assert!(
+        resends >= 2,
+        "record 2 should have been sent again after the gap was reported; sent: {sent:?}",
+    );
+}
+
+/// A clean ack must not rewind anything — resending what the peer already has
+/// would turn a healthy link into a loop.
+#[test]
+fn an_ack_without_a_gap_resends_nothing() {
+    let mut worker = worker_with(persist_123());
+    let mut conn = FakeConn::script([
+        Scripted::ResumeAck {
+            committed_through: 1,
+        },
+        Scripted::UplinkAck {
+            committed_through: 3,
+            connection_id: None,
+        },
+        Scripted::Closed,
+    ]);
+
+    worker.run(&mut conn, Instant::now()).expect("run");
+
+    let sent: Vec<u64> = conn.sequenced().iter().filter_map(|e| e.seq).collect();
+    assert_eq!(sent, vec![2, 3], "a clean ack resent something: {sent:?}");
 }
