@@ -90,6 +90,8 @@
     .modem-imei { font-family:var(--font-mono); font-size:var(--text-sm); font-weight:600; }
     .modem-meta { display:grid; gap:2px; font-size:var(--text-xs); color:var(--fg-muted); }
     .modem-meta .mono { font-family:var(--font-mono); color:var(--fg-faint); }
+    .modem-network { color:var(--fg); font-weight:600; font-size:var(--text-sm); }
+    .modem-meta .faint { color:var(--fg-faint); }
 
     /* ---------- Badges ---------- */
     .badge {
@@ -400,7 +402,7 @@
         // the sticks apart.
         card.setAttribute(
           "aria-label",
-          "选择模组 " + modem.imei + "，" + modem.state +
+          "选择模组 " + modem.imei + "，归属 " + (modem.home || "未知") + "，" + modem.state +
             (modem.iccid ? "，ICCID " + modem.iccid : ""),
         );
         card.addEventListener("click", () => setActive(modem.imei));
@@ -417,12 +419,28 @@
 
         const meta = document.createElement("div");
         meta.className = "modem-meta";
+        // Whose card this is comes first, from the IMSI. The serving network is
+        // a separate line because on a roaming card it belongs to somebody
+        // else: both sticks here are Hong Kong subscriptions sitting on China
+        // Unicom, so showing only the serving network makes them identical.
+        const home = document.createElement("span");
+        home.className = "modem-network";
+        home.textContent = modem.home || "卡归属未知";
+        if (!modem.home) home.classList.add("faint");
+
+        const serving = document.createElement("span");
+        serving.textContent = modem.network
+          ? "驻留 " + modem.network + (modem.network_numeric ? " (" + modem.network_numeric + ")" : "")
+          : "未驻留网络";
+
         const iccid = document.createElement("span");
         iccid.className = "mono";
         iccid.textContent = modem.iccid ? "ICCID " + modem.iccid : "ICCID —";
+
         const family = document.createElement("span");
+        family.className = "faint";
         family.textContent = modem.family;
-        meta.append(iccid, family);
+        meta.append(home, serving, iccid, family);
 
         card.append(top, meta);
         host.append(card);

@@ -215,6 +215,24 @@ impl<T: QmiTransport> QmiClient<T> {
     }
 
     /// Open the ISD-R application, GET DATA tag `5A`, and return the EID digits.
+    /// Read `EF_IMSI`, which says whose subscription the card carries.
+    ///
+    /// This is the home network. The serving system reports where the modem is
+    /// registered, which on a roaming card is somebody else entirely — so one
+    /// cannot stand in for the other.
+    pub fn read_imsi(&mut self) -> Result<String, SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::read_transparent_request(
+            assignment,
+            self.allocate_service_transaction(),
+            uim::EF_IMSI_FILE_ID,
+            uim::EF_IMSI_PATH,
+        )?;
+        let response = self.round_trip(&request)?;
+        let bytes = uim::parse_read_transparent(&response)?;
+        Ok(uim::decode_imsi(&bytes)?)
+    }
+
     /// Read `EF_ICCID` from the active profile. On an eUICC this changes when
     /// a different profile is enabled, so it identifies the SIM in use rather
     /// than the chip.

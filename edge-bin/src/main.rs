@@ -639,11 +639,21 @@ mod linux {
                 None
             }
         };
+        // The home network. `serving` below says where the modem is registered,
+        // which on a roaming card is a different operator entirely.
+        let imsi = client.read_imsi().ok();
         let serving = client.get_serving_system().ok();
         let state = match serving.as_ref() {
             Some(s) => format!("{:?}", s.registration_state),
             None => "unknown".into(),
         };
+        // MCC is always three digits; the rest of a 15-digit IMSI is a
+        // two-digit MNC in every network this runs on.
+        let home = imsi.as_ref().and_then(|value| {
+            let mcc = value.get(0..3)?.parse::<u16>().ok()?;
+            let mnc = value.get(3..5)?.parse::<u16>().ok()?;
+            Some((mcc, mnc))
+        });
         let now = unix_ms();
         radio.remember(&imei, path);
         {
@@ -655,6 +665,14 @@ mod linux {
                     iccid: iccid.clone(),
                     state: state.clone(),
                     last_seen: Some(now),
+                    // Already in the serving-system read above; keeping it is
+                    // what lets the panel say whose card this is without a
+                    // separate probe per stick.
+                    mcc: serving.as_ref().and_then(|s| s.mcc),
+                    mnc: serving.as_ref().and_then(|s| s.mnc),
+                    home_mcc: home.map(|(mcc, _)| mcc),
+                    home_mnc: home.map(|(_, mnc)| mnc),
+                    imsi: imsi.clone(),
                 })
                 .map_err(|e| e.to_string())?;
         }

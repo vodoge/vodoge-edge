@@ -230,6 +230,7 @@ name = "edge-panel"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "edge-core",
  "edge-store",
  "http-body-util",
  "serde",

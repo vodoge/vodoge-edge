@@ -28,6 +28,11 @@ async fn panel_serves_embedded_html_and_local_json() {
             iccid: None,
             state: "registered".into(),
             last_seen: Some(1_700_000_000_000),
+            mcc: Some(460),
+            mnc: Some(0),
+        home_mcc: None,
+        home_mnc: None,
+        imsi: None,
         }],
     });
     let app = router(inbox);
@@ -551,6 +556,11 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
             iccid: None,
             state: "Registered".into(),
             last_seen: Some(1_700_000_000_000),
+            mcc: None,
+            mnc: None,
+        home_mcc: None,
+        home_mnc: None,
+        imsi: None,
         }],
     });
     let app = router_with_actions(inbox, Some(Arc::new(Busy)));

@@ -15,6 +15,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
     include_str!("../migrations/0003_local_inbox.sql"),
+    include_str!("../migrations/0004_modem_network.sql"),
+    include_str!("../migrations/0005_modem_home.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -227,19 +229,34 @@ impl Store {
 
     pub fn upsert_local_modem(&self, modem: &LocalModem) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO local_modems (imei, family, iccid, state, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO local_modems (imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(imei) DO UPDATE SET
                 family = excluded.family,
                 iccid = excluded.iccid,
                 state = excluded.state,
-                last_seen = excluded.last_seen",
+                last_seen = excluded.last_seen,
+                -- A poll taken while the modem is searching reports no network.
+                -- Keeping the last known one stops the card's identity from
+                -- blinking out every time it re-registers.
+                mcc = COALESCE(excluded.mcc, local_modems.mcc),
+                mnc = COALESCE(excluded.mnc, local_modems.mnc),
+                -- A read that failed leaves the card's identity alone rather
+                -- than blanking it; one bad poll must not lose what is known.
+                home_mcc = COALESCE(excluded.home_mcc, local_modems.home_mcc),
+                home_mnc = COALESCE(excluded.home_mnc, local_modems.home_mnc),
+                imsi = COALESCE(excluded.imsi, local_modems.imsi)",
             params![
                 modem.imei,
                 modem.family,
                 modem.iccid,
                 modem.state,
                 modem.last_seen,
+                modem.mcc,
+                modem.mnc,
+                modem.home_mcc,
+                modem.home_mnc,
+                modem.imsi,
             ],
         )?;
         Ok(())
@@ -247,7 +264,7 @@ impl Store {
 
     pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT imei, family, iccid, state, last_seen
+            "SELECT imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi
                FROM local_modems
               ORDER BY imei",
         )?;
@@ -259,6 +276,11 @@ impl Store {
                     iccid: row.get(2)?,
                     state: row.get(3)?,
                     last_seen: row.get(4)?,
+                    mcc: row.get(5)?,
+                    mnc: row.get(6)?,
+                    home_mcc: row.get(7)?,
+                    home_mnc: row.get(8)?,
+                    imsi: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -286,6 +308,15 @@ pub struct LocalModem {
     pub iccid: Option<String>,
     pub state: String,
     pub last_seen: Option<i64>,
+    /// Serving network, when the modem is registered somewhere. Absent while
+    /// it is searching, which is itself worth showing.
+    pub mcc: Option<u16>,
+    pub mnc: Option<u16>,
+    /// Home network from the card's IMSI. On a roaming card this differs from
+    /// the serving network, and it is the one that says which SIM this is.
+    pub home_mcc: Option<u16>,
+    pub home_mnc: Option<u16>,
+    pub imsi: Option<String>,
 }
 
 /// One persisted outbox row.

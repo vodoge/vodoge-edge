@@ -26,6 +26,10 @@ const FILE_TLV: u8 = 0x02;
 const READ_INFO_TLV: u8 = 0x03;
 const READ_RESULT_TLV: u8 = 0x11;
 
+/// `EF_IMSI` lives inside the USIM application, not under the MF.
+pub const EF_IMSI_FILE_ID: u16 = 0x6f07;
+pub const EF_IMSI_PATH: &[u16] = &[0x3f00, 0x7fff];
+
 /// `EF_ICCID` sits directly under the MF, outside any application.
 pub const EF_ICCID_FILE_ID: u16 = 0x2fe2;
 pub const EF_ICCID_PATH: &[u16] = &[0x3f00];
@@ -248,6 +252,39 @@ pub fn decode_iccid(bytes: &[u8]) -> Result<String, UimError> {
     Ok(trimmed)
 }
 
+/// Decode `EF_IMSI`.
+///
+/// The layout is not the same as ICCID even though both are swapped BCD: the
+/// first byte is a length, and the first digit lives in the *high* nibble of
+/// the next byte while its low nibble is a parity flag. Decoding it the ICCID
+/// way yields a number that looks plausible and is wrong.
+pub fn decode_imsi(bytes: &[u8]) -> Result<String, UimError> {
+    if bytes.len() < 2 {
+        return Err(UimError::EmptyImsi);
+    }
+    let declared = usize::from(bytes[0]);
+    if declared == 0 || declared > bytes.len() - 1 {
+        return Err(UimError::EmptyImsi);
+    }
+    let packed = &bytes[1..=declared];
+    let odd = packed[0] & 0x01 == 1;
+    let mut digits = String::with_capacity(15);
+    digits.push(nibble_char(packed[0] >> 4));
+    for byte in &packed[1..] {
+        digits.push(nibble_char(byte & 0x0f));
+        digits.push(nibble_char(byte >> 4));
+    }
+    // An even-length IMSI pads with a trailing filler nibble.
+    if !odd {
+        digits.pop();
+    }
+    let trimmed = digits.trim_end_matches('f').to_string();
+    if trimmed.is_empty() || trimmed.chars().any(|c| !c.is_ascii_digit()) {
+        return Err(UimError::EmptyImsi);
+    }
+    Ok(trimmed)
+}
+
 fn nibble_char(value: u8) -> char {
     char::from_digit(u32::from(value), 16).unwrap_or('f')
 }
@@ -335,6 +372,7 @@ pub enum UimError {
     UnexpectedEidLength { actual: usize },
     TruncatedReadResult { actual: usize },
     EmptyIccid,
+    EmptyImsi,
     ApduFailed { sw1: u8, sw2: u8 },
 }
 
@@ -369,6 +407,7 @@ impl fmt::Display for UimError {
                 write!(formatter, "read result TLV has {actual} bytes")
             }
             Self::EmptyIccid => formatter.write_str("EF_ICCID is empty or not numeric"),
+            Self::EmptyImsi => formatter.write_str("EF_IMSI is empty or not numeric"),
             Self::ApduFailed { sw1, sw2 } => {
                 write!(formatter, "APDU failed with SW {sw1:02x}{sw2:02x}")
             }
@@ -402,5 +441,37 @@ impl From<ResultError> for UimError {
 impl From<TlvLookupError> for UimError {
     fn from(value: TlvLookupError) -> Self {
         Self::Lookup(value)
+    }
+}
+
+#[cfg(test)]
+mod imsi_tests {
+    use super::*;
+
+    /// Captured layout: length byte, then the first digit in the high nibble of
+    /// the next byte with its low nibble carrying the odd-length flag.
+    #[test]
+    fn an_odd_length_imsi_is_decoded() {
+        // 454006395021420 — fifteen digits, so the parity flag is set.
+        let bytes = [0x08, 0x49, 0x45, 0x00, 0x36, 0x59, 0x20, 0x41, 0x02];
+        assert_eq!(decode_imsi(&bytes).expect("imsi"), "454006395021420");
+    }
+
+    /// Decoding this the ICCID way would drop the leading digit and shift every
+    /// other one, producing a number that still looks like an IMSI.
+    #[test]
+    fn the_first_digit_comes_from_the_high_nibble() {
+        let bytes = [0x08, 0x49, 0x45, 0x00, 0x36, 0x59, 0x20, 0x41, 0x02];
+        let decoded = decode_imsi(&bytes).expect("imsi");
+        assert!(decoded.starts_with("454"), "got {decoded}");
+        assert_eq!(decoded.len(), 15);
+    }
+
+    #[test]
+    fn a_truncated_record_is_rejected() {
+        assert!(matches!(decode_imsi(&[]), Err(UimError::EmptyImsi)));
+        assert!(matches!(decode_imsi(&[0x08]), Err(UimError::EmptyImsi)));
+        // Length byte promising more than the record holds.
+        assert!(matches!(decode_imsi(&[0x08, 0x49]), Err(UimError::EmptyImsi)));
     }
 }

@@ -68,6 +68,7 @@ pub use nas::{
 pub use result::{QmiResult, ResultError};
 pub use session::{QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC};
 pub use uim::{
+    decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,
     parse_eid, parse_open_logical_channel, parse_send_apdu, ApduResponse, UimError,
     CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, OPEN_LOGICAL_CHANNEL, SEND_APDU,
 };

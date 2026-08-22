@@ -4,6 +4,7 @@
 //! network clients belong in higher layers so capability and routing decisions
 //! stay deterministic and straightforward to test.
 
+mod network;
 mod capability;
 mod concat;
 mod factory;
@@ -13,6 +14,7 @@ mod registration;
 mod sms;
 mod verticals;
 
+pub use network::Network;
 pub use capability::{
     Bearer, BearerSupport, Capability, CarrierProfile, DeviceContext, ModemFamily, Vertical,
     VerticalId,

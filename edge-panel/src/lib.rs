@@ -9,6 +9,7 @@ use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use edge_core::Network;
 use edge_store::{LocalMessage, LocalModem, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -603,6 +604,15 @@ struct ModemBody {
     iccid: Option<String>,
     state: String,
     last_seen: Option<i64>,
+    /// Whose subscription this is, from the card's IMSI. This is what tells
+    /// two similar sticks apart.
+    home: Option<String>,
+    home_numeric: Option<String>,
+    imsi: Option<String>,
+    /// Where the modem is currently registered. On a roaming card this is a
+    /// different operator, so it is shown separately rather than instead.
+    network: Option<String>,
+    network_numeric: Option<String>,
 }
 
 impl ModemBody {
@@ -623,12 +633,25 @@ impl ModemBody {
         } else {
             value.state
         };
+        let network = match (value.mcc, value.mnc) {
+            (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
+            _ => None,
+        };
+        let home = match (value.home_mcc, value.home_mnc) {
+            (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
+            _ => None,
+        };
         Self {
             imei: value.imei,
             family: value.family,
             iccid: value.iccid,
             state,
             last_seen: value.last_seen,
+            home: home.map(|n| n.describe()),
+            home_numeric: home.map(|n| n.numeric()),
+            imsi: value.imsi,
+            network: network.map(|n| n.label()),
+            network_numeric: network.map(|n| n.numeric()),
         }
     }
 }

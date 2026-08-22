@@ -33,6 +33,11 @@ fn local_inbox_survives_duplicate_seq() {
             iccid: Some("8986".into()),
             state: "registered".into(),
             last_seen: Some(11),
+        mcc: Some(460),
+        mnc: Some(1),
+        home_mcc: None,
+        home_mnc: None,
+        imsi: None,
         })
         .expect("modem");
     let modems = store.list_local_modems().expect("modems");
