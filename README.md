@@ -70,6 +70,15 @@ edge-panel/  Offline Axum panel over the SQLite inbox
 docs/        Architecture decisions
 ```
 
+## Picking up the work
+
+The plan, the environment, and the traps live in the cloud repo:
+`vodoge-cloud/docs/execution-plan.md`. Read it before changing anything here —
+in particular the note that most of `edge-bin` sits behind
+`#[cfg(target_os = "linux")]` and does not compile on a Mac at all, so a green
+`cargo build` on the workstation proves less than it looks like. Type-check and
+build releases on the edge machine.
+
 ## Development
 
 Install a Rust toolchain compatible with the workspace's declared MSRV, then:
