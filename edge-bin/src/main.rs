@@ -1037,9 +1037,15 @@ mod linux {
         // arrives as several PDUs, and storing each one separately gives the
         // operator three truncated messages where the sender wrote one.
         let mut parts = Vec::with_capacity(pass.inbound.len());
+        // Every fragment of one message shares its data coding scheme, so the
+        // alphabet is recorded per group rather than threaded through
+        // reassembly, which has no business knowing about encodings.
+        let mut encodings: std::collections::BTreeMap<(String, u16), &'static str> =
+            std::collections::BTreeMap::new();
         for message in &pass.inbound {
-            let decoded = decode_deliver(&message.raw.pdu);
+            let decoded = edge_core::decode_deliver(&message.raw.pdu);
             let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
+            encodings.insert((decoded.peer.clone(), ref_id), decoded.encoding);
             parts.push(ConcatPart {
                 sender: decoded.peer,
                 ref_id,
@@ -1065,6 +1071,15 @@ mod linux {
         }
 
         for (index, message) in assembled.iter().enumerate() {
+            // assemble() drops the reference id, so the encoding is looked up
+            // by sender: a single pass never holds two messages from the same
+            // sender in different alphabets, and `unknown` is the honest answer
+            // if it somehow did.
+            let encoding = encodings
+                .iter()
+                .find(|((sender, _), _)| sender == &message.sender)
+                .map(|(_, value)| *value)
+                .unwrap_or("unknown");
             let local = LocalMessage {
                 seq: (index as u64) + (now as u64 % 1_000_000) * 1000,
                 peer: message.sender.clone(),
@@ -1080,7 +1095,7 @@ mod linux {
                 .expect("store")
                 .insert_local_message(&local)
                 .map_err(|e| e.to_string())?;
-            enqueue_sms(outbox, &imei, &message.sender, &message.body, now)?;
+            enqueue_sms(outbox, &imei, &message.sender, &message.body, encoding, now)?;
         }
 
         // Delete only what was fully assembled.
@@ -1088,7 +1103,7 @@ mod linux {
             .inbound
             .iter()
             .filter(|message| {
-                let decoded = decode_deliver(&message.raw.pdu);
+                let decoded = edge_core::decode_deliver(&message.raw.pdu);
                 match decoded.concat {
                     None => true,
                     Some((ref_id, _, _)) => !incomplete.contains(&(decoded.peer, ref_id)),
@@ -1122,6 +1137,7 @@ mod linux {
         imei: &str,
         peer: &str,
         body: &str,
+        encoding: &str,
         now: i64,
     ) -> Result<(), String> {
         let payload = serde_json::json!({
@@ -1136,7 +1152,11 @@ mod linux {
             // which of those carried it, so the honest answer is `unknown`.
             // It used to send "cellular", which is not in the enum at all.
             "bearer": "unknown",
-            "encoding": "gsm7"
+            // Reported rather than assumed. It was hardcoded to gsm7, which
+            // was wrong for every Chinese message on the bench and wrong in a
+            // more useful way for binary OTA traffic, where it is the field
+            // that explains why the body is hex.
+            "encoding": encoding
         });
         append_kind(outbox, "SmsReceived", payload)
     }
@@ -1406,164 +1426,6 @@ mod linux {
         .map_err(|e| e.to_string())
     }
 
-    /// One decoded SMS-DELIVER: who sent it, what it says, and which part of
-    /// a longer message it is.
-    struct Decoded {
-        peer: String,
-        body: String,
-        /// Present when the message is one fragment of a longer one.
-        concat: Option<(u16, u8, u8)>,
-    }
-
-    fn decode_deliver(pdu: &[u8]) -> Decoded {
-        let empty = || Decoded {
-            peer: String::new(),
-            body: String::new(),
-            concat: None,
-        };
-        if pdu.is_empty() {
-            return empty();
-        }
-        let mut i = 0usize;
-        let smsc_len = pdu[0] as usize;
-        if 1 + smsc_len < pdu.len() {
-            i = 1 + smsc_len;
-        }
-        if i + 2 >= pdu.len() {
-            return Decoded {
-                peer: String::new(),
-                body: hex(pdu),
-                concat: None,
-            };
-        }
-        // The first octet carries TP-UDHI in bit 6. It was skipped unread,
-        // which is why every concatenated message arrived with its header
-        // decoded as text — `Ԁϒȁ` is the six-byte UDH read as UCS-2.
-        let first_octet = pdu[i];
-        let has_udh = first_octet & 0x40 != 0;
-        i += 1;
-        let oa_digits = pdu[i] as usize;
-        i += 1;
-        if i >= pdu.len() {
-            return Decoded {
-                peer: String::new(),
-                body: hex(pdu),
-                concat: None,
-            };
-        }
-        i += 1;
-        let oa_bytes = oa_digits.div_ceil(2);
-        if i + oa_bytes + 9 > pdu.len() {
-            return Decoded {
-                peer: String::new(),
-                body: hex(pdu),
-                concat: None,
-            };
-        }
-        let peer = bcd(&pdu[i..i + oa_bytes], oa_digits);
-        i += oa_bytes;
-        i += 1;
-        let dcs = pdu[i];
-        i += 1;
-        i += 7;
-        let udl = pdu[i] as usize;
-        i += 1;
-        let ud = if i <= pdu.len() { &pdu[i..] } else { &[] };
-
-        // Strip the header before decoding, and keep what it says about which
-        // fragment this is.
-        let (concat, payload) = split_user_data_header(has_udh, ud);
-
-        let body = match dcs & 0x0c {
-            0x08 => String::from_utf16_lossy(
-                &payload
-                    .chunks(2)
-                    .filter_map(|c| {
-                        if c.len() == 2 {
-                            Some(u16::from_be_bytes([c[0], c[1]]))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            _ => String::from_utf8_lossy(payload).chars().take(udl).collect(),
-        };
-        Decoded {
-            peer,
-            body,
-            concat,
-        }
-    }
-
-    /// Splits the user data header off the payload.
-    ///
-    /// Returns the concatenation parameters when the header carries them —
-    /// information element 0x00 is an 8-bit reference, 0x08 a 16-bit one — and
-    /// the remaining bytes either way. A header this does not understand is
-    /// still removed: leaving it in puts binary in the message body, which is
-    /// the one outcome nobody wants to read.
-    fn split_user_data_header(has_udh: bool, ud: &[u8]) -> (Option<(u16, u8, u8)>, &[u8]) {
-        if !has_udh || ud.is_empty() {
-            return (None, ud);
-        }
-        let header_len = ud[0] as usize;
-        let end = 1 + header_len;
-        if end > ud.len() {
-            return (None, &[]);
-        }
-        let header = &ud[1..end];
-        let payload = &ud[end..];
-
-        let mut concat = None;
-        let mut offset = 0usize;
-        while offset + 2 <= header.len() {
-            let iei = header[offset];
-            let length = header[offset + 1] as usize;
-            let value_start = offset + 2;
-            let value_end = value_start + length;
-            if value_end > header.len() {
-                break;
-            }
-            let value = &header[value_start..value_end];
-            match (iei, value.len()) {
-                (0x00, 3) => concat = Some((u16::from(value[0]), value[1], value[2])),
-                (0x08, 4) => {
-                    concat = Some((
-                        u16::from_be_bytes([value[0], value[1]]),
-                        value[2],
-                        value[3],
-                    ))
-                }
-                _ => {}
-            }
-            offset = value_end;
-        }
-        (concat, payload)
-    }
-
-    fn bcd(bytes: &[u8], digits: usize) -> String {
-        let mut out = String::new();
-        for byte in bytes {
-            let lo = byte & 0x0f;
-            let hi = byte >> 4;
-            if lo <= 9 && out.len() < digits {
-                out.push(char::from(b'0' + lo));
-            }
-            if hi <= 9 && out.len() < digits {
-                out.push(char::from(b'0' + hi));
-            }
-        }
-        if out.starts_with('8') && out.len() > 11 {
-            format!("+{out}")
-        } else {
-            out
-        }
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
 
     fn unix_ms() -> i64 {
         SystemTime::now()

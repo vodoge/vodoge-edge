@@ -7,6 +7,8 @@
 mod network;
 mod capability;
 mod concat;
+mod gsm7;
+mod pdu;
 mod factory;
 mod matrix;
 mod policy;
@@ -20,6 +22,8 @@ pub use capability::{
     VerticalId,
 };
 pub use concat::{assemble, AssembledSms, ConcatPart};
+pub use gsm7::decode as decode_gsm7;
+pub use pdu::{decode_deliver, hex, Deliver};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{
