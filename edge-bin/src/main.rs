@@ -194,6 +194,56 @@ mod linux {
 
     struct RadioPort {
         radio: Radio,
+        proxies: Arc<ProxyRuntime>,
+    }
+
+    /// The proxy listeners, and the runtime they live on.
+    ///
+    /// The manager is async and the command executor is not, so the proxies
+    /// get their own runtime and the synchronous side blocks on it. The
+    /// executor runs on the uplink thread, never on a tokio worker, which is
+    /// what makes `block_on` safe here.
+    struct ProxyRuntime {
+        runtime: tokio::runtime::Runtime,
+        manager: Arc<edge_proxy::ProxyManager>,
+        radio: Radio,
+    }
+
+    impl ProxyRuntime {
+        fn new(radio: Radio) -> Result<Self, String> {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("vodoge-proxy")
+                .build()
+                .map_err(|error| error.to_string())?;
+            let manager = Arc::new(edge_proxy::ProxyManager::new(Arc::new(
+                ModemInterfaces { radio: radio.clone() },
+            )));
+            Ok(Self {
+                runtime,
+                manager,
+                radio,
+            })
+        }
+    }
+
+    /// Finds the network interface a modem's data session is using.
+    ///
+    /// Resolved on every start rather than remembered: the name is not stable
+    /// across re-enumeration, so a modem that reset can come back as a
+    /// different `wwan` and a cached name would bind the listener to an
+    /// interface that no longer belongs to that SIM.
+    struct ModemInterfaces {
+        radio: Radio,
+    }
+
+    impl edge_proxy::InterfaceResolver for ModemInterfaces {
+        fn interface_for(&self, modem_imei: &str) -> Option<String> {
+            let qmi_path = self.radio.path_for(Some(modem_imei)).ok()?;
+            let name = qmi_path.file_name()?.to_str()?;
+            let device = PathBuf::from(format!("/sys/class/usbmisc/{name}/device"));
+            edge_proxy::bind::interface_for_usb_device(&device)
+        }
     }
 
     impl SendPort for RadioPort {
@@ -331,6 +381,110 @@ mod linux {
                 .map_err(action_failed)?;
             Ok(JsonValue::Null)
         }
+
+        fn configure_proxy(
+            &mut self,
+            instances: &JsonValue,
+            upstreams: &JsonValue,
+        ) -> Result<JsonValue, SendError> {
+            let instances: Vec<edge_proxy::InstanceSpec> =
+                serde_json::from_value(instances.clone())
+                    .map_err(|error| SendError::new("bad_proxy_config", error.to_string()))?;
+            let upstreams: Vec<edge_proxy::UpstreamSpec> =
+                serde_json::from_value(upstreams.clone())
+                    .map_err(|error| SendError::new("bad_proxy_config", error.to_string()))?;
+            let manager = self.proxies.manager.clone();
+            let statuses = self
+                .proxies
+                .runtime
+                .block_on(async move { manager.apply(instances, upstreams).await });
+            json_details(&statuses)
+        }
+
+        fn proxy_lifecycle(
+            &mut self,
+            instance_id: &str,
+            action: &str,
+        ) -> Result<JsonValue, SendError> {
+            let manager = self.proxies.manager.clone();
+            let id = instance_id.to_string();
+            match action {
+                "stop" => {
+                    let stopped = self
+                        .proxies
+                        .runtime
+                        .block_on(async move { manager.stop(&id).await });
+                    if !stopped {
+                        return Err(SendError::new(
+                            "not_running",
+                            format!("no listener {instance_id} is running"),
+                        ));
+                    }
+                    Ok(JsonValue::Null)
+                }
+                "start" | "restart" => {
+                    let status = self
+                        .proxies
+                        .runtime
+                        .block_on(async move { manager.restart(&id).await });
+                    match status {
+                        // A start needs a configuration to start from, and the
+                        // only place one comes from is the cloud.
+                        None => Err(SendError::new(
+                            "not_configured",
+                            format!("no configuration for listener {instance_id}"),
+                        )),
+                        Some(status) => json_details(&status),
+                    }
+                }
+                other => Err(SendError::new(
+                    "unknown_action",
+                    format!("proxy action {other} is not start, stop or restart"),
+                )),
+            }
+        }
+
+        fn probe_upstream_proxy(&mut self, upstream_id: &str) -> Result<JsonValue, SendError> {
+            // The probe needs the upstream's address and credentials, which
+            // only the last applied configuration holds — the cloud sends the
+            // id, not the secret, and it should stay that way.
+            let manager = self.proxies.manager.clone();
+            let id = upstream_id.to_string();
+            let upstream = self
+                .proxies
+                .runtime
+                .block_on(async move { manager.upstream(&id).await });
+            let upstream = upstream.ok_or_else(|| {
+                SendError::new(
+                    "unknown_upstream",
+                    format!("no upstream {upstream_id} in the applied configuration"),
+                )
+            })?;
+            let result = self.proxies.runtime.block_on(async move {
+                edge_proxy::probe::probe(
+                    &upstream.address,
+                    &upstream.username,
+                    &upstream.password,
+                    None,
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+            });
+            json_details(&result)
+        }
+
+        fn rotate_ip(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            // Taking the radio down and back up is what makes the network
+            // assign a new address; there is no QMI request that says "give me
+            // a different IP".
+            self.radio.with_client(Some(imei), |client| {
+                client
+                    .set_operating_mode(OperatingMode::LowPower)
+                    .and_then(|_| client.set_operating_mode(OperatingMode::Online))
+                    .map_err(|error| SendError::new("rotate_failed", error.to_string()))
+            })?;
+            Ok(JsonValue::Null)
+        }
     }
 
     fn action_failed(error: PanelError) -> SendError {
@@ -351,6 +505,7 @@ mod linux {
         fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
             let mut port = RadioPort {
                 radio: self.radio.clone(),
+                proxies: self.proxies.clone(),
             };
             SendPort::send_sms(
                 &mut port,
@@ -367,6 +522,7 @@ mod linux {
         fn restart_modem(&self, imei: String) -> Result<(), PanelError> {
             let mut port = RadioPort {
                 radio: self.radio.clone(),
+                proxies: self.proxies.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
                 .map_err(|error| PanelError::Action(error.to_string()))
@@ -677,11 +833,14 @@ mod linux {
             DurableOutbox::open(&outbox_path, 100_000).map_err(|e| e.to_string())?,
         ));
         let radio = Radio::new();
+        let proxies = Arc::new(ProxyRuntime::new(radio.clone())?);
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
+            proxies: proxies.clone(),
         })));
         let panel_actions = Arc::new(RadioPort {
             radio: radio.clone(),
+            proxies: proxies.clone(),
         });
 
         // The panel reads this to report cloud vs local, so what it shows is the

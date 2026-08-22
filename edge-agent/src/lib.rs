@@ -132,6 +132,38 @@ pub trait SendPort {
     ) -> Result<JsonValue, SendError> {
         Err(unsupported("switch_esim_profile"))
     }
+
+    // The proxy actions. These are device-level rather than modem-level: a
+    // configuration names the modems it wants, so applying it is one operation
+    // over the whole set.
+
+    /// Applies the cloud's desired proxy state and reports what is listening.
+    fn configure_proxy(
+        &mut self,
+        _instances: &JsonValue,
+        _upstreams: &JsonValue,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("configure_proxy"))
+    }
+
+    /// `action` is one of `start`, `stop` or `restart`.
+    fn proxy_lifecycle(
+        &mut self,
+        _instance_id: &str,
+        _action: &str,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("proxy_lifecycle"))
+    }
+
+    fn probe_upstream_proxy(&mut self, _upstream_id: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("probe_upstream_proxy"))
+    }
+
+    /// Drops and re-establishes the data session so the network assigns a new
+    /// address.
+    fn rotate_ip(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("rotate_ip"))
+    }
 }
 
 fn unsupported(what: &str) -> SendError {
@@ -704,6 +736,49 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.switch_esim_profile(modem_imei, target_iccid);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ConfigureProxy {
+                instances,
+                upstreams,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                // The specs travel as contract types; the proxy manager reads
+                // them as JSON so its shape stays its own rather than being
+                // pinned to the generated bindings.
+                let instances = serde_json::to_value(instances).unwrap_or(JsonValue::Null);
+                let upstreams = serde_json::to_value(upstreams).unwrap_or(JsonValue::Null);
+                let outcome = self.port.configure_proxy(&instances, &upstreams);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ProxyLifecycle {
+                instance_id,
+                action,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.proxy_lifecycle(instance_id, action);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ProbeUpstreamProxy { upstream_id } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.probe_upstream_proxy(upstream_id);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::RotateIp { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.rotate_ip(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

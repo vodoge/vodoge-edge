@@ -15,6 +15,7 @@ edge-agent = { path = "../edge-agent" }
 edge-core = { path = "../edge-core" }
 edge-modem = { path = "../edge-modem" }
 edge-panel = { path = "../edge-panel" }
+edge-proxy = { path = "../edge-proxy" }
 edge-store = { path = "../edge-store" }
 edge-uplink = { path = "../edge-uplink" }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

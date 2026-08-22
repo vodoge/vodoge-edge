@@ -492,6 +492,90 @@ pub struct ListEsimProfilesCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ConfigureProxyCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "instances")]
+    pub instances: Vec<ProxyInstanceSpec>,
+    #[serde(rename = "upstreams")]
+    pub upstreams: Vec<ProxyUpstreamSpec>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyInstanceSpec {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "protocol")]
+    pub protocol: String,
+    #[serde(rename = "listen_addr")]
+    pub listen_addr: String,
+    #[serde(rename = "listen_port")]
+    pub listen_port: i64,
+    #[serde(rename = "auth_enabled", default, skip_serializing_if = "Option::is_none")]
+    pub auth_enabled: Option<bool>,
+    #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(rename = "upstream_id", default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<String>,
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyUpstreamSpec {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "address")]
+    pub address: String,
+    #[serde(rename = "protocol")]
+    pub protocol: String,
+    #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(rename = "enabled", default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyLifecycleCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "instance_id")]
+    pub instance_id: String,
+    #[serde(rename = "action")]
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeUpstreamProxyCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "upstream_id")]
+    pub upstream_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateIpCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SwitchEsimProfileCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -639,6 +723,26 @@ pub enum Command {
         modem_imei: String,
     },
     ResetModemUsb {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    ConfigureProxy {
+        #[serde(rename = "instances")]
+        instances: Vec<ProxyInstanceSpec>,
+        #[serde(rename = "upstreams")]
+        upstreams: Vec<ProxyUpstreamSpec>,
+    },
+    ProxyLifecycle {
+        #[serde(rename = "instance_id")]
+        instance_id: String,
+        #[serde(rename = "action")]
+        action: String,
+    },
+    ProbeUpstreamProxy {
+        #[serde(rename = "upstream_id")]
+        upstream_id: String,
+    },
+    RotateIp {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
     },
