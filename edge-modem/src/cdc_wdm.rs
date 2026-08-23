@@ -68,9 +68,56 @@ impl crate::QmiTransport for CdcWdmDevice {
             if is_indication(&frame) {
                 continue;
             }
+            // Only the answer to the request just written. Anything else on
+            // this node is a leftover, and taking a leftover as the answer is
+            // how one lost transaction becomes a permanent fault: the session
+            // layer rejects the mismatch, the real answer stays unread, and
+            // every transaction after it is one frame behind for as long as
+            // the modem is up. Seen on the bench as
+            // `poll /dev/cdc-wdm1 FAIL response has no pending service 0x00
+            // client 0x00 transaction 0x0002`, repeating until the module was
+            // power-cycled -- a module that answers everything correctly and
+            // is nonetheless reported as unreachable.
+            if !answers(request, &frame) {
+                continue;
+            }
             return Ok(frame);
         }
     }
+}
+
+/// Whether `frame` is the response to `request`.
+///
+/// Addressed by service, client and transaction, which is the whole of what
+/// QMUX gives a caller to match on. Frames too short to carry an address
+/// cannot be anybody's answer and are dropped by the same rule.
+fn answers(request: &[u8], frame: &[u8]) -> bool {
+    match (address_of(request), address_of(frame)) {
+        (Some(wanted), Some(got)) => wanted == got,
+        _ => false,
+    }
+}
+
+/// `(service, client, transaction)` of a QMUX frame, request or response.
+///
+/// The control service numbers its transactions in one byte and every other
+/// service in two, so the transaction cannot be read without first knowing
+/// which service the frame belongs to.
+fn address_of(frame: &[u8]) -> Option<(u8, u8, u16)> {
+    if frame.len() < 8 {
+        return None;
+    }
+    let service = frame[4];
+    let client = frame[5];
+    let transaction = if service == 0 {
+        u16::from(frame[7])
+    } else {
+        if frame.len() < 9 {
+            return None;
+        }
+        u16::from_le_bytes([frame[7], frame[8]])
+    };
+    Some((service, client, transaction))
 }
 
 impl CdcWdmDevice {
@@ -269,5 +316,94 @@ mod tests {
         assert!(is_gone(&std::io::Error::from_raw_os_error(libc::ENODEV)));
         assert!(is_gone(&std::io::Error::from_raw_os_error(libc::ENXIO)));
         assert!(!is_gone(&std::io::Error::from_raw_os_error(libc::EAGAIN)));
+    }
+
+    /// One CTL request and the response to it, byte for byte off the bench.
+    fn ctl_sync_request() -> Vec<u8> {
+        hex("010b00000000000127000000")
+    }
+
+    fn ctl_sync_response() -> Vec<u8> {
+        hex("01120080000001012700070002040000000000")
+    }
+
+    /// The frame that was still in flight from the previous cycle: a CTL
+    /// response to transaction 2, arriving while transaction 1 is awaited.
+    fn stale_ctl_response() -> Vec<u8> {
+        hex("011700800000010222000c00020400000000000102000501")
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// The fault that took IMEI 862547055142811 out of the fleet.
+    ///
+    /// A transaction that timed out leaves its answer on the wire. The next
+    /// request reads that answer, and if the transport hands it up as the
+    /// response the session layer rejects it -- while the answer that was
+    /// actually asked for stays unread and becomes the next request's
+    /// leftover. The module answers everything correctly and is reported
+    /// unreachable for as long as it stays powered.
+    #[test]
+    fn a_leftover_from_a_previous_transaction_is_not_the_answer() {
+        assert!(
+            !answers(&ctl_sync_request(), &stale_ctl_response()),
+            "transaction 2's answer must not settle transaction 1"
+        );
+        assert!(
+            answers(&ctl_sync_request(), &ctl_sync_response()),
+            "the real answer must still be recognised"
+        );
+    }
+
+    /// Same transaction number, different service: WMS transaction 1 is not
+    /// the answer to CTL transaction 1.
+    #[test]
+    fn a_matching_transaction_on_another_service_is_not_the_answer() {
+        let wms_request = hex("011e0000050100010020001200010f00060c0000212c05810180f600000132");
+        assert!(!answers(&ctl_sync_request(), &wms_request));
+        assert_eq!(address_of(&wms_request), Some((0x05, 0x01, 1)));
+        // CTL numbers transactions in one byte; a service uses two, and
+        // reading a service frame the control way finds the wrong number.
+        assert_eq!(address_of(&ctl_sync_request()), Some((0x00, 0x00, 1)));
+    }
+
+    #[test]
+    fn a_frame_too_short_to_carry_an_address_answers_nothing() {
+        assert_eq!(address_of(&[0x01, 0x02, 0x00]), None);
+        assert!(!answers(&ctl_sync_request(), &[0x01, 0x02, 0x00]));
+    }
+
+    /// The skip has to happen in the transport, where the next frame can
+    /// still be read. Driven over a socket pair, which like the device is
+    /// read/write on one descriptor and readable only while something is
+    /// queued, so `poll` decides the same way it does on the bench.
+    #[test]
+    fn transact_reads_past_a_leftover_to_the_real_answer() {
+        use crate::QmiTransport;
+        use std::os::unix::io::FromRawFd;
+
+        let mut fds = [0 as libc::c_int; 2];
+        let made = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(made, 0, "socketpair");
+        let mut modem = unsafe { File::from_raw_fd(fds[1]) };
+        // Queued in the order the modem delivered them: the previous
+        // transaction's answer first, then this one's.
+        modem.write_all(&stale_ctl_response()).expect("leftover");
+        modem.write_all(&ctl_sync_response()).expect("answer");
+
+        let mut device = CdcWdmDevice {
+            file: unsafe { File::from_raw_fd(fds[0]) },
+            timeout: Duration::from_secs(2),
+            device: "/dev/cdc-wdm-test".into(),
+        };
+        let frame = device
+            .transact(&ctl_sync_request())
+            .expect("the answer is on the wire, one leftover behind");
+        assert_eq!(frame, ctl_sync_response());
     }
 }
