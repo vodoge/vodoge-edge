@@ -95,14 +95,30 @@ impl AtPort {
 
     pub fn open_with_timeout(path: impl AsRef<Path>, timeout: Duration) -> Result<Self, AtError> {
         let path = path.as_ref().to_path_buf();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|error| AtError::Open {
-                path: path.clone(),
-                reason: error.to_string(),
-            })?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        // O_NOCTTY, and it is not optional.
+        //
+        // A systemd service runs as a session leader with no controlling
+        // terminal, so the first tty it opens without this flag becomes one.
+        // That tty is a USB serial port: when the stick re-enumerates, the
+        // kernel hangs up the terminal and SIGHUPs the session, and the daemon
+        // dies. Nothing explains it afterwards either — systemd counts SIGHUP
+        // as a clean exit, so the journal says "Deactivated successfully" and
+        // no more. Seen on the bench: ttyUSB8-11 disconnected at 03:57:33 and
+        // the agent was gone in the same second, with no other trace.
+        //
+        // Latent for as long as the agent only ran AT commands rarely. Driving
+        // them from the console makes opening this port ordinary.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOCTTY);
+        }
+        let file = options.open(&path).map_err(|error| AtError::Open {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
         configure_raw(&file).map_err(|reason| AtError::Open {
             path: path.clone(),
             reason,

@@ -495,18 +495,45 @@ mod linux {
             // Re-attach whatever the detach reported, including a transport
             // error: returning early would leave the modem off-network, which
             // is a worse state than the fault this is meant to clear.
-            let attached = self.at_ok(imei, "AT+COPS=0", Some(180_000))?;
-            // Which network it landed on. `AT+COPS=0` answers as soon as
-            // selection is under way, so this is the only part that says
-            // re-registration actually finished.
-            let serving = self.at_exchange(imei, "AT+COPS?", Some(30_000))?;
+            self.at_ok(imei, "AT+COPS=0", Some(180_000))?;
+            // `AT+COPS=0` came back in 62ms on the bench: it starts the
+            // search, it does not wait for it. Asking once straight after
+            // returns a bare `+COPS: 0` — that is the mode, and says nothing
+            // about whether the modem got back on. So wait for an operator to
+            // appear, and refuse if none does: a green receipt on a button
+            // whose entire job is "get back on the network", beside a modem
+            // that is still off it, is the one outcome nobody would check.
+            let started = Instant::now();
+            let mut serving = Vec::new();
+            let mut registered = false;
+            while !registered && started.elapsed() < REREGISTER_WAIT {
+                if !serving.is_empty() {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                let answer = self.at_exchange(imei, "AT+COPS?", Some(30_000))?;
+                // The operator's name only shows up once there is one, so a
+                // response with no comma after the mode is "not yet".
+                registered = answer.lines.iter().any(|line| line.contains(','));
+                serving = answer.lines;
+            }
+            let waited_ms = started.elapsed().as_millis() as u64;
+            if !registered {
+                return Err(SendError::new(
+                    "not_registered",
+                    format!(
+                        "detached and re-attached, but no operator after {}s: {}",
+                        waited_ms / 1000,
+                        serving.join(" ")
+                    ),
+                ));
+            }
             json_details(&serde_json::json!({
                 "detach": match &detached {
                     Ok(result) => result.terminator.clone(),
                     Err(error) => error.to_string(),
                 },
-                "elapsed_ms": attached.elapsed_ms,
-                "serving": serving.lines,
+                "serving": serving,
+                "waited_ms": waited_ms,
             }))
         }
 
@@ -1067,6 +1094,14 @@ mod linux {
 
     /// How long the poll loop waits when nothing asks it to hurry.
     const POLL_INTERVAL: Duration = Duration::from_secs(8);
+
+    /// How long a re-registration waits for the network to take the modem back.
+    ///
+    /// Generous for LTE, which is usually back inside fifteen seconds, and
+    /// still short enough that the command answers rather than occupying the
+    /// executor. A modem that has not returned by then is reported as not
+    /// registered, which is what it is.
+    const REREGISTER_WAIT: Duration = Duration::from_secs(45);
 
     /// Sends what the listeners carried since the last report.
     ///
