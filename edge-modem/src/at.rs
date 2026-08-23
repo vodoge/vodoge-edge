@@ -301,6 +301,39 @@ pub fn at_port_for_qmi(qmi_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Every serial port that is a module's AT control port, sorted.
+///
+/// One per module, found the same way as `at_port_for_qmi` but without
+/// starting from a QMI port — because sometimes there is no QMI port to start
+/// from. A module in a usbnet mode other than rmnet exposes no `cdc-wdm` at
+/// all, and the agent indexes modules by exactly that, so switching one out
+/// of rmnet would otherwise put it beyond reach of the thing that switched
+/// it. The same gap swallows every command issued in the seconds after a
+/// restart, before the first poll has built the index.
+///
+/// Only the control interface is listed. The DM, NMEA and PPP interfaces
+/// belong to the same module and would answer to nothing useful, and the PPP
+/// one may be carrying a session that an `AT` written into it would corrupt.
+pub fn at_control_ports() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/tty") else {
+        return Vec::new();
+    };
+    let mut ports = Vec::new();
+    for entry in entries.flatten() {
+        let tty = entry.file_name();
+        let Some(tty) = tty.to_str() else { continue };
+        if !tty.starts_with("ttyUSB") {
+            continue;
+        }
+        let link = PathBuf::from(format!("/sys/class/tty/{tty}/device"));
+        if interface_of(&link).as_deref() == Some(AT_CONTROL_INTERFACE) {
+            ports.push(PathBuf::from(format!("/dev/{tty}")));
+        }
+    }
+    ports.sort();
+    ports
+}
+
 /// USB device identifier, e.g. `2-4.1`, from a sysfs device link.
 fn usb_device_of(link: &Path) -> Option<String> {
     let resolved = std::fs::canonicalize(link).ok()?;

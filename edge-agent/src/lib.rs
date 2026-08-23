@@ -128,10 +128,10 @@ pub trait SendPort {
 
     /// Choose which USB network function the module exposes.
     ///
-    /// `mode` is one of `rmnet`, `ecm`, `mbim` or `rndis`. The change is
-    /// written to the module's own configuration and does not apply until it
-    /// restarts, so an implementation reports what it wrote rather than
-    /// claiming the interface already changed.
+    /// `mode` is one of `rmnet`, `ecm`, `mbim` or `rndis`. Whether the module
+    /// applies it on the spot or at its next restart is the module's own
+    /// business — the EC20s on the bench re-enumerate immediately — so an
+    /// implementation reports what the module read back, not what it wrote.
     fn set_usbnet_mode(&mut self, _imei: &str, _mode: &str) -> Result<JsonValue, SendError> {
         Err(unsupported("set_usbnet_mode"))
     }

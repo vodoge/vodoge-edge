@@ -170,14 +170,18 @@ mod linux {
             work: impl FnOnce(&mut edge_modem::AtPort) -> Result<T, SendError>,
         ) -> Result<T, SendError> {
             let _lock = self.lock.lock().expect("radio");
-            let qmi_path = self.path_for(imei)?;
-            let _busy = self.hold(&qmi_path);
-            let at_path = edge_modem::at_port_for_qmi(&qmi_path).ok_or_else(|| {
-                SendError::new(
-                    "at_port_not_found",
-                    format!("no AT control port beside {}", qmi_path.display()),
-                )
-            })?;
+            let qmi_path = self.path_for(imei).ok();
+            let at_path = match qmi_path
+                .as_deref()
+                .and_then(edge_modem::at_port_for_qmi)
+            {
+                Some(path) => path,
+                None => at_port_by_imei(imei)?,
+            };
+            // Busy is keyed by the QMI port because that is what the panel's
+            // staleness check compares against. A module with no QMI port is
+            // not in that inventory to begin with, so its own port stands in.
+            let _busy = self.hold(qmi_path.as_deref().unwrap_or(&at_path));
             let mut port = edge_modem::AtPort::open(&at_path)
                 .map_err(|error| SendError::new("at_open_failed", error.to_string()))?;
             work(&mut port)
@@ -199,6 +203,44 @@ mod linux {
                 .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
             work(&mut client)
         }
+    }
+
+    /// Finds a module's AT port by asking each control port who it is.
+    ///
+    /// The index the agent normally uses is built from QMI ports, so it has
+    /// nothing to say about a module that has no QMI port — one switched out
+    /// of rmnet — or about any module at all in the seconds before the first
+    /// poll. Both cases used to answer "no matching QMI modem", which left
+    /// the undo for a console button sitting behind a shell on the machine.
+    ///
+    /// Slow, so it is the fallback and not the path: a handful of ports, each
+    /// opened and asked, with short timeouts. It runs under the radio lock,
+    /// so nothing else is talking to these ports while it does.
+    fn at_port_by_imei(imei: Option<&str>) -> Result<PathBuf, SendError> {
+        let ports = edge_modem::at_control_ports();
+        let Some(imei) = imei.filter(|value| !value.is_empty()) else {
+            // No IMEI to match, so the first port that answers is as good an
+            // answer as the QMI index would have given.
+            return ports
+                .into_iter()
+                .next()
+                .ok_or_else(|| SendError::new("modem_not_found", "no AT control port"));
+        };
+        for path in &ports {
+            let Ok(mut port) = edge_modem::AtPort::open_with_timeout(path, AT_PROBE_TIMEOUT) else {
+                continue;
+            };
+            let Ok(exchange) = port.command_with_timeout("AT+CGSN", AT_PROBE_TIMEOUT) else {
+                continue;
+            };
+            if exchange.lines.iter().any(|line| line.trim() == imei) {
+                return Ok(path.clone());
+            }
+        }
+        Err(SendError::new(
+            "modem_not_found",
+            format!("no QMI port and no AT port answered to imei {imei}"),
+        ))
     }
 
     /// Clears the busy marker when the command finishes, however it finishes.
@@ -461,27 +503,32 @@ mod linux {
                 }
             };
             self.at_ok(imei, &format!("AT+QCFG=\"usbnet\",{value}"), None)?;
-            // Read back rather than report the value that was sent: this is a
-            // setting nobody can verify by looking at the modem, and it only
-            // takes effect at the next restart, so a wrong write would go
-            // unnoticed until the modem came back as something else.
+            // Read back rather than report the value that was sent: nobody can
+            // verify this one by looking at the modem, and a wrong write would
+            // surface later as a module that came back wearing another face.
+            //
+            // Read back before the module has re-enumerated, which is why the
+            // AT port is still there to answer. The EC20s on the bench apply
+            // this on the spot rather than at the next restart — a write of 1
+            // at 03:57:33 took the USB device down in the same second — so
+            // there is no window to come back for a second look.
             let readback = self.at_exchange(imei, "AT+QCFG=\"usbnet\"", None)?;
             json_details(&serde_json::json!({
                 "mode": mode,
                 "value": value,
                 "reported": readback.lines,
-                "applies_after_restart": true,
-                // Every mode but rmnet takes away the QMI control port, which
-                // is the only way this agent reaches a modem. Saying so here
-                // is the difference between a planned change and a modem that
-                // quietly leaves the fleet after its next restart, recoverable
-                // only by someone standing next to it.
+                // Every mode but rmnet takes away the QMI control port, and
+                // that port is how the agent finds a module at all. It comes
+                // back through `at_port_by_imei`, which is why this is a
+                // warning and not a refusal — but the module does leave the
+                // inventory, and it leaves it now, not after a restart.
+                "reenumerates": true,
                 "warning": if value == 0 {
                     JsonValue::Null
                 } else {
                     JsonValue::from(
-                        "restarting the modem in this mode removes its QMI port; \
-                         the agent will lose it until the mode is set back to rmnet",
+                        "the modem re-enumerates immediately and loses its QMI port; \
+                         it drops out of the inventory until the mode is set back to rmnet",
                     )
                 },
             }))
@@ -1102,6 +1149,13 @@ mod linux {
     /// executor. A modem that has not returned by then is reported as not
     /// registered, which is what it is.
     const REREGISTER_WAIT: Duration = Duration::from_secs(45);
+
+    /// Per-port budget when hunting for a module by IMEI.
+    ///
+    /// A module answers `AT+CGSN` immediately; a port that is going to answer
+    /// at all answers well inside this. The budget is spent once per candidate
+    /// port, so it is short on purpose.
+    const AT_PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
     /// Sends what the listeners carried since the last report.
     ///
