@@ -313,6 +313,41 @@ mod linux {
             }
             Ok(result)
         }
+
+        /// Reads `AT+QCFG="usbnet"` back after the module has re-enumerated.
+        ///
+        /// The obvious read-back — ask on the port the write just went to —
+        /// cannot work on these EC20s. The write is applied on the spot and
+        /// takes the module's USB device down with it, so the read lands on a
+        /// handle with nothing behind it and sits there until it times out.
+        /// Both directions of a working round trip reported `at_failed` that
+        /// way, which is the worst shape a receipt can have: the change went
+        /// through, and the console said it had not.
+        ///
+        /// So wait for the module to come back rather than racing it. Every
+        /// attempt resolves the port again instead of reusing one, for two
+        /// reasons: the numbering moves across a re-enumeration — `ttyUSB10`
+        /// came back as `ttyUSB11` — and for every mode but rmnet there is no
+        /// QMI port left to resolve through, so `at_port_by_imei` is what
+        /// finds it. Failures in the first seconds are the module still
+        /// coming up, and are only reported if it never does.
+        fn usbnet_readback(&mut self, imei: &str) -> Result<AtResult, SendError> {
+            let started = Instant::now();
+            let mut last: Option<SendError> = None;
+            while started.elapsed() < USBNET_SETTLE {
+                std::thread::sleep(USBNET_RETRY);
+                match self.at_exchange(imei, "AT+QCFG=\"usbnet\"", Some(USBNET_READ_MS)) {
+                    Ok(result) => return Ok(result),
+                    Err(error) => last = Some(error),
+                }
+            }
+            Err(last.unwrap_or_else(|| {
+                SendError::new(
+                    "at_failed",
+                    "the module did not answer after the usbnet mode change",
+                )
+            }))
+        }
     }
 
     /// The proxy listeners, and the runtime they live on.
@@ -507,12 +542,12 @@ mod linux {
             // verify this one by looking at the modem, and a wrong write would
             // surface later as a module that came back wearing another face.
             //
-            // Read back before the module has re-enumerated, which is why the
-            // AT port is still there to answer. The EC20s on the bench apply
-            // this on the spot rather than at the next restart — a write of 1
-            // at 03:57:33 took the USB device down in the same second — so
-            // there is no window to come back for a second look.
-            let readback = self.at_exchange(imei, "AT+QCFG=\"usbnet\"", None)?;
+            // There is no window to read it back on the port that was written
+            // to. The EC20s on the bench apply this on the spot rather than at
+            // the next restart — a write of 1 at 03:57:33 took the USB device
+            // down in the same second — so the read-back has to wait for the
+            // module to re-enumerate and then find it again.
+            let readback = self.usbnet_readback(imei)?;
             json_details(&serde_json::json!({
                 "mode": mode,
                 "value": value,
@@ -1149,6 +1184,27 @@ mod linux {
     /// executor. A modem that has not returned by then is reported as not
     /// registered, which is what it is.
     const REREGISTER_WAIT: Duration = Duration::from_secs(45);
+
+    /// How long a module has to come back after a usbnet mode change.
+    ///
+    /// Re-enumeration on the bench completes in a few seconds; the rest is
+    /// margin for a host that is busy enumerating three of these at once.
+    /// Spending it is the exceptional path — the first attempt after the
+    /// module returns is the one that answers.
+    const USBNET_SETTLE: Duration = Duration::from_secs(30);
+
+    /// Gap between read-back attempts while the module is away.
+    ///
+    /// Long enough that a module mid-enumeration is not hammered with opens,
+    /// short enough that the receipt is not padded with waiting.
+    const USBNET_RETRY: Duration = Duration::from_secs(2);
+
+    /// Budget for a single usbnet read-back attempt.
+    ///
+    /// The default would spend ten seconds finding out what a port that is
+    /// still gone has to say, which is a third of the settle budget on one
+    /// answer already known.
+    const USBNET_READ_MS: i64 = 3_000;
 
     /// Per-port budget when hunting for a module by IMEI.
     ///
