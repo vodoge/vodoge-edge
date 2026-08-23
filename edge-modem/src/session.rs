@@ -454,6 +454,16 @@ impl SyncRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionError {
     Transport(String),
+    /// The character device stopped having a modem behind it.
+    ///
+    /// Separate from `Transport` because the caller has to act differently:
+    /// a transfer that failed can be retried, while a module that left the
+    /// bus after the request was written may already have carried it out.
+    /// `awaiting_response` is what says which of those two happened.
+    Disconnected {
+        device: String,
+        awaiting_response: bool,
+    },
     Wire(WireError),
     Correlation(CorrelationError),
     Allocation(AllocationError),
@@ -476,12 +486,41 @@ impl SessionError {
     pub fn transport(message: impl Into<String>) -> Self {
         Self::Transport(message.into())
     }
+
+    /// True when the module went away with a request already in its hands.
+    ///
+    /// The only caller that must branch on this is the one that sends SMS.
+    /// Everything else here is a read and can simply be tried again; a
+    /// submit cannot, because repeating it is how one message becomes two.
+    pub fn left_the_bus_after_the_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Disconnected {
+                awaiting_response: true,
+                ..
+            }
+        )
+    }
 }
 
 impl fmt::Display for SessionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(message) => write!(formatter, "QMI transport error: {message}"),
+            Self::Disconnected {
+                device,
+                awaiting_response,
+            } => {
+                if *awaiting_response {
+                    write!(
+                        formatter,
+                        "{device} left the bus while the modem was answering; \
+                         the request had already been handed over"
+                    )
+                } else {
+                    write!(formatter, "{device} left the bus before the request was written")
+                }
+            }
             Self::Wire(error) => error.fmt(formatter),
             Self::Correlation(error) => error.fmt(formatter),
             Self::Allocation(error) => error.fmt(formatter),

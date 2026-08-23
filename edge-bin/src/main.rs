@@ -202,8 +202,72 @@ mod linux {
             client
                 .sync()
                 .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
+            // Who actually answered on that node.
+            //
+            // `path_for` returns a remembered `/dev/cdc-wdm*`, and on this
+            // bench those names are recycled: the modules arrive over USB/IP,
+            // one of them re-enumerates several times an hour, and the index
+            // it comes back on is whichever is free. Between two polls the
+            // node a command was aimed at can belong to a different SIM, and
+            // the command with the worst consequence for getting that wrong
+            // is the one that sends a message from it. Costs one DMS read on
+            // operator-initiated commands only -- the poll loop opens its own
+            // client and does not come through here.
+            if let Some(expected) = imei.map(str::trim).filter(|value| !value.is_empty()) {
+                let answered = client
+                    .get_serial_numbers()
+                    .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?
+                    .imei;
+                match answered.as_deref() {
+                    Some(actual) if actual == expected => {}
+                    Some(actual) => {
+                        return Err(SendError::new(
+                            "modem_moved",
+                            format!(
+                                "{} is imei {actual} right now, not the imei {expected} this \
+                                 command names; refusing to run it on the wrong module",
+                                path.display()
+                            ),
+                        ))
+                    }
+                    None => {
+                        return Err(SendError::new(
+                            "modem_moved",
+                            format!(
+                                "{} would not say which module it is, so it cannot be \
+                                 confirmed as imei {expected}",
+                                path.display()
+                            ),
+                        ))
+                    }
+                }
+            }
             work(&mut client)
         }
+    }
+
+    /// Turns a failed WMS submit into something an operator can act on.
+    ///
+    /// `send_failed` is the right word for a module that refused the message.
+    /// It is the wrong word for a module that took the message and then left
+    /// the bus, which is what IMEI 867018069509705 does on this bench: it
+    /// stalls its QMI interrupt endpoint on every MO submit, the USB/IP
+    /// session is torn down, and the answer never comes back. The submit
+    /// itself is not undone by that -- the SIM's own MO reference counter in
+    /// `EF_SMSS` advanced by 34 over a day of sends the console recorded as
+    /// failures, and 10086 kept replying to them. Told "failed", an operator
+    /// resends and the recipient gets it twice.
+    fn describe_send_failure(error: &edge_modem::SessionError) -> SendError {
+        if error.left_the_bus_after_the_request() {
+            return SendError::new(
+                "modem_left_bus_after_submit",
+                format!(
+                    "{error}. The message was already handed to the module, so it may have \
+                     been transmitted; check for a delivery receipt before sending it again."
+                ),
+            );
+        }
+        SendError::new("send_failed", error.to_string())
     }
 
     /// Finds a module's AT port by asking each control port who it is.
@@ -641,9 +705,14 @@ mod linux {
             let assigned = self
                 .radio
                 .with_client(send.modem_imei.as_deref(), |client| {
-                    client
-                        .send_sms(0x06, &pdu)
-                        .map_err(|error| SendError::new("send_failed", error.to_string()))
+                    client.send_sms(0x06, &pdu).map_err(|error| {
+                        let described = describe_send_failure(&error);
+                        log_error(format!(
+                            "sms to {} failed: {} {}",
+                            send.to, described.reason_code, described.message
+                        ));
+                        described
+                    })
                 })?;
             // The modem answers with the reference it actually used. It is
             // normally the one in the PDU -- RAW_SEND transmits the bytes as
@@ -3232,6 +3301,60 @@ mod linux {
             .expect("aimed");
             assert_eq!(aim.device, "4-2");
             assert_eq!(aim.evidence, "remembered");
+        }
+    }
+
+    /// Reporting a send that the module took and then died on.
+    ///
+    /// Written from the bench failure of 2026-08-23: every `send_sms` on IMEI
+    /// 867018069509705 came back `send_failed: QMI transport error: cdc-wdm
+    /// poll revents 0x18`, twenty-three times in eight hours, while the
+    /// messages themselves were reaching 10086 and being answered.
+    #[cfg(test)]
+    mod send_failure_tests {
+        use super::*;
+
+        /// The exact failure the console recorded all day, and the two things
+        /// its old wording got wrong: it said "failed" for a message that had
+        /// already been handed over, and it said it in `revents` hex.
+        #[test]
+        fn a_module_that_left_the_bus_mid_send_is_not_reported_as_a_refusal() {
+            let error = edge_modem::SessionError::Disconnected {
+                device: "/dev/cdc-wdm2".into(),
+                awaiting_response: true,
+            };
+            let described = describe_send_failure(&error);
+            assert_eq!(described.reason_code, "modem_left_bus_after_submit");
+            assert!(
+                described.message.contains("may have been transmitted"),
+                "an operator deciding whether to resend has to be told: {}",
+                described.message
+            );
+            assert!(
+                !described.message.contains("revents"),
+                "the hex mask is not the finding: {}",
+                described.message
+            );
+        }
+
+        /// A module that was already gone before the write is a different
+        /// story: nothing was submitted, and resending is the right move.
+        #[test]
+        fn a_module_that_was_gone_before_the_write_is_an_ordinary_failure() {
+            let error = edge_modem::SessionError::Disconnected {
+                device: "/dev/cdc-wdm2".into(),
+                awaiting_response: false,
+            };
+            assert_eq!(describe_send_failure(&error).reason_code, "send_failed");
+        }
+
+        /// Everything the module itself answered stays exactly as it was.
+        #[test]
+        fn a_refusal_from_the_module_keeps_its_own_words() {
+            let error = edge_modem::SessionError::transport("timed out waiting for QMI response");
+            let described = describe_send_failure(&error);
+            assert_eq!(described.reason_code, "send_failed");
+            assert!(described.message.contains("timed out"));
         }
     }
 }
