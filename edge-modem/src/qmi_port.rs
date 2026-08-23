@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use edge_core::{Bearer, Plmn, RegistrationEvidence};
 
 use crate::{
@@ -48,18 +50,48 @@ impl<T: QmiTransport> ModemPort for QmiClient<T> {
     }
 
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError> {
-        // Both stores. The modem chooses where a received message lands, and
-        // these EC20s use their own memory: reading only the SIM showed an
-        // empty inbox while five messages sat on the device.
+        // Every stored message: both stores, read and unread alike.
         //
-        // A store that cannot be listed is skipped rather than failing the
-        // pass — some modems have no SIM store at all, and refusing to read
-        // any message because one store is absent is the wrong trade.
+        // Both stores because the modem chooses where a received message
+        // lands, and these EC20s use their own memory: reading only the SIM
+        // showed an empty inbox while five messages sat on the device.
+        //
+        // Both tags because the EC20 *honours* the list-tag argument. This
+        // asked for `MtUnread` alone, on the strength of a comment saying the
+        // tag was ignored. The bench disproved that comment on 2026-08-23:
+        // one `AT+CMGR` turned a stored message into `REC READ`, and from
+        // that moment five consecutive collection passes returned nothing
+        // while `AT+CPMS?` still counted it in the store. Anything that marks
+        // a message read — the console's own AT terminal, a diagnostic, our
+        // own troubleshooting — therefore made that message invisible for
+        // good and pinned its storage slot for good.
+        //
+        // The read flag belongs to the modem and can be flipped by anyone
+        // holding a serial port, so no part of our bookkeeping may rest on
+        // it. What has already been stored is answered by our own ledger of
+        // ingested fragments, not by the modem's idea of what has been read.
+        //
+        // A store or tag that cannot be listed is skipped rather than failing
+        // the pass — some modems have no SIM store at all, and refusing to
+        // read any message because one query is unsupported is the wrong
+        // trade.
+        //
+        // A modem that genuinely does ignore the tag answers both queries
+        // with the same rows, so entries are deduplicated on (store, index):
+        // reading one message twice in a pass would store it twice.
         let mut listed = Vec::new();
+        let mut seen = BTreeSet::new();
         for storage in [StorageType::Uim, StorageType::Nv] {
-            match QmiClient::list_sms(self, storage, MessageTag::MtUnread, MessageMode::Gw) {
-                Ok(mut found) => listed.append(&mut found),
-                Err(_) => continue,
+            for tag in [MessageTag::MtUnread, MessageTag::MtRead] {
+                let found = match QmiClient::list_sms(self, storage, tag, MessageMode::Gw) {
+                    Ok(found) => found,
+                    Err(_) => continue,
+                };
+                for message in found {
+                    if seen.insert((message.storage, message.index)) {
+                        listed.push(message);
+                    }
+                }
             }
         }
         Ok(listed)

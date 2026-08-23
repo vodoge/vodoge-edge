@@ -55,7 +55,10 @@ pub use cdc_wdm::CdcWdmDevice;
 pub use channels::LogicalChannels;
 pub use discovery::{discover, DeviceEnumerator, DiscoveredModem, FakeEnumerator};
 pub use fake::FakeModem;
-pub use inbox::{collect_inbound, delete_inbound, CollectedMessage, InboxPass};
+pub use inbox::{
+    collect_inbound, delete_inbound, fragment_fingerprint, seen_before, CollectedMessage,
+    InboxPass,
+};
 pub use port::{ModemPort, PortError, TransportKind, UnsupportedPort};
 pub use restore::with_restore;
 pub use pdu::{encode_submit, PduError};

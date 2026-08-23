@@ -177,3 +177,157 @@ fn response_frame(
     frame.extend_from_slice(payload);
     frame
 }
+
+/// A modem that answers the list-tag argument the way the bench EC20s
+/// actually do.
+///
+/// The collector used to ask for `MtUnread` alone, on the strength of a
+/// comment claiming the tag was ignored. On 2026-08-23 one `AT+CMGR` flipped a
+/// stored message to `REC READ` and the next five collection passes returned
+/// nothing, while `AT+CPMS?` still counted it in the store: the message was
+/// unreachable for good and its slot was held for good.
+struct TaggedStore {
+    wms_client: u8,
+    rows: Vec<(StorageType, u32, MessageTag)>,
+    /// False for a modem that really does ignore the tag and answers every
+    /// query with its whole store.
+    honours_tag: bool,
+    asked: std::rc::Rc<std::cell::RefCell<Vec<(u8, u8)>>>,
+}
+
+impl QmiTransport for TaggedStore {
+    fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let service = request[4];
+        let client = request[5];
+        let (transaction, message) = decode_header(request);
+        let payload = match (service, message) {
+            (0x00, 0x0027) => success_result_tlv(),
+            (0x00, 0x0022) => allocation_payload(ServiceId::WMS.as_u8(), self.wms_client),
+            (0x05, 0x0031) => {
+                let storage = request_tlv(request, 0x01).expect("storage tlv")[0];
+                let tag = request_tlv(request, 0x11).expect("tag tlv")[0];
+                self.asked.borrow_mut().push((storage, tag));
+                let honours = self.honours_tag;
+                let rows: Vec<(u32, MessageTag)> = self
+                    .rows
+                    .iter()
+                    .filter(|(row_storage, _, row_tag)| {
+                        row_storage.as_u8() == storage && (!honours || row_tag.as_u8() == tag)
+                    })
+                    .map(|(_, index, row_tag)| (*index, *row_tag))
+                    .collect();
+                list_payload(&rows)
+            }
+            (0x05, 0x0022) => raw_read_payload(),
+            (0x05, 0x0024) => success_result_tlv(),
+            _ => {
+                return Err(SessionError::transport(format!(
+                    "unexpected service=0x{service:02x} message=0x{message:04x} client=0x{client:02x}"
+                )))
+            }
+        };
+        Ok(response_frame(service, client, transaction, message, &payload))
+    }
+}
+
+fn bench_store(honours_tag: bool) -> (QmiClient<TaggedStore>, std::rc::Rc<std::cell::RefCell<Vec<(u8, u8)>>>) {
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut client = QmiClient::new(TaggedStore {
+        wms_client: 0x06,
+        rows: vec![
+            // The message somebody's AT+CMGR turned into REC READ.
+            (StorageType::Nv, 1, MessageTag::MtRead),
+            (StorageType::Nv, 2, MessageTag::MtUnread),
+        ],
+        honours_tag,
+        asked: std::rc::Rc::clone(&asked),
+    });
+    client.sync().expect("sync");
+    (client, asked)
+}
+
+/// The defect this file exists to keep out: a message that was marked read is
+/// still a message the operator never saw, and it is still occupying a slot in
+/// a store that holds fifty.
+#[test]
+fn a_message_someone_marked_read_is_still_collected() {
+    let (mut client, _) = bench_store(true);
+    let listed = edge_modem::ModemPort::list_sms(&mut client).expect("list");
+    let indexes: Vec<u32> = listed.iter().map(|message| message.index).collect();
+    assert!(
+        indexes.contains(&1),
+        "a read message must still be listed, got {listed:?}"
+    );
+    assert!(indexes.contains(&2), "got {listed:?}");
+}
+
+/// Both stores are still asked, and both tags are asked of each: a store the
+/// modem cannot list must not stop the other from being read.
+#[test]
+fn every_store_is_asked_for_read_and_unread() {
+    let (mut client, asked) = bench_store(true);
+    edge_modem::ModemPort::list_sms(&mut client).expect("list");
+    let asked = asked.borrow().clone();
+    for storage in [StorageType::Uim, StorageType::Nv] {
+        for tag in [MessageTag::MtRead, MessageTag::MtUnread] {
+            assert!(
+                asked.contains(&(storage.as_u8(), tag.as_u8())),
+                "{storage:?}/{tag:?} was never asked for: {asked:?}"
+            );
+        }
+    }
+}
+
+/// A modem that genuinely ignores the tag answers both queries with the same
+/// rows. Listing each of them would read and store one message twice.
+#[test]
+fn a_modem_that_ignores_the_tag_does_not_yield_duplicates() {
+    let (mut client, _) = bench_store(false);
+    let listed = edge_modem::ModemPort::list_sms(&mut client).expect("list");
+    let mut seen: Vec<(StorageType, u32)> = listed
+        .iter()
+        .map(|message| (message.storage, message.index))
+        .collect();
+    let before = seen.len();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(before, seen.len(), "one row listed twice: {listed:?}");
+    assert_eq!(seen.len(), 2, "got {listed:?}");
+}
+
+/// TLV value of one type out of a request frame.
+fn request_tlv(request: &[u8], wanted: u8) -> Option<Vec<u8>> {
+    let mut offset = 13;
+    while offset + 3 <= request.len() {
+        let kind = request[offset];
+        let length = u16::from_le_bytes([request[offset + 1], request[offset + 2]]) as usize;
+        let start = offset + 3;
+        if start + length > request.len() {
+            return None;
+        }
+        if kind == wanted {
+            return Some(request[start..start + length].to_vec());
+        }
+        offset = start + length;
+    }
+    None
+}
+
+/// A `LIST_MESSAGES` response holding the given rows. An empty store answers
+/// without the list TLV at all, which is what these modules do.
+fn list_payload(rows: &[(u32, MessageTag)]) -> Vec<u8> {
+    let mut payload = success_result_tlv();
+    if rows.is_empty() {
+        return payload;
+    }
+    let mut list = Vec::new();
+    list.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+    for (index, tag) in rows {
+        list.extend_from_slice(&index.to_le_bytes());
+        list.push(tag.as_u8());
+    }
+    payload.push(0x01);
+    payload.extend_from_slice(&(list.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&list);
+    payload
+}

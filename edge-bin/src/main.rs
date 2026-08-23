@@ -63,6 +63,29 @@ mod linux {
     /// rather than hold the radio.
     const USSD_TIMEOUT: Duration = Duration::from_secs(45);
 
+    /// How many stored-message fingerprints are kept per module.
+    ///
+    /// The ledger has to outlive every message that could still be sitting on
+    /// a modem, because forgetting one lets it be stored a second time. A
+    /// modem store holds a few hundred entries at most and a fragment leaves
+    /// it the first time a delete succeeds, so this is not a trade between
+    /// safety and size -- it is more than an order of magnitude past the point
+    /// where a dropped entry could ever be met again, and still a table small
+    /// enough to keep forever.
+    const SMS_LEDGER_KEEP: usize = 5_000;
+
+    /// One message read off a modem in this pass, with the identity our own
+    /// books know it by.
+    ///
+    /// `slot` is its position in the pass, kept because the row that gets
+    /// deleted afterwards has to be the row it was actually read from.
+    struct InboundFragment {
+        slot: usize,
+        encoding: &'static str,
+        fingerprint: String,
+        part: ConcatPart,
+    }
+
     struct SharedStore(Mutex<Store>);
 
     impl Inbox for SharedStore {
@@ -2228,14 +2251,18 @@ mod linux {
         // Fragments are joined before anything else sees them. A long message
         // arrives as several PDUs, and storing each one separately gives the
         // operator three truncated messages where the sender wrote one.
-        let mut parts = Vec::with_capacity(pass.inbound.len());
-        // Every fragment of one message shares its data coding scheme, so the
-        // alphabet is recorded per fragment and read back off the fragment the
-        // assembled message names. Looking it up by sender, as this did, gave
-        // whichever alphabet that sender's *first* message of the pass used --
-        // and this bench routinely holds several from 10086 in one pass.
-        let mut encodings: Vec<&'static str> = Vec::with_capacity(pass.inbound.len());
-        for message in &pass.inbound {
+        //
+        // Every message the modem holds is decoded first, read and unread
+        // alike, and only then are our own books asked which of them have
+        // already been stored. The modem's read flag is consulted nowhere:
+        // anything that reads a message flips it -- the console's AT terminal,
+        // a diagnostic, our own troubleshooting -- and the collector used to
+        // ask the modem for unread messages only, so a single `AT+CMGR` made a
+        // message invisible to every later pass while it went on occupying a
+        // storage slot. Read state is the modem's; what we have stored is
+        // ours.
+        let mut fragments: Vec<InboundFragment> = Vec::with_capacity(pass.inbound.len());
+        for (slot, message) in pass.inbound.iter().enumerate() {
             let decoded = edge_core::decode_deliver(&message.raw.pdu);
             // The coding scheme, and what was made of it.
             //
@@ -2258,16 +2285,93 @@ mod linux {
                 decoded.concat.is_some()
             ));
             let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
-            encodings.push(decoded.encoding);
-            parts.push(ConcatPart {
-                sender: decoded.peer,
+            let fingerprint = edge_modem::fragment_fingerprint(
+                &decoded.peer,
+                decoded.received_at,
                 ref_id,
                 total,
                 seq,
-                body: decoded.body,
-                received_at: decoded.received_at,
+                &decoded.body,
+            );
+            fragments.push(InboundFragment {
+                slot,
+                encoding: decoded.encoding,
+                fingerprint,
+                part: ConcatPart {
+                    sender: decoded.peer,
+                    ref_id,
+                    total,
+                    seq,
+                    body: decoded.body,
+                    received_at: decoded.received_at,
+                },
             });
         }
+
+        // What this module has had stored before, for exactly the fragments in
+        // front of us. Asked per fingerprint rather than by loading the ledger
+        // because a pass holds tens of rows and the ledger holds thousands.
+        let ingested = {
+            let store = shared.0.lock().expect("store");
+            let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+            for fragment in &fragments {
+                if counts.contains_key(&fragment.fingerprint) {
+                    continue;
+                }
+                let copies = store
+                    .ingested_sms_copies(&imei, &fragment.fingerprint)
+                    .map_err(|e| e.to_string())?;
+                if copies > 0 {
+                    counts.insert(fragment.fingerprint.clone(), copies);
+                }
+            }
+            counts.into_iter().collect::<std::collections::HashMap<_, _>>()
+        };
+        let seen = edge_modem::seen_before(
+            &fragments
+                .iter()
+                .map(|fragment| fragment.fingerprint.clone())
+                .collect::<Vec<_>>(),
+            &ingested,
+        );
+
+        let mut parts = Vec::with_capacity(fragments.len());
+        // Every fragment of one message shares its data coding scheme, so the
+        // alphabet is recorded per fragment and read back off the fragment the
+        // assembled message names. Looking it up by sender, as this did, gave
+        // whichever alphabet that sender's *first* message of the pass used --
+        // and this bench routinely holds several from 10086 in one pass.
+        let mut encodings: Vec<&'static str> = Vec::with_capacity(fragments.len());
+        let mut fingerprints: Vec<String> = Vec::with_capacity(fragments.len());
+        // Where each fragment handed to `assemble` sits in the pass, so the
+        // delete afterwards names the storage row it actually came from.
+        let mut slots: Vec<usize> = Vec::with_capacity(fragments.len());
+        let mut settled: Vec<edge_modem::CollectedMessage> = Vec::new();
+        for (fragment, stored_before) in fragments.into_iter().zip(seen) {
+            if stored_before {
+                if let Some(row) = pass.inbound.get(fragment.slot) {
+                    settled.push(row.clone());
+                }
+                continue;
+            }
+            encodings.push(fragment.encoding);
+            fingerprints.push(fragment.fingerprint);
+            slots.push(fragment.slot);
+            parts.push(fragment.part);
+        }
+
+        // Rows our books already account for. A previous pass stored them and
+        // the delete that should have followed did not take -- or somebody
+        // read them out from under us. Storing them again would show the
+        // operator the same message twice, so the slot is cleared instead.
+        if !settled.is_empty() {
+            log_line(format!(
+                "{} sms already stored, clearing the modem's copy",
+                settled.len()
+            ));
+            let _ = delete_inbound(&mut client, &settled);
+        }
+
         let (assembled, pending) = assemble(&parts, now, edge_core::FRAGMENT_GRACE_MS);
 
         // A fragment whose siblings have not arrived stays on the modem, so
@@ -2319,20 +2423,43 @@ mod linux {
             enqueue_sms(outbox, &imei, &message.sender, &message.body, encoding, now)?;
         }
 
-        // Delete exactly the rows that were just stored, and only after the
-        // loop above returned without an error -- a delete that runs before
-        // the message is in the database loses it for good, and there is no
-        // second copy anywhere.
+        // Write down what was stored, then delete exactly those rows, and both
+        // only after the loop above returned without an error -- a delete that
+        // runs before the message is in the database loses it for good, and
+        // there is no second copy anywhere.
+        //
+        // The ledger entry goes in before the delete, not after, and for the
+        // same reason the delete goes last: the delete is the step that can
+        // fail. A pass that stored a message and then failed to clear it will
+        // meet that message again, and the entry written here is what stops it
+        // from being stored twice.
         //
         // Named by position rather than re-derived from the PDU: two
         // deliveries can share a sender and a reference, so a filter on that
         // pair would sweep away a fragment that is still waiting for its
         // siblings along with the message that is done.
-        let stored: Vec<_> = assembled
+        let sources: Vec<usize> = assembled
             .iter()
             .flat_map(|message| message.sources.iter().copied())
+            .collect();
+        let stored_fingerprints: Vec<String> = sources
+            .iter()
+            .filter_map(|part| fingerprints.get(*part).cloned())
+            .collect();
+        let stored: Vec<_> = sources
+            .iter()
+            .filter_map(|part| slots.get(*part).copied())
             .filter_map(|slot| pass.inbound.get(slot).cloned())
             .collect();
+        if !stored_fingerprints.is_empty() {
+            let store = shared.0.lock().expect("store");
+            store
+                .record_ingested_sms(&imei, &stored_fingerprints, now)
+                .map_err(|e| e.to_string())?;
+            store
+                .prune_ingested_sms(&imei, SMS_LEDGER_KEEP)
+                .map_err(|e| e.to_string())?;
+        }
         if !stored.is_empty() {
             let _ = delete_inbound(&mut client, &stored);
         }

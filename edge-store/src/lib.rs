@@ -7,7 +7,7 @@ use std::{error::Error, fmt, path::Path};
 
 mod outbox;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub use outbox::{CapacityAlert, DurableOutbox, QueueError, DEFAULT_MAX_RECORDS};
 
@@ -32,6 +32,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS modem_usb_sites_device
     ON modem_usb_sites (usb_device);
 ";
 
+/// Which received fragments have already been stored, by our own reckoning.
+///
+/// The modem's read flag used to be the answer to that question by omission:
+/// the collector asked only for unread messages, so anything already read was
+/// treated as dealt with. It is not our flag. One `AT+CMGR` — from the
+/// console's AT terminal, from a diagnostic, from our own troubleshooting —
+/// flips it, and on 2026-08-23 that made a stored message invisible to five
+/// consecutive collection passes while `AT+CPMS?` still counted it in the
+/// store: lost to the operator for good, and holding a storage slot for good.
+///
+/// So the collector now reads everything the modem holds and this table, which
+/// nothing outside this process can touch, decides what is new. `copies`
+/// rather than a bare row because the service centre does deliver the same
+/// message twice, and both deliveries are real messages.
+const INGESTED_SMS: &str = "\
+CREATE TABLE IF NOT EXISTS ingested_sms (
+    imei        TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    copies      INTEGER NOT NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    PRIMARY KEY (imei, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS ingested_sms_age
+    ON ingested_sms (imei, last_seen);
+";
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
@@ -39,6 +66,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_modem_network.sql"),
     include_str!("../migrations/0005_modem_home.sql"),
     MODEM_USB_SITES,
+    INGESTED_SMS,
 ];
 
 /// An opened edge database with migrations applied.
@@ -90,6 +118,7 @@ impl Store {
             });
         }
         if target < current {
+            self.conn.execute_batch("DROP TABLE IF EXISTS ingested_sms;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS modem_usb_sites;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_messages;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_modems;")?;
@@ -225,6 +254,84 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// How many copies of one received fragment this module has already had
+    /// stored. Zero for anything never seen.
+    pub fn ingested_sms_copies(&self, imei: &str, fingerprint: &str) -> Result<u32, StoreError> {
+        let copies: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT copies FROM ingested_sms WHERE imei = ?1 AND fingerprint = ?2",
+                params![imei, fingerprint],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(copies.unwrap_or(0).max(0) as u32)
+    }
+
+    /// Write down fragments that have just been stored.
+    ///
+    /// Called *after* the message is in the local inbox and in the durable
+    /// outbox, and *before* the modem's copy is deleted — the same order the
+    /// delete itself has to follow, and for the same reason. A ledger entry
+    /// written early would suppress a message that never actually landed
+    /// anywhere.
+    ///
+    /// One transaction so a pass is recorded whole: half a multipart message
+    /// on the books would leave the other half to be stored a second time.
+    pub fn record_ingested_sms(
+        &self,
+        imei: &str,
+        fingerprints: &[String],
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        for fingerprint in fingerprints {
+            transaction.execute(
+                "INSERT INTO ingested_sms (imei, fingerprint, copies, first_seen, last_seen)
+                 VALUES (?1, ?2, 1, ?3, ?3)
+                 ON CONFLICT(imei, fingerprint) DO UPDATE SET
+                    copies = ingested_sms.copies + 1,
+                    last_seen = excluded.last_seen",
+                params![imei, fingerprint, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keep the newest `keep` fingerprints for one module and drop the rest.
+    ///
+    /// The ledger must outlive every message that could still be sitting on a
+    /// modem, or pruning would let an old message be stored a second time. A
+    /// modem store holds fifty entries and a fragment leaves it as soon as one
+    /// delete succeeds, so a cap of thousands is not a compromise between
+    /// safety and size — it is orders of magnitude past the point where a
+    /// dropped entry could ever be met again.
+    pub fn prune_ingested_sms(&self, imei: &str, keep: usize) -> Result<usize, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM ingested_sms
+              WHERE imei = ?1
+                AND rowid NOT IN (
+                    SELECT rowid FROM ingested_sms
+                     WHERE imei = ?1
+                     ORDER BY last_seen DESC, rowid DESC
+                     LIMIT ?2)",
+            params![imei, keep as i64],
+        )?;
+        Ok(removed)
+    }
+
+    /// How many fingerprints are on the books for one module. For the panel
+    /// and for tests; the collector never needs the whole set.
+    pub fn ingested_sms_len(&self, imei: &str) -> Result<usize, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM ingested_sms WHERE imei = ?1",
+            params![imei],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
     }
 
     pub fn list_local_messages(&self) -> Result<Vec<LocalMessage>, StoreError> {
@@ -566,5 +673,93 @@ mod usb_site_tests {
             .remember_modem_usb_site(&site("867018069509705", "4-3", 100))
             .expect("remember after rebuild");
         assert!(store.modem_usb_site("867018069509705").expect("read").is_some());
+    }
+}
+
+#[cfg(test)]
+mod ingested_sms_tests {
+    use super::*;
+
+    const IMEI: &str = "867018069509705";
+
+    #[test]
+    fn a_fragment_nobody_stored_is_not_on_the_books() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(store.ingested_sms_copies(IMEI, "v1|10086|1|0000|1|1|a").expect("read"), 0);
+    }
+
+    /// The point of the table: what we stored is remembered across restarts,
+    /// so a message the modem now calls "read" is still recognised as ours
+    /// rather than as something new.
+    #[test]
+    fn a_recorded_fragment_outlives_the_process() {
+        let store = Store::open_in_memory().expect("open");
+        let fingerprint = "v1|10086|1756058516000|00c3|4|1|deadbeefdeadbeef".to_string();
+        store
+            .record_ingested_sms(IMEI, std::slice::from_ref(&fingerprint), 100)
+            .expect("record");
+        assert_eq!(store.ingested_sms_copies(IMEI, &fingerprint).expect("read"), 1);
+    }
+
+    /// Two deliveries of one message are two messages, and the count is what
+    /// keeps the second one from being mistaken for an echo of the first.
+    #[test]
+    fn a_second_copy_is_counted_not_collapsed() {
+        let store = Store::open_in_memory().expect("open");
+        let fingerprint = "v1|10086|1756058516000|00c3|4|1|deadbeefdeadbeef".to_string();
+        store.record_ingested_sms(IMEI, &[fingerprint.clone()], 100).expect("first");
+        store.record_ingested_sms(IMEI, &[fingerprint.clone()], 200).expect("second");
+        assert_eq!(store.ingested_sms_copies(IMEI, &fingerprint).expect("read"), 2);
+    }
+
+    /// Books are per module. The same 10086 text arriving on two cards is two
+    /// messages, and one card's ledger must not silence the other's.
+    #[test]
+    fn one_modules_books_do_not_answer_for_another() {
+        let store = Store::open_in_memory().expect("open");
+        let fingerprint = "v1|10086|1756058516000|0000|1|1|deadbeefdeadbeef".to_string();
+        store.record_ingested_sms(IMEI, &[fingerprint.clone()], 100).expect("record");
+        assert_eq!(
+            store.ingested_sms_copies("867018069514820", &fingerprint).expect("read"),
+            0
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_and_leaves_other_modules_alone() {
+        let store = Store::open_in_memory().expect("open");
+        for index in 0..10 {
+            store
+                .record_ingested_sms(IMEI, &[format!("v1|10086|{index}|0000|1|1|00")], index)
+                .expect("record");
+        }
+        store
+            .record_ingested_sms("867018069514820", &["v1|10086|0|0000|1|1|00".into()], 0)
+            .expect("other module");
+
+        assert_eq!(store.prune_ingested_sms(IMEI, 4).expect("prune"), 6);
+        assert_eq!(store.ingested_sms_len(IMEI).expect("count"), 4);
+        assert_eq!(
+            store.ingested_sms_copies(IMEI, "v1|10086|9|0000|1|1|00").expect("newest"),
+            1,
+            "the newest entry is the one that must survive"
+        );
+        assert_eq!(
+            store.ingested_sms_copies(IMEI, "v1|10086|0|0000|1|1|00").expect("oldest"),
+            0
+        );
+        assert_eq!(store.ingested_sms_len("867018069514820").expect("count"), 1);
+    }
+
+    #[test]
+    fn the_books_survive_a_rollback_and_replay() {
+        let mut store = Store::open_in_memory().expect("open");
+        store.rollback_to(0).expect("rollback");
+        store.migrate().expect("re-upgrade");
+        let fingerprint = "v1|10086|1|0000|1|1|00".to_string();
+        store
+            .record_ingested_sms(IMEI, &[fingerprint.clone()], 1)
+            .expect("record after rebuild");
+        assert_eq!(store.ingested_sms_copies(IMEI, &fingerprint).expect("read"), 1);
     }
 }
