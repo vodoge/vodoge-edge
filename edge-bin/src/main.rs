@@ -2230,10 +2230,11 @@ mod linux {
         // operator three truncated messages where the sender wrote one.
         let mut parts = Vec::with_capacity(pass.inbound.len());
         // Every fragment of one message shares its data coding scheme, so the
-        // alphabet is recorded per group rather than threaded through
-        // reassembly, which has no business knowing about encodings.
-        let mut encodings: std::collections::BTreeMap<(String, u16), &'static str> =
-            std::collections::BTreeMap::new();
+        // alphabet is recorded per fragment and read back off the fragment the
+        // assembled message names. Looking it up by sender, as this did, gave
+        // whichever alphabet that sender's *first* message of the pass used --
+        // and this bench routinely holds several from 10086 in one pass.
+        let mut encodings: Vec<&'static str> = Vec::with_capacity(pass.inbound.len());
         for message in &pass.inbound {
             let decoded = edge_core::decode_deliver(&message.raw.pdu);
             // The coding scheme, and what was made of it.
@@ -2257,25 +2258,22 @@ mod linux {
                 decoded.concat.is_some()
             ));
             let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
-            encodings.insert((decoded.peer.clone(), ref_id), decoded.encoding);
+            encodings.push(decoded.encoding);
             parts.push(ConcatPart {
                 sender: decoded.peer,
                 ref_id,
                 total,
                 seq,
                 body: decoded.body,
+                received_at: decoded.received_at,
             });
         }
-        let (assembled, pending) = assemble(&parts);
+        let (assembled, pending) = assemble(&parts, now, edge_core::FRAGMENT_GRACE_MS);
 
         // A fragment whose siblings have not arrived stays on the modem, so
         // the next pass can complete it. Deleting it would lose half a message
         // permanently, which is worse than reading it twice.
-        let incomplete: std::collections::BTreeSet<(String, u16)> = pending
-            .iter()
-            .map(|part| (part.sender.clone(), part.ref_id))
-            .collect();
-        if !incomplete.is_empty() {
+        if !pending.is_empty() {
             log_line(format!(
                 "{} sms fragment(s) awaiting the rest, left on the modem",
                 pending.len()
@@ -2283,14 +2281,25 @@ mod linux {
         }
 
         for (index, message) in assembled.iter().enumerate() {
-            // assemble() drops the reference id, so the encoding is looked up
-            // by sender: a single pass never holds two messages from the same
-            // sender in different alphabets, and `unknown` is the honest answer
-            // if it somehow did.
-            let encoding = encodings
-                .iter()
-                .find(|((sender, _), _)| sender == &message.sender)
-                .map(|(_, value)| *value)
+            if !message.missing.is_empty() {
+                // Loud, because this is the one path that stores something the
+                // sender did not write. It happens only after the grace period
+                // and only for fragments the network never delivered.
+                log_error(format!(
+                    "sms from={} released after {} h with part(s) {:?} of {} never delivered",
+                    message.sender,
+                    edge_core::FRAGMENT_GRACE_MS / 3_600_000,
+                    message.missing,
+                    message.parts
+                ));
+            }
+            // The alphabet of the fragment this message was built from. Every
+            // fragment of one message shares its coding scheme, so the first
+            // source answers for all of them.
+            let encoding = message
+                .sources
+                .first()
+                .and_then(|slot| encodings.get(*slot).copied())
                 .unwrap_or("unknown");
             let local = LocalMessage {
                 seq: (index as u64) + (now as u64 % 1_000_000) * 1000,
@@ -2310,21 +2319,22 @@ mod linux {
             enqueue_sms(outbox, &imei, &message.sender, &message.body, encoding, now)?;
         }
 
-        // Delete only what was fully assembled.
-        let complete: Vec<_> = pass
-            .inbound
+        // Delete exactly the rows that were just stored, and only after the
+        // loop above returned without an error -- a delete that runs before
+        // the message is in the database loses it for good, and there is no
+        // second copy anywhere.
+        //
+        // Named by position rather than re-derived from the PDU: two
+        // deliveries can share a sender and a reference, so a filter on that
+        // pair would sweep away a fragment that is still waiting for its
+        // siblings along with the message that is done.
+        let stored: Vec<_> = assembled
             .iter()
-            .filter(|message| {
-                let decoded = edge_core::decode_deliver(&message.raw.pdu);
-                match decoded.concat {
-                    None => true,
-                    Some((ref_id, _, _)) => !incomplete.contains(&(decoded.peer, ref_id)),
-                }
-            })
-            .cloned()
+            .flat_map(|message| message.sources.iter().copied())
+            .filter_map(|slot| pass.inbound.get(slot).cloned())
             .collect();
-        if !complete.is_empty() {
-            let _ = delete_inbound(&mut client, &complete);
+        if !stored.is_empty() {
+            let _ = delete_inbound(&mut client, &stored);
         }
 
         Ok(ModemSnapshot {

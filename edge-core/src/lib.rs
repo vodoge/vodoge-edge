@@ -22,7 +22,7 @@ pub use capability::{
     Bearer, BearerSupport, Capability, CarrierProfile, DeviceContext, ModemFamily, Vertical,
     VerticalId,
 };
-pub use concat::{assemble, AssembledSms, ConcatPart};
+pub use concat::{assemble, AssembledSms, ConcatPart, FRAGMENT_GRACE_MS};
 pub use gsm7::decode as decode_gsm7;
 pub use pdu::{decode_deliver, decode_status_report, hex, Deliver, StatusReport};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};

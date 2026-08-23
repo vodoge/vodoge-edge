@@ -28,6 +28,15 @@ pub struct Deliver {
     /// of a message is deleted within a poll of being read, so by the time
     /// anyone doubts the label the evidence is gone.
     pub dcs: Option<u8>,
+    /// TP-SCTS as Unix milliseconds, `None` when the octets are not a valid
+    /// timestamp.
+    ///
+    /// This is the only age a stored message carries. Nothing on the edge
+    /// records when a fragment was first seen -- every poll starts from an
+    /// empty list -- so without it a fragment whose siblings never arrived is
+    /// indistinguishable from one that landed a second ago, and there is no
+    /// safe moment to stop waiting for the rest.
+    pub received_at: Option<i64>,
 }
 
 impl Deliver {
@@ -38,6 +47,7 @@ impl Deliver {
             concat: None,
             encoding: "unknown",
             dcs: None,
+            received_at: None,
         }
     }
 }
@@ -56,6 +66,7 @@ pub fn decode_deliver(pdu: &[u8]) -> Deliver {
             concat: None,
             encoding: "unknown",
             dcs: None,
+            received_at: None,
         };
     }
 
@@ -100,6 +111,7 @@ pub fn decode_deliver(pdu: &[u8]) -> Deliver {
     i += 1; // TP-PID
     let dcs = pdu[i];
     i += 1;
+    let received_at = decode_timestamp(&pdu[i..i + 7]);
     i += 7; // TP-SCTS
     let udl = pdu[i] as usize;
     i += 1;
@@ -133,6 +145,7 @@ pub fn decode_deliver(pdu: &[u8]) -> Deliver {
         concat,
         encoding,
         dcs: Some(dcs),
+        received_at,
     }
 }
 
