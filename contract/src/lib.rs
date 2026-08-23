@@ -309,6 +309,21 @@ pub struct DeviceStatePayload {
     pub observed_at: i64,
     #[serde(rename = "modems")]
     pub modems: Vec<ModemState>,
+    #[serde(rename = "host", default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostState {
+    #[serde(rename = "public_ip", default, skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<String>,
+    #[serde(rename = "cpu_percent", default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    #[serde(rename = "memory_used_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub memory_used_bytes: Option<i64>,
+    #[serde(rename = "memory_total_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub memory_total_bytes: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -324,6 +339,16 @@ pub struct ModemState {
     pub iccid: Option<String>,
     #[serde(rename = "signal_dbm", default, skip_serializing_if = "Option::is_none")]
     pub signal_dbm: Option<i64>,
+    #[serde(rename = "rsrp", default, skip_serializing_if = "Option::is_none")]
+    pub rsrp: Option<i64>,
+    #[serde(rename = "rsrq", default, skip_serializing_if = "Option::is_none")]
+    pub rsrq: Option<i64>,
+    #[serde(rename = "sinr", default, skip_serializing_if = "Option::is_none")]
+    pub sinr: Option<i64>,
+    #[serde(rename = "discovery", default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<String>,
+    #[serde(rename = "manageable", default, skip_serializing_if = "Option::is_none")]
+    pub manageable: Option<bool>,
     #[serde(rename = "family", default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     #[serde(rename = "imsi", default, skip_serializing_if = "Option::is_none")]

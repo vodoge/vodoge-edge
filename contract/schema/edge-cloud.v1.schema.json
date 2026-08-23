@@ -498,6 +498,38 @@
           "minItems": 1,
           "maxItems": 128,
           "items": { "$ref": "#/$defs/ModemState" }
+        },
+        "host": {
+          "anyOf": [
+            { "$ref": "#/$defs/HostState" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "HostState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "public_ip": { "$ref": "#/$defs/NullableString" },
+        "cpu_percent": {
+          "anyOf": [
+            { "type": "number", "minimum": 0, "maximum": 100 },
+            { "type": "null" }
+          ]
+        },
+        "memory_used_bytes": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "memory_total_bytes": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
         }
       }
     },
@@ -521,6 +553,26 @@
             { "type": "null" }
           ]
         },
+        "rsrp": {
+          "anyOf": [
+            { "type": "integer", "minimum": -156, "maximum": -30 },
+            { "type": "null" }
+          ]
+        },
+        "rsrq": {
+          "anyOf": [
+            { "type": "integer", "minimum": -40, "maximum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "sinr": {
+          "anyOf": [
+            { "type": "integer", "minimum": -20, "maximum": 40 },
+            { "type": "null" }
+          ]
+        },
+        "discovery": { "type": "string", "enum": ["qmi", "at"] },
+        "manageable": { "type": "boolean" },
         "family": {
           "anyOf": [
             { "type": "string", "minLength": 1, "maxLength": 64 },

@@ -334,6 +334,32 @@ pub fn at_control_ports() -> Vec<PathBuf> {
     ports
 }
 
+/// USB device identifier, e.g. `2-4.1`, backing an AT control port.
+///
+/// The counterpart to `usb_device_of_qmi`, and the join key between the two
+/// ways the agent finds a module. A stick that answers over QMI is also
+/// listed by `at_control_ports`, so without a shared identity the poll would
+/// report it twice -- once as a managed module and once as an unmanaged one
+/// with the same IMEI.
+pub fn usb_device_of_at(at_path: &Path) -> Option<String> {
+    let tty = at_path.file_name()?.to_str()?;
+    usb_device_of(&PathBuf::from(format!("/sys/class/tty/{tty}/device")))
+}
+
+/// The first response line that is nothing but digits.
+///
+/// `AT+CGSN` and `AT+CIMI` answer with a bare value and no `+CMD:` prefix, so
+/// there is no key to search for. Echo suppression is not guaranteed on a
+/// port the agent did not configure, and a stray `AT+CGSN` echo would
+/// otherwise be returned as the IMEI of a module that never reported one.
+pub fn first_bare_digits(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+}
+
 /// USB device identifier, e.g. `2-4.1`, from a sysfs device link.
 fn usb_device_of(link: &Path) -> Option<String> {
     let resolved = std::fs::canonicalize(link).ok()?;
@@ -512,5 +538,20 @@ mod tests {
         };
         assert!(!exchange.succeeded());
         assert_eq!(exchange.transcript(), "+CME ERROR: 10");
+    }
+
+    #[test]
+    fn bare_digits_skip_a_command_echo() {
+        let lines = vec!["AT+CGSN".to_string(), "867018069509705".to_string()];
+        assert_eq!(
+            first_bare_digits(&lines),
+            Some("867018069509705".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_digits_ignore_blank_lines_and_prefixed_answers() {
+        let lines = vec![String::new(), "+CME ERROR: 10".to_string()];
+        assert_eq!(first_bare_digits(&lines), None);
     }
 }

@@ -34,7 +34,8 @@ use std::{
 };
 
 pub use at::{
-    at_control_ports, at_port_for_qmi, AtError, AtExchange, AtPort, AT_CONTROL_INTERFACE,
+    at_control_ports, at_port_for_qmi, first_bare_digits, usb_device_of_at, AtError, AtExchange,
+    AtPort, AT_CONTROL_INTERFACE,
 };
 pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
 pub use ussd::{
@@ -42,7 +43,7 @@ pub use ussd::{
     UssdStage,
 };
 pub use report::{
-    collect as collect_report, parse_cops_scan, parse_csq, ModemReport, Registration,
+    collect as collect_report, parse_cops_scan, parse_creg, parse_csq, ModemReport, Registration,
     ScannedOperator, Signal,
 };
 pub use es10c::{Es10cError, Profile};

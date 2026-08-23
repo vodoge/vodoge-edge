@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::BufReader;
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1144,8 +1145,12 @@ mod linux {
         // than anything asked of it, and an idle listener sends nothing at all.
         let mut since_traffic_report = Duration::ZERO;
         let mut last_tick = Instant::now();
+        // Carried across passes so the loop can tell "not reported this time"
+        // from "gone", and so CPU is a percentage of an interval rather than
+        // of all time since boot.
+        let mut memory = PollMemory::default();
         loop {
-            if let Err(error) = poll_modems(&shared, &outbox, &radio) {
+            if let Err(error) = poll_modems(&shared, &outbox, &radio, &mut memory) {
                 log_error(format!("poll: {error}"));
             }
             // Measured rather than assumed to be the poll interval: a rescan
@@ -1257,22 +1262,472 @@ mod linux {
         Ok(paths)
     }
 
+    /// What the poll loop has to remember between passes.
+    ///
+    /// A pass on its own can only report what it can currently see, and the
+    /// interesting failure on this bench is a module that stops being
+    /// visible. Carrying the previous pass is what turns that from an absence
+    /// of rows into a reported state.
+    #[derive(Default)]
+    struct PollMemory {
+        /// Every module this process has ever found, by IMEI.
+        seen: BTreeMap<String, SeenModem>,
+        /// Previous `/proc/stat` totals, so a percentage can be taken over
+        /// the interval rather than over all time since boot.
+        cpu: Option<CpuTimes>,
+        /// Last successful public address lookup and when it happened.
+        public_ip: Option<(String, Instant)>,
+    }
+
+    /// The last thing known about a module that is not answering now.
+    #[derive(Clone, Debug)]
+    struct SeenModem {
+        family: String,
+        /// USB device the module was on, e.g. `2-4.1`. A silent serial port
+        /// can be matched back to the module that owns it only through this.
+        usb: Option<String>,
+    }
+
+    /// Accumulated jiffies from the aggregate line of `/proc/stat`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct CpuTimes {
+        total: u64,
+        idle: u64,
+    }
+
+    /// How often the public address is looked up.
+    ///
+    /// It changes when the upstream link renegotiates, which is hours apart,
+    /// so asking on every eight-second poll would be one outbound request per
+    /// modem-poll for a value that is almost always the same one.
+    const PUBLIC_IP_INTERVAL: Duration = Duration::from_secs(300);
+
+    /// How long a public address stays reportable after its last lookup.
+    ///
+    /// Longer than the refresh interval so one failed lookup does not blank
+    /// the field, short enough that a genuinely lost egress path stops being
+    /// reported as a working one. A stale address shown as current is worse
+    /// than no address: it is the field an operator uses to decide whether
+    /// the box is reachable.
+    const PUBLIC_IP_TTL: Duration = Duration::from_secs(1_800);
+
+    /// Budget for the whole public address lookup.
+    const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(5);
+
     fn poll_modems(
         shared: &Arc<SharedStore>,
         outbox: &Arc<Mutex<DurableOutbox>>,
         radio: &Radio,
+        memory: &mut PollMemory,
     ) -> Result<(), String> {
-        let paths = cdc_wdm_paths()?;
-        if paths.is_empty() {
-            return Err("no /dev/cdc-wdm*".into());
-        }
-        for path in paths {
-            match probe_one(&path, shared, outbox, radio) {
-                Ok(imei) => log_line(format!("poll {} imei={imei} ok", path.display())),
+        let now = unix_ms();
+        let qmi_paths = cdc_wdm_paths()?;
+        let mut snapshots: Vec<ModemSnapshot> = Vec::new();
+        // USB devices already accounted for over QMI. A module that answers
+        // there is also listed by `at_control_ports`, and without this it
+        // would be reported twice under one IMEI -- once managed, once not.
+        let mut claimed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for path in &qmi_paths {
+            match probe_one(path, shared, outbox, radio) {
+                Ok(snapshot) => {
+                    log_line(format!("poll {} imei={} ok", path.display(), snapshot.imei));
+                    if let Some(usb) = edge_modem::usb_device_of_qmi(path) {
+                        claimed.insert(usb);
+                    }
+                    snapshots.push(snapshot);
+                }
+                // Deliberately not claiming the USB device here. A module
+                // whose QMI node is present but unusable is exactly what the
+                // AT pass below is for, and skipping it would keep the
+                // failure to the one log line it has always been.
                 Err(error) => log_error(format!("poll {} FAIL {error}", path.display())),
             }
         }
+
+        // Second enumeration, over serial rather than QMI.
+        //
+        // The agent indexed modules by `/dev/cdc-wdm*` alone, so a stick in a
+        // usbnet mode that exposes no QMI node simply left the fleet, leaving
+        // one `poll FAIL` line behind if it left anything at all. That is the
+        // shape of the usbnet incident on this bench, and it is also what a
+        // brand new module looks like before anybody has set it up.
+        for at_path in edge_modem::at_control_ports() {
+            let usb = edge_modem::usb_device_of_at(&at_path);
+            if let Some(usb) = usb.as_ref() {
+                if claimed.contains(usb) {
+                    continue;
+                }
+            }
+            match probe_at_only(&at_path, radio) {
+                Some(snapshot) => {
+                    log_line(format!(
+                        "poll {} imei={} at-only",
+                        at_path.display(),
+                        snapshot.imei
+                    ));
+                    if let Some(usb) = usb.clone() {
+                        claimed.insert(usb);
+                    }
+                    snapshots.push(snapshot);
+                }
+                None => {
+                    // The port exists in sysfs and did not answer. If a
+                    // module was last seen on this USB device the agent can
+                    // still name it, which is the difference between
+                    // "something is wedged" and "something is wedged, and it
+                    // is this IMEI".
+                    let known = usb.as_ref().and_then(|usb| {
+                        memory
+                            .seen
+                            .iter()
+                            .find(|(_, seen)| seen.usb.as_deref() == Some(usb.as_str()))
+                            .map(|(imei, seen)| (imei.clone(), seen.clone()))
+                    });
+                    match known {
+                        Some((imei, seen)) => {
+                            log_error(format!(
+                                "poll {} silent, last held imei={imei}",
+                                at_path.display()
+                            ));
+                            snapshots.push(absent_snapshot(&imei, &seen, "unknown"));
+                            claimed.extend(usb.clone());
+                        }
+                        None => log_error(format!("poll {} silent, unidentified", at_path.display())),
+                    }
+                }
+            }
+        }
+
+        // Modules that answered on an earlier pass and are now nowhere in
+        // either enumeration. Reported as offline rather than dropped: a row
+        // that stops being updated looks the same as a healthy one to anybody
+        // not watching `last_seen`, which is how a missing stick stayed
+        // invisible for a whole afternoon.
+        //
+        // Guarded on having found something, so a pass where scanning itself
+        // failed reports nothing rather than declaring the whole fleet gone.
+        if !snapshots.is_empty() {
+            let present: std::collections::BTreeSet<String> =
+                snapshots.iter().map(|s| s.imei.clone()).collect();
+            let missing: Vec<(String, SeenModem)> = memory
+                .seen
+                .iter()
+                .filter(|(imei, _)| !present.contains(*imei))
+                .map(|(imei, seen)| (imei.clone(), seen.clone()))
+                .collect();
+            for (imei, seen) in missing {
+                log_error(format!("poll imei={imei} absent from both enumerations"));
+                snapshots.push(absent_snapshot(&imei, &seen, "offline"));
+            }
+        }
+
+        for snapshot in &snapshots {
+            if snapshot.state == "online" {
+                memory.seen.insert(
+                    snapshot.imei.clone(),
+                    SeenModem {
+                        family: snapshot.family.clone(),
+                        usb: snapshot.usb.clone(),
+                    },
+                );
+            }
+        }
+
+        let host = host_stats(memory);
+        enqueue_device_state(outbox, &snapshots, &host, now)?;
+        if qmi_paths.is_empty() && snapshots.is_empty() {
+            return Err("no /dev/cdc-wdm* and no AT control port answered".into());
+        }
         Ok(())
+    }
+
+    /// A module the agent knows about but cannot reach right now.
+    ///
+    /// Everything the contract requires is carried from the last pass that
+    /// worked; everything that describes the present is left empty rather
+    /// than repeated. Restating a registration or an RSRP from ten minutes
+    /// ago as if it were current is how a dead module keeps looking healthy.
+    fn absent_snapshot(imei: &str, seen: &SeenModem, state: &'static str) -> ModemSnapshot {
+        ModemSnapshot {
+            imei: imei.to_string(),
+            state,
+            registration: "unknown",
+            family: seen.family.clone(),
+            iccid: None,
+            imsi: None,
+            home: None,
+            serving: None,
+            quality: RadioQuality::default(),
+            discovery: Discovery::At,
+            manageable: false,
+            usb: seen.usb.clone(),
+        }
+    }
+
+    /// Identify a module through its AT control port alone.
+    ///
+    /// `AT+CGSN` and `AT+CIMI` answer on a port that is present in every
+    /// usbnet mode, including the ones with no `cdc-wdm` at all, so a module
+    /// that has dropped out of QMI can still say who it is. That is the whole
+    /// of what this reports: it is a name and a signal reading, not a claim
+    /// that anything can be done with the module.
+    ///
+    /// Returns `None` when the port did not yield an IMEI. The contract makes
+    /// `modem_imei` required and the cloud projection keys on it, so there is
+    /// no shape in which a nameless module can be reported -- and inventing
+    /// an identifier for one would put a row in the fleet that matches no
+    /// hardware.
+    fn probe_at_only(at_path: &Path, radio: &Radio) -> Option<ModemSnapshot> {
+        let _busy = radio.lock.lock().expect("radio");
+        let mut port =
+            edge_modem::AtPort::open_with_timeout(at_path, AT_PROBE_TIMEOUT.max(Duration::from_secs(2)))
+                .ok()?;
+        let exchange = port.command("AT+CGSN").ok()?;
+        if !exchange.succeeded() {
+            return None;
+        }
+        let imei = edge_modem::first_bare_digits(&exchange.lines)?;
+        let imsi = port
+            .command("AT+CIMI")
+            .ok()
+            .filter(edge_modem::AtExchange::succeeded)
+            .and_then(|exchange| edge_modem::first_bare_digits(&exchange.lines));
+        // Same derivation as the QMI path: MCC is three digits and every
+        // network this runs on has a two digit MNC.
+        let home = imsi.as_ref().and_then(|value| {
+            let mcc = value.get(0..3)?.parse::<u16>().ok()?;
+            let mnc = value.get(3..5)?.parse::<u16>().ok()?;
+            Some(Network::new(mcc, mnc))
+        });
+        let family = port
+            .command("AT+CGMM")
+            .ok()
+            .filter(edge_modem::AtExchange::succeeded)
+            .and_then(|exchange| exchange.lines.first().map(|line| line.trim().to_string()))
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        // Packet-switched registration first: this is an LTE module and
+        // `+CEREG` is the domain it actually attaches on. `+CREG` is the
+        // fallback for a module that answered nothing there.
+        let registration = registration_over_at(&mut port, "AT+CEREG?", "+CEREG:")
+            .or_else(|| registration_over_at(&mut port, "AT+CREG?", "+CREG:"))
+            .unwrap_or("unknown");
+        let quality = read_radio_quality_on(&mut port);
+        Some(ModemSnapshot {
+            imei,
+            // It answered, so it is present. What it is not is manageable:
+            // every structured operation in this agent goes over QMI.
+            state: "online",
+            registration,
+            family,
+            iccid: None,
+            imsi,
+            home,
+            // Serving network comes from the QMI serving-system read, which
+            // is exactly what is unavailable here.
+            serving: None,
+            quality,
+            discovery: Discovery::At,
+            manageable: false,
+            usb: edge_modem::usb_device_of_at(at_path),
+        })
+    }
+
+    /// One `+CREG`-shaped query, mapped onto the contract's vocabulary.
+    fn registration_over_at(
+        port: &mut edge_modem::AtPort,
+        command: &str,
+        prefix: &str,
+    ) -> Option<&'static str> {
+        let exchange = port.command(command).ok()?;
+        if !exchange.succeeded() {
+            return None;
+        }
+        let state = edge_modem::parse_creg(&exchange.lines, prefix)?;
+        Some(match state {
+            edge_modem::Registration::Home | edge_modem::Registration::Roaming => "registered",
+            edge_modem::Registration::Searching => "searching",
+            edge_modem::Registration::Denied => "denied",
+            edge_modem::Registration::NotRegistered => "unregistered",
+            edge_modem::Registration::Unknown => "unknown",
+        })
+    }
+
+    /// The edge host's own vitals.
+    ///
+    /// Every field is optional and independently so: a box whose `/proc` is
+    /// readable but whose egress is down should still report its memory.
+    fn host_stats(memory: &mut PollMemory) -> HostStats {
+        let sample = std::fs::read_to_string("/proc/stat")
+            .ok()
+            .and_then(|text| parse_proc_stat(&text));
+        let cpu_percent = match (memory.cpu, sample) {
+            (Some(previous), Some(current)) => cpu_percent_between(previous, current),
+            _ => None,
+        };
+        if let Some(current) = sample {
+            memory.cpu = Some(current);
+        }
+        let memory_reading = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| parse_meminfo(&text));
+
+        let stale = memory
+            .public_ip
+            .as_ref()
+            .map(|(_, at)| at.elapsed() >= PUBLIC_IP_INTERVAL)
+            .unwrap_or(true);
+        if stale {
+            if let Some(address) = lookup_public_ip() {
+                memory.public_ip = Some((address, Instant::now()));
+            }
+        }
+        let public_ip = memory
+            .public_ip
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < PUBLIC_IP_TTL)
+            .map(|(address, _)| address.clone());
+
+        HostStats {
+            public_ip,
+            cpu_percent,
+            memory_used_bytes: memory_reading.map(|(total, available)| {
+                total.saturating_sub(available)
+            }),
+            memory_total_bytes: memory_reading.map(|(total, _)| total),
+        }
+    }
+
+    /// The aggregate `cpu` line of `/proc/stat`.
+    ///
+    /// Idle counts both `idle` and `iowait`: a box blocked on a disk is not
+    /// doing work, and counting iowait as busy makes a quiet edge box read as
+    /// loaded every time it flushes the outbox.
+    fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
+        let line = text.lines().find(|line| line.starts_with("cpu "))?;
+        let fields: Vec<u64> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|field| field.parse::<u64>().ok())
+            .collect();
+        if fields.len() < 5 {
+            return None;
+        }
+        let total: u64 = fields.iter().sum();
+        let idle = fields[3] + fields[4];
+        Some(CpuTimes { total, idle })
+    }
+
+    /// Busy share of the interval between two `/proc/stat` samples.
+    ///
+    /// Returns nothing when the counters did not advance or went backwards.
+    /// The first case is a sample taken twice within one tick, the second is
+    /// a counter reset; reporting either as 0% or as a wild number would be
+    /// a measurement of the sampler rather than of the machine.
+    fn cpu_percent_between(previous: CpuTimes, current: CpuTimes) -> Option<f64> {
+        let total = current.total.checked_sub(previous.total)?;
+        let idle = current.idle.checked_sub(previous.idle)?;
+        if total == 0 || idle > total {
+            return None;
+        }
+        let busy = total - idle;
+        Some(((busy as f64) * 100.0 / (total as f64) * 10.0).round() / 10.0)
+    }
+
+    /// `MemTotal` and `MemAvailable` from `/proc/meminfo`, in bytes.
+    ///
+    /// `MemAvailable` rather than `MemFree`: free memory on Linux is mostly
+    /// page cache, so a healthy box reports almost none of it and looks
+    /// permanently out of memory.
+    fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+        let mut total = None;
+        let mut available = None;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let kib = value
+                .split_whitespace()
+                .next()
+                .and_then(|field| field.parse::<u64>().ok());
+            match key {
+                "MemTotal" => total = kib,
+                "MemAvailable" => available = kib,
+                _ => {}
+            }
+        }
+        Some((total?.saturating_mul(1024), available?.saturating_mul(1024)))
+    }
+
+    /// Ask an outside service what address this box comes from.
+    ///
+    /// The answer is the one thing about the egress path that cannot be
+    /// determined locally: the box sees a private address on every interface
+    /// it owns. Plain HTTP on purpose -- the endpoint is the same one the
+    /// runbook's `curl -s ifconfig.me` uses, so the console and a shell agree
+    /// by construction, and adding a TLS root store to this binary for a
+    /// value that is published to the world anyway is not worth the
+    /// dependency.
+    fn lookup_public_ip() -> Option<String> {
+        let url = env("VODOGE_PUBLIC_IP_URL", "http://ifconfig.me/ip");
+        let body = http_get(&url, PUBLIC_IP_TIMEOUT)?;
+        public_ip_from_body(&body)
+    }
+
+    /// The address out of a response body, or nothing.
+    ///
+    /// Parsed as an address rather than trimmed and trusted: these endpoints
+    /// answer an HTML page to clients they do not recognise, and a page of
+    /// markup stored as somebody's public IP is a worse outcome than an empty
+    /// column.
+    fn public_ip_from_body(body: &str) -> Option<String> {
+        let candidate = body.trim();
+        if candidate.is_empty() || candidate.len() > 45 {
+            return None;
+        }
+        candidate.parse::<std::net::IpAddr>().ok().map(|address| address.to_string())
+    }
+
+    /// Minimal HTTP/1.1 GET returning the response body.
+    ///
+    /// Deliberately small: this binary has no HTTP client and pulling one in
+    /// for a single fixed request would add a dependency tree larger than the
+    /// agent. Anything other than a plain `200` is treated as no answer.
+    fn http_get(url: &str, budget: Duration) -> Option<String> {
+        let rest = url.strip_prefix("http://")?;
+        let (authority, path) = match rest.split_once('/') {
+            Some((authority, path)) => (authority, format!("/{path}")),
+            None => (rest, "/".to_string()),
+        };
+        let host = authority.split(':').next()?.to_string();
+        let target = if authority.contains(':') {
+            authority.to_string()
+        } else {
+            format!("{authority}:80")
+        };
+        use std::io::{Read as _, Write as _};
+        let address = target.to_socket_addrs().ok()?.next()?;
+        let mut stream = std::net::TcpStream::connect_timeout(&address, budget).ok()?;
+        stream.set_read_timeout(Some(budget)).ok()?;
+        stream.set_write_timeout(Some(budget)).ok()?;
+        // A user agent the endpoint recognises. Left blank, ifconfig.me
+        // answers an HTML page instead of the address.
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: curl/8.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).ok()?;
+        let mut response = String::new();
+        // Bounded read: a body this size is already two orders of magnitude
+        // more than an address, and an endpoint that streams forever must not
+        // hold the poll loop.
+        let mut limited = std::io::Read::take(stream, 8192);
+        limited.read_to_string(&mut response).ok()?;
+        let (head, body) = response.split_once("\r\n\r\n")?;
+        if !head.lines().next()?.contains(" 200") {
+            return None;
+        }
+        Some(body.to_string())
     }
 
     fn probe_one(
@@ -1280,7 +1735,7 @@ mod linux {
         shared: &Arc<SharedStore>,
         outbox: &Arc<Mutex<DurableOutbox>>,
         radio: &Radio,
-    ) -> Result<String, String> {
+    ) -> Result<ModemSnapshot, String> {
         let _busy = radio.lock.lock().expect("radio");
         let device = CdcWdmDevice::open(path).map_err(|e| e.to_string())?;
         let mut client = QmiClient::new(device);
@@ -1343,7 +1798,7 @@ mod linux {
         // the port that is already paired with this modem. A stick with no
         // signal and a stick whose strength was never read look identical
         // upstream otherwise.
-        let signal_dbm = read_signal_dbm(path);
+        let quality = read_radio_quality(path);
         let now = unix_ms();
         radio.remember(&imei, path);
         {
@@ -1451,21 +1906,23 @@ mod linux {
             let _ = delete_inbound(&mut client, &complete);
         }
 
-        enqueue_device_state(
-            outbox,
-            &ModemSnapshot {
-                imei: &imei,
-                registration,
-                family: &family_name,
-                iccid: iccid.as_deref(),
-                imsi: imsi.as_deref(),
-                home,
-                serving: serving_plmn,
-                signal_dbm,
-            },
-            now,
-        )?;
-        Ok(imei)
+        Ok(ModemSnapshot {
+            imei,
+            // The module answered over QMI, so it is present and drivable.
+            // Whether it has a network is `registration`, which is a
+            // different question that used to be given the same answer.
+            state: "online",
+            registration: registration.wire(),
+            family: family_name,
+            iccid,
+            imsi,
+            home,
+            serving: serving_plmn,
+            quality,
+            discovery: Discovery::Qmi,
+            usb: edge_modem::usb_device_of_qmi(path),
+            manageable: true,
+        })
     }
 
     fn enqueue_sms(
@@ -1497,66 +1954,159 @@ mod linux {
         append_kind(outbox, "SmsReceived", payload)
     }
 
-    /// One `AT+CSQ` on the control port paired with this QMI node.
+    /// `AT+CSQ` and `AT+QCSQ` on the control port paired with this QMI node.
     ///
     /// Best effort by design: the poll must not fail because a diagnostic
-    /// reading did not come back. A stick whose AT port is busy simply reports
-    /// no signal this round.
-    fn read_signal_dbm(qmi_path: &Path) -> Option<i16> {
-        let at_path = edge_modem::at_port_for_qmi(qmi_path)?;
-        let mut port = edge_modem::AtPort::open(&at_path).ok()?;
-        let exchange = port.command("AT+CSQ").ok()?;
-        if !exchange.succeeded() {
-            return None;
+    /// reading did not come back. A stick whose AT port is busy simply
+    /// reports no quality this round.
+    ///
+    /// Both readings share one open. They are asked of the same port a
+    /// fraction of a second apart, and opening it twice doubles the chance of
+    /// colliding with a command the console is running on the same port.
+    fn read_radio_quality(qmi_path: &Path) -> RadioQuality {
+        let Some(at_path) = edge_modem::at_port_for_qmi(qmi_path) else {
+            return RadioQuality::default();
+        };
+        let Ok(mut port) = edge_modem::AtPort::open(&at_path) else {
+            return RadioQuality::default();
+        };
+        read_radio_quality_on(&mut port)
+    }
+
+    /// The same two readings on a port that is already open.
+    ///
+    /// Split out because the unmanaged path has a port but no QMI node to
+    /// find one from, and reporting signal for managed modules only would
+    /// leave the sticks an operator is most worried about as the blank ones.
+    fn read_radio_quality_on(port: &mut edge_modem::AtPort) -> RadioQuality {
+        let mut quality = RadioQuality::default();
+        if let Ok(exchange) = port.command("AT+CSQ") {
+            if exchange.succeeded() {
+                quality.dbm = edge_modem::parse_csq(&exchange.lines).and_then(|signal| signal.dbm);
+            }
         }
-        edge_modem::parse_csq(&exchange.lines).and_then(|signal| signal.dbm)
+        // Quectel's own reading. `AT+CSQ` pegs at index 31 for every module on
+        // this bench, so it cannot tell a good link from a saturated one;
+        // RSRP, RSRQ and SINR are what stage 4 needs to explain a call that
+        // set up and then sounded bad.
+        if let Ok(exchange) = port.command("AT+QCSQ") {
+            if exchange.succeeded() {
+                if let Some(qcsq) = edge_core::parse_qcsq(&exchange.lines) {
+                    quality.rsrp = qcsq.rsrp_dbm;
+                    quality.rsrq = qcsq.rsrq_db;
+                    quality.sinr = qcsq.sinr_db;
+                }
+            }
+        }
+        quality
+    }
+
+    /// What one module's radio reported about itself.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct RadioQuality {
+        /// Converted from the `AT+CSQ` index. Saturates near a tower.
+        dbm: Option<i16>,
+        rsrp: Option<i16>,
+        rsrq: Option<i16>,
+        sinr: Option<i16>,
+    }
+
+    /// How a module was found, which decides what can be asked of it.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Discovery {
+        /// Answered on its QMI control node: the agent can drive it.
+        Qmi,
+        /// Only its AT control port answered. Everything the agent does over
+        /// QMI -- eSIM, SMS, serving system -- is out of reach until it is
+        /// back on a usbnet mode that exposes a `cdc-wdm`.
+        At,
+    }
+
+    impl Discovery {
+        fn wire(self) -> &'static str {
+            match self {
+                Self::Qmi => "qmi",
+                Self::At => "at",
+            }
+        }
     }
 
     /// Everything the probe learned about one modem, in the shape the snapshot
     /// needs it. Passing eight positional arguments was how `state` and
     /// `registration` ended up carrying the same value.
-    struct ModemSnapshot<'a> {
-        imei: &'a str,
-        registration: NasRegistrationState,
-        family: &'a str,
-        iccid: Option<&'a str>,
-        imsi: Option<&'a str>,
+    ///
+    /// Owned rather than borrowed because a pass now collects every module
+    /// before sending anything: one envelope per pass is what makes the
+    /// payload a fleet inventory instead of three separate claims about one
+    /// device, each overwriting the last.
+    #[derive(Clone, Debug)]
+    struct ModemSnapshot {
+        imei: String,
+        /// Contract `state`: whether the module is answering at all. This was
+        /// the literal string "online" for every module the agent managed to
+        /// talk to, which left the other three values in the enum unreachable
+        /// and anything keyed on them testing a path that could not happen.
+        state: &'static str,
+        registration: &'static str,
+        family: String,
+        iccid: Option<String>,
+        imsi: Option<String>,
         /// Who issued the card.
         home: Option<Network>,
         /// Where it is registered right now. Differs from `home` when roaming.
         serving: Option<Network>,
-        signal_dbm: Option<i16>,
+        quality: RadioQuality,
+        discovery: Discovery,
+        /// USB device the module sits on, e.g. `2-4.1`. Carried so a later
+        /// pass can match a silent serial port back to the module that owns
+        /// it, which is the only way to name hardware that has stopped
+        /// answering.
+        usb: Option<String>,
+        /// Whether the agent can currently carry out commands against it.
+        manageable: bool,
+    }
+
+    /// The edge host itself, as opposed to the radios plugged into it.
+    #[derive(Clone, Debug, Default)]
+    struct HostStats {
+        public_ip: Option<String>,
+        cpu_percent: Option<f64>,
+        memory_used_bytes: Option<u64>,
+        memory_total_bytes: Option<u64>,
     }
 
     fn enqueue_device_state(
         outbox: &Arc<Mutex<DurableOutbox>>,
-        modem: &ModemSnapshot<'_>,
+        modems: &[ModemSnapshot],
+        host: &HostStats,
         now: i64,
     ) -> Result<(), String> {
+        if modems.is_empty() {
+            // The contract requires at least one modem and there is nothing
+            // honest to invent. A pass that found no hardware at all says so
+            // in the log and sends nothing.
+            return Ok(());
+        }
         let matrix = CapabilityMatrix::builtin().map_err(|error| error.to_string())?;
-        // The matrix is keyed on the home carrier, not the serving one: what a
-        // card can do is a property of the subscription, and a roaming card
-        // keeps its own operator's rules.
-        let carrier = CarrierProfile::from(
-            modem
-                .home
-                .map(|network| network.carrier_profile())
-                .unwrap_or("Generic-International"),
-        );
-        let capability = matrix
-            .query(&ModemFamily::from(modem.family), &carrier)
-            .capability
-            .clone();
-
-        let payload = serde_json::json!({
-            "observed_at": now,
-            "modems": [{
+        let mut entries = Vec::with_capacity(modems.len());
+        for modem in modems {
+            // The matrix is keyed on the home carrier, not the serving one:
+            // what a card can do is a property of the subscription, and a
+            // roaming card keeps its own operator's rules.
+            let carrier = CarrierProfile::from(
+                modem
+                    .home
+                    .map(|network| network.carrier_profile())
+                    .unwrap_or("Generic-International"),
+            );
+            let capability = matrix
+                .query(&ModemFamily::from(modem.family.as_str()), &carrier)
+                .capability
+                .clone();
+            entries.push(serde_json::json!({
                 "modem_imei": modem.imei,
-                // The module answered over QMI, so it is present. Whether it
-                // has a network is `registration`, which is a different
-                // question and used to be given the same answer.
-                "state": "online",
-                "registration": modem.registration.wire(),
+                "state": modem.state,
+                "registration": modem.registration,
                 // The cloud cannot tell which SIM a modem is using without
                 // this. On an eUICC it is also the only field that changes
                 // when a profile is switched, so leaving it out makes a switch
@@ -1566,13 +2116,28 @@ mod linux {
                 "imsi": modem.imsi,
                 "home_plmn": modem.home.map(|network| network.numeric()),
                 "serving_plmn": modem.serving.map(|network| network.numeric()),
-                "signal_dbm": modem.signal_dbm,
+                "signal_dbm": modem.quality.dbm,
+                "rsrp": modem.quality.rsrp,
+                "rsrq": modem.quality.rsrq,
+                "sinr": modem.quality.sinr,
+                "discovery": modem.discovery.wire(),
+                "manageable": modem.manageable,
                 "capability": {
                     "sms_mo": capability.sms_mo.wire(),
                     "sms_mt": capability.sms_mt.wire(),
                     "matrix_version": matrix.version()
                 }
-            }]
+            }));
+        }
+        let payload = serde_json::json!({
+            "observed_at": now,
+            "modems": entries,
+            "host": {
+                "public_ip": host.public_ip,
+                "cpu_percent": host.cpu_percent,
+                "memory_used_bytes": host.memory_used_bytes,
+                "memory_total_bytes": host.memory_total_bytes,
+            }
         });
         append_kind(outbox, "DeviceState", payload)
     }
@@ -1772,5 +2337,120 @@ mod linux {
 
     fn env(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
+    }
+
+    #[cfg(test)]
+    mod host_tests {
+        use super::*;
+
+        #[test]
+        fn cpu_totals_count_iowait_as_idle() {
+            let text = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4 5\n";
+            let parsed = parse_proc_stat(text).expect("parsed");
+            assert_eq!(parsed.total, 1000);
+            // idle 800 + iowait 50: a box blocked on a disk is not working.
+            assert_eq!(parsed.idle, 850);
+        }
+
+        #[test]
+        fn cpu_percent_is_taken_over_the_interval() {
+            let previous = CpuTimes {
+                total: 1000,
+                idle: 900,
+            };
+            let current = CpuTimes {
+                total: 2000,
+                idle: 1650,
+            };
+            // 1000 jiffies passed, 750 of them idle.
+            assert_eq!(cpu_percent_between(previous, current), Some(25.0));
+        }
+
+        #[test]
+        fn a_counter_that_did_not_move_reports_nothing() {
+            let same = CpuTimes {
+                total: 1000,
+                idle: 900,
+            };
+            assert_eq!(cpu_percent_between(same, same), None);
+        }
+
+        #[test]
+        fn a_counter_that_went_backwards_reports_nothing() {
+            let previous = CpuTimes {
+                total: 2000,
+                idle: 1000,
+            };
+            let current = CpuTimes {
+                total: 1000,
+                idle: 500,
+            };
+            assert_eq!(cpu_percent_between(previous, current), None);
+        }
+
+        #[test]
+        fn memory_uses_available_not_free() {
+            let text = concat!(
+                "MemTotal:        2048000 kB\n",
+                "MemFree:           64000 kB\n",
+                "MemAvailable:    1024000 kB\n",
+                "Buffers:           16000 kB\n"
+            );
+            let (total, available) = parse_meminfo(text).expect("parsed");
+            assert_eq!(total, 2_048_000 * 1024);
+            assert_eq!(available, 1_024_000 * 1024);
+            // Free is a tenth of available here; reporting it would say the
+            // box is nearly out of memory when it is half used.
+            assert_eq!(total - available, 1_024_000 * 1024);
+        }
+
+        #[test]
+        fn meminfo_without_the_fields_reports_nothing() {
+            assert_eq!(parse_meminfo("Buffers: 16000 kB\n"), None);
+        }
+
+        #[test]
+        fn a_public_address_is_parsed_not_trusted() {
+            assert_eq!(
+                public_ip_from_body("203.0.113.7\n"),
+                Some("203.0.113.7".to_string())
+            );
+            assert_eq!(
+                public_ip_from_body("  2001:db8::1  "),
+                Some("2001:db8::1".to_string())
+            );
+        }
+
+        #[test]
+        fn a_page_of_markup_is_not_an_address() {
+            // What these endpoints answer to a client they do not recognise.
+            assert_eq!(public_ip_from_body("<!DOCTYPE html><html>"), None);
+            assert_eq!(public_ip_from_body(""), None);
+            assert_eq!(public_ip_from_body("not an address"), None);
+        }
+
+        #[test]
+        fn an_absent_module_carries_its_name_and_nothing_current() {
+            let seen = SeenModem {
+                family: "EC20".to_string(),
+                usb: Some("2-4.1".to_string()),
+            };
+            let snapshot = absent_snapshot("867018069509705", &seen, "offline");
+            assert_eq!(snapshot.imei, "867018069509705");
+            assert_eq!(snapshot.state, "offline");
+            assert_eq!(snapshot.family, "EC20");
+            assert!(!snapshot.manageable);
+            // Nothing about the present is restated from the last good pass.
+            assert_eq!(snapshot.registration, "unknown");
+            assert_eq!(snapshot.iccid, None);
+            assert_eq!(snapshot.serving, None);
+            assert_eq!(snapshot.quality.rsrp, None);
+        }
+
+        #[test]
+        fn discovery_spells_itself_the_way_the_contract_does() {
+            assert_eq!(Discovery::Qmi.wire(), "qmi");
+            assert_eq!(Discovery::At.wire(), "at");
+        }
     }
 }
