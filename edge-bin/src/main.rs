@@ -1887,6 +1887,26 @@ mod linux {
             std::collections::BTreeMap::new();
         for message in &pass.inbound {
             let decoded = edge_core::decode_deliver(&message.raw.pdu);
+            // The coding scheme, and what was made of it.
+            //
+            // `encoding` travels all the way to the console and the database,
+            // and nothing recorded the byte it was derived from -- so a wrong
+            // label could not be checked afterwards, because the message is
+            // deleted from the modem within a poll of being read. Four
+            // decoding faults stayed hidden for weeks for want of this line.
+            // The header only: the body is the one part of a message that
+            // does not belong in a log read this widely.
+            log_line(format!(
+                "sms from={} dcs={} encoding={} bytes={} udh={}",
+                decoded.peer,
+                decoded
+                    .dcs
+                    .map(|dcs| format!("{dcs:#04x}"))
+                    .unwrap_or_else(|| "none".into()),
+                decoded.encoding,
+                message.raw.pdu.len(),
+                decoded.concat.is_some()
+            ));
             let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
             encodings.insert((decoded.peer.clone(), ref_id), decoded.encoding);
             parts.push(ConcatPart {

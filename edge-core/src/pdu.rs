@@ -20,6 +20,14 @@ pub struct Deliver {
     /// The alphabet the data coding scheme named: `gsm7`, `ucs2`, `8bit`, or
     /// `unknown` for a PDU that could not be walked.
     pub encoding: &'static str,
+    /// TP-DCS verbatim, and `None` for a PDU that could not be walked.
+    ///
+    /// Carried so `encoding` can be audited against the byte it was derived
+    /// from. The label reaches the console and the database, and until this
+    /// existed there was no way to check it after the fact: the modem's copy
+    /// of a message is deleted within a poll of being read, so by the time
+    /// anyone doubts the label the evidence is gone.
+    pub dcs: Option<u8>,
 }
 
 impl Deliver {
@@ -29,6 +37,7 @@ impl Deliver {
             body: hex(pdu),
             concat: None,
             encoding: "unknown",
+            dcs: None,
         }
     }
 }
@@ -46,6 +55,7 @@ pub fn decode_deliver(pdu: &[u8]) -> Deliver {
             body: String::new(),
             concat: None,
             encoding: "unknown",
+            dcs: None,
         };
     }
 
@@ -122,6 +132,7 @@ pub fn decode_deliver(pdu: &[u8]) -> Deliver {
         body,
         concat,
         encoding,
+        dcs: Some(dcs),
     }
 }
 
@@ -640,6 +651,40 @@ mod tests {
         assert_eq!(report.submitted_at, None);
         assert!(report.delivered_at.is_some());
         assert_eq!(report.status, "delivered");
+    }
+
+    // Two reports China Mobile actually sent, captured on the bench the day
+    // this decoder was written. Every constant in the synthetic cases above
+    // was chosen by reading the specification; these were chosen by nobody.
+    //
+    // Both went to a shortcode, so TP-RA is five digits with a filler nibble
+    // and a national type-of-address -- no leading plus, which is the right
+    // answer and the one a decoder that guesses the prefix gets wrong. The
+    // trailing FF octets after TP-ST are padding the module leaves in place,
+    // and reading them as more of the report is how a parser ends up
+    // reporting a status code of 255 for a message that arrived.
+    #[test]
+    fn decodes_the_reports_the_bench_produced() {
+        for (text, reference, at) in [
+            (
+                "00066705810180F6628032610530236280326105302300FFFFFFFFFFFFFF",
+                103u8,
+                1_787_475_003_000i64,
+            ),
+            (
+                "00066805810180F6628032612524236280326125242300FFFFFFFFFFFFFF",
+                104,
+                1_787_475_162_000,
+            ),
+        ] {
+            let report = decode_status_report(&from_hex(text)).expect(text);
+            assert_eq!(report.reference, reference);
+            assert_eq!(report.peer, "10086");
+            assert_eq!(report.status, "delivered");
+            assert_eq!(report.status_code, 0x00);
+            assert_eq!(report.submitted_at, Some(at));
+            assert_eq!(report.delivered_at, Some(at));
+        }
     }
 
     /// Builds a DELIVER around a user data field: SMSC and sender fixed,
