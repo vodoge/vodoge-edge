@@ -31,8 +31,8 @@ mod linux {
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
     use edge_core::{assemble, CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
     use edge_modem::{
-        collect_inbound, delete_inbound, encode_submit, CdcWdmDevice, NasRegistrationState,
-        OperatingMode, QmiClient,
+        collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice,
+        NasRegistrationState, OperatingMode, QmiClient,
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
@@ -73,6 +73,34 @@ mod linux {
     /// where a dropped entry could ever be met again, and still a table small
     /// enough to keep forever.
     const SMS_LEDGER_KEEP: usize = 5_000;
+
+    /// How many storage slots each pass reads directly.
+    ///
+    /// The listing cannot name a message anyone has marked read, so the only
+    /// way to find one is to read its slot, and a read costs about eight
+    /// milliseconds. Reading every slot of both stores on every pass would
+    /// spend seconds per module on an uncommon case; thirty-two costs about a
+    /// quarter of a second per store.
+    const SMS_SWEEP_WINDOW: u32 = 32;
+
+    /// One past the highest storage index worth reading.
+    ///
+    /// The SIM store on this bench holds fifty and the module store reports
+    /// 255. A slot past the end of a store refuses as quickly as any other
+    /// miss, so aiming high costs a fraction of a pass while aiming low would
+    /// leave part of a store permanently unread.
+    const SMS_SWEEP_LIMIT: u32 = 256;
+
+    /// Which window the next pass reads.
+    ///
+    /// Kept here rather than in the driver because the QMI client is built
+    /// fresh for every poll and has nowhere to keep it, and because how much
+    /// of a pass to spend on the slow path is a policy question, not a
+    /// property of the transport. Shared by all modules on purpose: with
+    /// three of them and eight windows the counter is coprime with the
+    /// rotation, so each module still walks the whole store, just offset from
+    /// the others.
+    static SMS_SWEEP_CURSOR: AtomicU32 = AtomicU32::new(0);
 
     /// One message read off a modem in this pass, with the identity our own
     /// books know it by.
@@ -2246,7 +2274,17 @@ mod linux {
                 .map_err(|e| e.to_string())?;
         }
 
-        let pass = collect_inbound(&mut client).map_err(|e| e.to_string())?;
+        // One window of slots read directly, on top of the listing. Windows
+        // are aligned so a rotation covers the store exactly, with no slot
+        // read twice before every other slot has been read once.
+        let sweep_window = SMS_SWEEP_CURSOR.fetch_add(1, Ordering::Relaxed)
+            % (SMS_SWEEP_LIMIT / SMS_SWEEP_WINDOW);
+        let pass = collect_inbound_sweeping(
+            &mut client,
+            sweep_window * SMS_SWEEP_WINDOW,
+            SMS_SWEEP_WINDOW,
+        )
+        .map_err(|e| e.to_string())?;
 
         // Fragments are joined before anything else sees them. A long message
         // arrives as several PDUs, and storing each one separately gives the

@@ -37,6 +37,25 @@ pub trait ModemPort {
     /// so a reader that only looked at the SIM saw an empty inbox while five
     /// messages sat on the device.
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError>;
+    /// Reads a window of storage slots directly, reporting the inbound
+    /// messages found in them.
+    ///
+    /// A listing is not always complete. On the bench EC20s
+    /// `QMI_WMS_LIST_MESSAGES` accepts exactly one tag -- unread -- and
+    /// refuses every other, so a message anyone has marked read cannot be
+    /// named by any listing the firmware offers, and the old collector lost
+    /// such messages permanently while they went on occupying storage.
+    /// Reading the slot finds them.
+    ///
+    /// A window rather than the whole store because a read costs real time on
+    /// a serial-speed control channel: the caller decides how much of a pass
+    /// to spend on the slow path and how far it walks between passes.
+    ///
+    /// The default finds nothing, which is the right answer for a transport
+    /// whose listing is already complete.
+    fn sweep_slots(&mut self, _first: u32, _count: u32) -> Result<Vec<ListedMessage>, PortError> {
+        Ok(Vec::new())
+    }
     /// Reads one message from the store it was listed in. Indexes are per
     /// store, so the same number means a different message in the other one.
     fn read_sms(&mut self, storage: StorageType, index: u32) -> Result<RawMessage, PortError>;

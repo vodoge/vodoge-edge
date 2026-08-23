@@ -35,7 +35,40 @@ pub struct CollectedMessage {
 /// AT terminal, has looked at it. Whether a message is new is decided by
 /// [`fragment_fingerprint`] against our own ledger.
 pub fn collect_inbound<P: ModemPort>(port: &mut P) -> Result<InboxPass, PortError> {
-    let listed = port.list_sms()?;
+    collect_inbound_sweeping(port, 0, 0)
+}
+
+/// [`collect_inbound`], plus a window of storage slots read directly.
+///
+/// The listing on these modules cannot name a message somebody has marked
+/// read — see [`ModemPort::sweep_slots`] — so a pass that only lists will walk
+/// past such a message forever. The window is the caller's budget for the slow
+/// path; where it starts is the caller's business too, because the point is to
+/// walk the whole store over several passes rather than pay for all of it on
+/// each one.
+pub fn collect_inbound_sweeping<P: ModemPort>(
+    port: &mut P,
+    sweep_first: u32,
+    sweep_count: u32,
+) -> Result<InboxPass, PortError> {
+    let mut listed = port.list_sms()?;
+    if sweep_count > 0 {
+        let mut known: std::collections::BTreeSet<(StorageType, u32)> = listed
+            .iter()
+            .map(|message| (message.storage, message.index))
+            .collect();
+        // A failed sweep costs the pass nothing. It is the backstop for an
+        // uncommon case, and giving up the messages the listing *did* name
+        // because the backstop stumbled would be the worse trade.
+        let swept = port
+            .sweep_slots(sweep_first, sweep_count)
+            .unwrap_or_default();
+        for message in swept {
+            if known.insert((message.storage, message.index)) {
+                listed.push(message);
+            }
+        }
+    }
     let inbound_listed = retain_mobile_terminated(&listed);
     let skipped_mo = listed
         .into_iter()

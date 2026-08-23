@@ -50,34 +50,46 @@ impl<T: QmiTransport> ModemPort for QmiClient<T> {
     }
 
     fn list_sms(&mut self) -> Result<Vec<ListedMessage>, PortError> {
-        // Every stored message: both stores, read and unread alike.
+        // Every stored message, read and unread alike, from both stores.
         //
         // Both stores because the modem chooses where a received message
         // lands, and these EC20s use their own memory: reading only the SIM
         // showed an empty inbox while five messages sat on the device.
         //
-        // Both tags because the EC20 *honours* the list-tag argument. This
-        // asked for `MtUnread` alone, on the strength of a comment saying the
-        // tag was ignored. The bench disproved that comment on 2026-08-23:
-        // one `AT+CMGR` turned a stored message into `REC READ`, and from
-        // that moment five consecutive collection passes returned nothing
-        // while `AT+CPMS?` still counted it in the store. Anything that marks
-        // a message read — the console's own AT terminal, a diagnostic, our
-        // own troubleshooting — therefore made that message invisible for
-        // good and pinned its storage slot for good.
+        // Read as well as unread because of what the bench proved on
+        // 2026-08-23. This asked the listing for unread messages only, on the
+        // strength of a comment saying the EC20 ignores the tag. The comment
+        // was wrong twice over. One `AT+CMGR` turned a stored message into
+        // `REC READ`, and from that moment five consecutive collection passes
+        // returned nothing while `AT+CPMS?` still counted it in the store: the
+        // message was unreachable for good and its slot was held for good.
+        // Anything that reads a message does this -- the console's own AT
+        // terminal, a diagnostic, our own troubleshooting -- and it happened
+        // at least twice in a single day of debugging.
         //
-        // The read flag belongs to the modem and can be flipped by anyone
-        // holding a serial port, so no part of our bookkeeping may rest on
-        // it. What has already been stored is answered by our own ledger of
-        // ingested fragments, not by the modem's idea of what has been read.
+        // The obvious repair, asking the listing for read messages too, does
+        // not work on this firmware. Measured against all three modules:
+        // `QMI_WMS_LIST_MESSAGES` accepts `MT_NOT_READ` and rejects every
+        // other tag outright -- `MT_READ` comes back as a failure with error
+        // 47, the tag values for "all" are error 48, and omitting the tag is
+        // rejected as a missing argument. There is no listing this firmware
+        // offers that can name a read message; [`ModemPort::sweep_slots`] is
+        // what finds those, by reading the slots themselves.
+        //
+        // The tag is still asked for both ways, because firmware that does
+        // answer `MT_READ` gives a complete listing at once and leaves the
+        // sweep nothing to find.
+        //
+        // What none of this may depend on is the read flag itself. It belongs
+        // to the modem and any serial port can flip it, so whether a message
+        // has already been stored is answered by our own ledger of ingested
+        // fragments instead.
         //
         // A store or tag that cannot be listed is skipped rather than failing
-        // the pass — some modems have no SIM store at all, and refusing to
+        // the pass -- some modems have no SIM store at all, and refusing to
         // read any message because one query is unsupported is the wrong
-        // trade.
-        //
-        // A modem that genuinely does ignore the tag answers both queries
-        // with the same rows, so entries are deduplicated on (store, index):
+        // trade. Entries are deduplicated on (store, index) because firmware
+        // that ignores the tag answers both queries with the same rows, and
         // reading one message twice in a pass would store it twice.
         let mut listed = Vec::new();
         let mut seen = BTreeSet::new();
@@ -95,6 +107,38 @@ impl<T: QmiTransport> ModemPort for QmiClient<T> {
             }
         }
         Ok(listed)
+    }
+
+    fn sweep_slots(&mut self, first: u32, count: u32) -> Result<Vec<ListedMessage>, PortError> {
+        // Read the slots themselves, because the listing cannot name a
+        // message somebody has marked read (see `list_sms`) and reading one
+        // can: `QMI_WMS_RAW_READ` at the index of a read message returns it
+        // with `MT_READ` on it in about eight milliseconds, and an empty slot
+        // refuses in about the same. Measured on the bench: twelve reads in
+        // 94 ms.
+        //
+        // Both stores, for the same reason the listing asks both.
+        let mut found = Vec::new();
+        for storage in [StorageType::Uim, StorageType::Nv] {
+            for index in first..first.saturating_add(count) {
+                let Ok(raw) = QmiClient::read_sms(self, storage, index, MessageMode::Gw) else {
+                    continue;
+                };
+                // Only what the modem itself calls mobile-terminated. A slot
+                // whose read carries no tag cannot be told apart from an
+                // outgoing message, and "collecting" one of those would end
+                // in deleting a record of something we sent.
+                let Some(tag) = raw.tag.filter(|tag| tag.is_mobile_terminated()) else {
+                    continue;
+                };
+                found.push(ListedMessage {
+                    index,
+                    tag,
+                    storage,
+                });
+            }
+        }
+        Ok(found)
     }
 
     fn read_sms(&mut self, storage: StorageType, index: u32) -> Result<RawMessage, PortError> {

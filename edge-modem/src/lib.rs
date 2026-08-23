@@ -56,8 +56,8 @@ pub use channels::LogicalChannels;
 pub use discovery::{discover, DeviceEnumerator, DiscoveredModem, FakeEnumerator};
 pub use fake::FakeModem;
 pub use inbox::{
-    collect_inbound, delete_inbound, fragment_fingerprint, seen_before, CollectedMessage,
-    InboxPass,
+    collect_inbound, collect_inbound_sweeping, delete_inbound, fragment_fingerprint, seen_before,
+    CollectedMessage, InboxPass,
 };
 pub use port::{ModemPort, PortError, TransportKind, UnsupportedPort};
 pub use restore::with_restore;
