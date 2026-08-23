@@ -24,6 +24,7 @@ mod linux {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
@@ -90,15 +91,34 @@ mod linux {
         /// the panel's staleness window, so without this the panel reports a
         /// modem as offline while it is busy doing exactly what was asked.
         busy: Arc<Mutex<Option<PathBuf>>>,
+        /// Asks the poll loop to look for modems now.
+        ///
+        /// Capacity one, and a full channel is not an error: a pending rescan
+        /// is already what a second request wanted. Queueing one rescan per
+        /// click would make an impatient operator wait longer, not less.
+        rescan: SyncSender<()>,
     }
 
     impl Radio {
-        fn new() -> Self {
-            Self {
+        /// Returns the handle and the receiving end of its rescan channel.
+        ///
+        /// The receiver goes to whoever owns the poll loop. Handing it back
+        /// rather than storing it keeps `Radio` cloneable, and makes it plain
+        /// that exactly one place is expected to act on the request.
+        fn new() -> (Self, Receiver<()>) {
+            let (rescan, requests) = sync_channel(1);
+            let radio = Self {
                 lock: Arc::new(Mutex::new(())),
                 by_imei: Arc::new(Mutex::new(BTreeMap::new())),
                 busy: Arc::new(Mutex::new(None)),
-            }
+                rescan,
+            };
+            (radio, requests)
+        }
+
+        /// Cuts the poll loop's wait short. Never blocks.
+        fn request_rescan(&self) {
+            let _ = self.rescan.try_send(());
         }
 
         fn remember(&self, imei: &str, path: &Path) {
@@ -197,6 +217,62 @@ mod linux {
         proxies: Arc<ProxyRuntime>,
     }
 
+    impl RadioPort {
+        /// One AT exchange, with whatever the module answered left intact.
+        fn at_exchange(
+            &mut self,
+            imei: &str,
+            command: &str,
+            timeout_ms: Option<i64>,
+        ) -> Result<AtResult, SendError> {
+            // The panel's AT action uses the port's own default timeout. A
+            // command that asks for a longer one gets it here rather than
+            // silently running with the default.
+            match timeout_ms {
+                Some(millis) => self.radio.with_at_port(Some(imei), |port| {
+                    let started = Instant::now();
+                    let exchange = port
+                        .command_with_timeout(command, Duration::from_millis(millis as u64))
+                        .map_err(|error| SendError::new("at_failed", error.to_string()))?;
+                    Ok(AtResult {
+                        port: String::new(),
+                        command: exchange.command,
+                        lines: exchange.lines,
+                        ok: exchange.terminator == "OK",
+                        terminator: exchange.terminator,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    })
+                }),
+                None => Actions::at_command(self, Some(imei.to_string()), command.to_string())
+                    .map_err(action_failed),
+            }
+        }
+
+        /// One AT exchange that has to have ended in `OK`.
+        ///
+        /// `run_at` deliberately reports `+CME ERROR` as a successful
+        /// exchange: a raw AT console exists to show what the module said,
+        /// and swallowing the answer would defeat it. A button labelled
+        /// "turn data off" cannot afford the same generosity — a green
+        /// receipt beside an unchanged modem is worse than an error, because
+        /// nobody goes looking.
+        fn at_ok(
+            &mut self,
+            imei: &str,
+            command: &str,
+            timeout_ms: Option<i64>,
+        ) -> Result<AtResult, SendError> {
+            let result = self.at_exchange(imei, command, timeout_ms)?;
+            if !result.ok {
+                return Err(SendError::new(
+                    "at_rejected",
+                    format!("{} answered {}", command, result.terminator),
+                ));
+            }
+            Ok(result)
+        }
+    }
+
     /// The proxy listeners, and the runtime they live on.
     ///
     /// The manager is async and the command executor is not, so the proxies
@@ -279,27 +355,7 @@ mod linux {
             command: &str,
             timeout_ms: Option<i64>,
         ) -> Result<JsonValue, SendError> {
-            // The panel's AT action uses the port's own default timeout. A
-            // command that asks for a longer one gets it here rather than
-            // silently running with the default.
-            let result = match timeout_ms {
-                Some(millis) => self.radio.with_at_port(Some(imei), |port| {
-                    let started = Instant::now();
-                    let exchange = port
-                        .command_with_timeout(command, Duration::from_millis(millis as u64))
-                        .map_err(|error| SendError::new("at_failed", error.to_string()))?;
-                    Ok(AtResult {
-                        port: String::new(),
-                        command: exchange.command,
-                        lines: exchange.lines,
-                        ok: exchange.terminator == "OK",
-                        terminator: exchange.terminator,
-                        elapsed_ms: started.elapsed().as_millis() as u64,
-                    })
-                })?,
-                None => Actions::at_command(self, Some(imei.to_string()), command.to_string())
-                    .map_err(action_failed)?,
-            };
+            let result = self.at_exchange(imei, command, timeout_ms)?;
             json_details(&result)
         }
 
@@ -364,6 +420,113 @@ mod linux {
         fn reset_usb(&mut self, imei: &str) -> Result<JsonValue, SendError> {
             let result = Actions::usb_reset(self, Some(imei.to_string())).map_err(action_failed)?;
             json_details(&result)
+        }
+
+        fn set_data_network(&mut self, imei: &str, enabled: bool) -> Result<JsonValue, SendError> {
+            // 27.007 `AT+CGACT`, on context 1: the default bearer these
+            // modules dial on. Contexts 2 and 3 are the IMS and emergency
+            // ones, which belong to the network rather than to an operator.
+            //
+            // Quectel's own `AT+QNETDEVCTL` would be the other candidate and
+            // reads better, but the EC20s on the bench answer it `ERROR`.
+            let state = i32::from(enabled);
+            // Attaching can take several seconds on a slow cell, and the
+            // module stays silent until it settles.
+            let wrote = self.at_ok(imei, &format!("AT+CGACT={state},1"), Some(60_000))?;
+            // Read back rather than echo the request: a write can be accepted
+            // and the bearer still fail to come up, and the whole point of
+            // the button is knowing which happened.
+            let now = self.at_exchange(imei, "AT+CGACT?", None)?;
+            json_details(&serde_json::json!({
+                "requested": if enabled { "up" } else { "down" },
+                "elapsed_ms": wrote.elapsed_ms,
+                "contexts": now.lines,
+            }))
+        }
+
+        fn set_usbnet_mode(&mut self, imei: &str, mode: &str) -> Result<JsonValue, SendError> {
+            // Quectel `AT+QCFG="usbnet"`. The bench modules advertise 0-4;
+            // 4 is NCM on some firmware and undefined on others, so the
+            // contract stops at the four that mean the same thing anywhere.
+            let value = match mode {
+                "rmnet" => 0,
+                "ecm" => 1,
+                "mbim" => 2,
+                "rndis" => 3,
+                other => {
+                    return Err(SendError::new(
+                        "unknown_usbnet_mode",
+                        format!("{other} is not a usbnet mode"),
+                    ))
+                }
+            };
+            self.at_ok(imei, &format!("AT+QCFG=\"usbnet\",{value}"), None)?;
+            // Read back rather than report the value that was sent: this is a
+            // setting nobody can verify by looking at the modem, and it only
+            // takes effect at the next restart, so a wrong write would go
+            // unnoticed until the modem came back as something else.
+            let readback = self.at_exchange(imei, "AT+QCFG=\"usbnet\"", None)?;
+            json_details(&serde_json::json!({
+                "mode": mode,
+                "value": value,
+                "reported": readback.lines,
+                "applies_after_restart": true,
+                // Every mode but rmnet takes away the QMI control port, which
+                // is the only way this agent reaches a modem. Saying so here
+                // is the difference between a planned change and a modem that
+                // quietly leaves the fleet after its next restart, recoverable
+                // only by someone standing next to it.
+                "warning": if value == 0 {
+                    JsonValue::Null
+                } else {
+                    JsonValue::from(
+                        "restarting the modem in this mode removes its QMI port; \
+                         the agent will lose it until the mode is set back to rmnet",
+                    )
+                },
+            }))
+        }
+
+        fn reregister_network(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            // 27.007: `AT+COPS=2` detaches, `AT+COPS=0` hands selection back
+            // to the module. Detaching is the point — a modem that is
+            // attached but passing nothing needs the network to forget it.
+            let detached = self.at_exchange(imei, "AT+COPS=2", Some(60_000));
+            // Re-attach whatever the detach reported, including a transport
+            // error: returning early would leave the modem off-network, which
+            // is a worse state than the fault this is meant to clear.
+            let attached = self.at_ok(imei, "AT+COPS=0", Some(180_000))?;
+            // Which network it landed on. `AT+COPS=0` answers as soon as
+            // selection is under way, so this is the only part that says
+            // re-registration actually finished.
+            let serving = self.at_exchange(imei, "AT+COPS?", Some(30_000))?;
+            json_details(&serde_json::json!({
+                "detach": match &detached {
+                    Ok(result) => result.terminator.clone(),
+                    Err(error) => error.to_string(),
+                },
+                "elapsed_ms": attached.elapsed_ms,
+                "serving": serving.lines,
+            }))
+        }
+
+        fn refresh_modems(&mut self) -> Result<JsonValue, SendError> {
+            // Reported before the rescan, not after: this is what the kernel
+            // is showing right now, which is the fact an operator is asking
+            // about when a stick does not appear. Turning these into
+            // inventory entries is the poll loop's job and needs the radio
+            // lock, so waiting for it here would park the command thread
+            // behind whatever the loop is already doing to another modem.
+            let ports = cdc_wdm_paths().map_err(|error| SendError::new("dev_scan_failed", error))?;
+            self.radio.request_rescan();
+            json_details(&serde_json::json!({
+                "found": ports.len(),
+                "control_ports": ports
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+                "rescan": "requested",
+            }))
         }
 
         fn list_esim_profiles(&mut self, imei: &str) -> Result<JsonValue, SendError> {
@@ -832,7 +995,7 @@ mod linux {
         let outbox = Arc::new(Mutex::new(
             DurableOutbox::open(&outbox_path, 100_000).map_err(|e| e.to_string())?,
         ));
-        let radio = Radio::new();
+        let (radio, rescans) = Radio::new();
         let proxies = Arc::new(ProxyRuntime::new(radio.clone())?);
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
@@ -871,22 +1034,39 @@ mod linux {
         // cloud buckets it by hour, so a minute's resolution is already finer
         // than anything asked of it, and an idle listener sends nothing at all.
         let mut since_traffic_report = Duration::ZERO;
+        let mut last_tick = Instant::now();
         loop {
             if let Err(error) = poll_modems(&shared, &outbox, &radio) {
                 log_error(format!("poll: {error}"));
             }
-            since_traffic_report += Duration::from_secs(8);
+            // Measured rather than assumed to be the poll interval: a rescan
+            // request cuts the wait below short, and charging a full interval
+            // for a pass that took two seconds would walk the traffic report
+            // steadily earlier than the minute it claims.
+            let tick = Instant::now();
+            since_traffic_report += tick.duration_since(last_tick);
+            last_tick = tick;
             if since_traffic_report >= TRAFFIC_REPORT_INTERVAL {
                 since_traffic_report = Duration::ZERO;
                 if let Err(error) = report_proxy_traffic(&proxies, &outbox) {
                     log_error(format!("proxy traffic: {error}"));
                 }
             }
-            std::thread::sleep(Duration::from_secs(8));
+            // `RefreshModems` ends the wait early; timing out is the ordinary
+            // case. A disconnected channel cannot happen while any `Radio`
+            // handle is alive, but treating it as "poll now" would spin a
+            // core, so it falls back to the timer it replaced.
+            match rescans.recv_timeout(POLL_INTERVAL) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => std::thread::sleep(POLL_INTERVAL),
+            }
         }
     }
 
     const TRAFFIC_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// How long the poll loop waits when nothing asks it to hurry.
+    const POLL_INTERVAL: Duration = Duration::from_secs(8);
 
     /// Sends what the listeners carried since the last report.
     ///
@@ -910,11 +1090,13 @@ mod linux {
         append_kind(outbox, "ProxyTraffic", payload)
     }
 
-    fn poll_modems(
-        shared: &Arc<SharedStore>,
-        outbox: &Arc<Mutex<DurableOutbox>>,
-        radio: &Radio,
-    ) -> Result<(), String> {
+    /// The QMI control ports the kernel is currently showing, sorted.
+    ///
+    /// One modem is one `cdc-wdm`, so this is the whole inventory question:
+    /// what is plugged in, before anything has been asked of it. Shared with
+    /// `RefreshModems`, which answers that question without probing, so the
+    /// rule for what counts as a modem lives in one place.
+    fn cdc_wdm_paths() -> Result<Vec<PathBuf>, String> {
         let mut paths = std::fs::read_dir("/dev")
             .map_err(|e| e.to_string())?
             .filter_map(|e| e.ok())
@@ -927,6 +1109,15 @@ mod linux {
             })
             .collect::<Vec<_>>();
         paths.sort();
+        Ok(paths)
+    }
+
+    fn poll_modems(
+        shared: &Arc<SharedStore>,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        radio: &Radio,
+    ) -> Result<(), String> {
+        let paths = cdc_wdm_paths()?;
         if paths.is_empty() {
             return Err("no /dev/cdc-wdm*".into());
         }

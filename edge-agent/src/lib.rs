@@ -121,6 +121,36 @@ pub trait SendPort {
         Err(unsupported("reset_modem_usb"))
     }
 
+    /// Bring the packet data bearer up or down.
+    fn set_data_network(&mut self, _imei: &str, _enabled: bool) -> Result<JsonValue, SendError> {
+        Err(unsupported("set_data_network"))
+    }
+
+    /// Choose which USB network function the module exposes.
+    ///
+    /// `mode` is one of `rmnet`, `ecm`, `mbim` or `rndis`. The change is
+    /// written to the module's own configuration and does not apply until it
+    /// restarts, so an implementation reports what it wrote rather than
+    /// claiming the interface already changed.
+    fn set_usbnet_mode(&mut self, _imei: &str, _mode: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("set_usbnet_mode"))
+    }
+
+    /// Drop the network registration and take it again.
+    ///
+    /// The cure for a modem that is attached to a cell but getting nothing
+    /// through it. The module is off-network in between, so this is not free.
+    fn reregister_network(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("reregister_network"))
+    }
+
+    /// Look for modems now rather than at the next poll.
+    ///
+    /// Takes no IMEI: the point is the ones that are not in the inventory yet.
+    fn refresh_modems(&mut self) -> Result<JsonValue, SendError> {
+        Err(unsupported("refresh_modems"))
+    }
+
     fn list_esim_profiles(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
         Err(unsupported("list_esim_profiles"))
     }
@@ -717,6 +747,41 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::ResetModemUsb { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.reset_usb(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SetDataNetwork {
+                modem_imei,
+                enabled,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.set_data_network(modem_imei, *enabled);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::SetUsbnetMode { modem_imei, mode } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.set_usbnet_mode(modem_imei, mode.as_str());
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ReregisterNetwork { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.reregister_network(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::RefreshModems => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.refresh_modems();
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

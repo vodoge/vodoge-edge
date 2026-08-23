@@ -332,6 +332,37 @@ impl edge_agent::SendPort for RecordingPort {
         Ok(serde_json::Value::Null)
     }
 
+    fn set_data_network(
+        &mut self,
+        _imei: &str,
+        enabled: bool,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("set_data_network {enabled}"));
+        Ok(serde_json::Value::Null)
+    }
+
+    fn set_usbnet_mode(
+        &mut self,
+        _imei: &str,
+        mode: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("set_usbnet_mode {mode}"));
+        Ok(serde_json::Value::Null)
+    }
+
+    fn reregister_network(
+        &mut self,
+        _imei: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("reregister_network".into());
+        Ok(serde_json::Value::Null)
+    }
+
+    fn refresh_modems(&mut self) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("refresh_modems".into());
+        Ok(serde_json::Value::Null)
+    }
+
     fn list_esim_profiles(
         &mut self,
         _imei: &str,
@@ -427,6 +458,27 @@ fn every_relayed_command_reaches_the_port() {
             },
             "reset_usb",
         ),
+        (
+            Command::SetDataNetwork {
+                modem_imei: IMEI.into(),
+                enabled: false,
+            },
+            "set_data_network false",
+        ),
+        (
+            Command::SetUsbnetMode {
+                modem_imei: IMEI.into(),
+                mode: "ecm".into(),
+            },
+            "set_usbnet_mode ecm",
+        ),
+        (
+            Command::ReregisterNetwork {
+                modem_imei: IMEI.into(),
+            },
+            "reregister_network",
+        ),
+        (Command::RefreshModems, "refresh_modems"),
         (
             Command::ListEsimProfiles {
                 modem_imei: IMEI.into(),
