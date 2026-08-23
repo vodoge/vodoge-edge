@@ -37,7 +37,10 @@ pub use at::{
     at_control_ports, at_port_for_qmi, first_bare_digits, usb_device_of_at, AtError, AtExchange,
     AtPort, AT_CONTROL_INTERFACE,
 };
-pub use usb::{reset_for_qmi, usb_device_of_qmi, UsbError, UsbReset};
+pub use usb::{
+    recover_usb_device, reset_for_qmi, usb_device_of_qmi, usb_devnum, usb_identity, UsbError,
+    UsbIdentity, UsbRecovery, UsbReset,
+};
 pub use ussd::{
     cancel as ussd_cancel, parse_reply as parse_ussd_reply, request as ussd_request, UssdReply,
     UssdStage,

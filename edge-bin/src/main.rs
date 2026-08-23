@@ -244,6 +244,151 @@ mod linux {
         ))
     }
 
+    /// Which USB device a reset is allowed to touch, and on what grounds.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct UsbAim {
+        /// Bus position, e.g. `4-3`.
+        device: String,
+        /// `answering` when the module named itself just now, `remembered`
+        /// when the aim rests on a recorded position that nothing
+        /// contradicted. The receipt carries this: an operator about to take
+        /// a module down is entitled to know how sure the agent is.
+        evidence: &'static str,
+        /// When the recorded position was observed, for a `remembered` aim.
+        recorded_at: Option<i64>,
+    }
+
+    /// Decide which USB device `imei` may be reset at.
+    ///
+    /// `census` is `usb device -> imei` for every module that answered its AT
+    /// control port just now. `remembered` is the last recorded position for
+    /// this module, and `identity_now` is what sysfs says is at that position
+    /// at this moment.
+    ///
+    /// # Why a recorded position can be trusted this far and no further
+    ///
+    /// The bench sticks report no USB serial and share one vendor/product
+    /// pair, so nothing in the descriptors can tell two of them apart. There
+    /// is therefore no way to *prove* that `4-2` is still the module it was
+    /// an hour ago without asking the module — and the whole point of this
+    /// command is that the module has stopped answering.
+    ///
+    /// What can be proved is the contrapositive, and it is the property that
+    /// actually matters: every module that can still be identified is
+    /// excluded from the target. A stick that answers neither QMI nor AT is
+    /// by definition not the working modem an operator is afraid of losing.
+    /// Add a position that only moves when the stick is re-attached (a
+    /// `cdc-wdm` number moves whenever the driver rebinds — the bench watched
+    /// `cdc-wdm2` come back on a different stick), a vendor/product pair that
+    /// still matches, and a refusal in every other case, and the worst
+    /// remaining outcome is resetting one silent module instead of another
+    /// silent module.
+    ///
+    /// Every failure path here is a refusal. There is deliberately no
+    /// "only one modem, so it must be that one" branch: the panel can ask for
+    /// a reset with no IMEI at all, and the old code answered that by taking
+    /// the first entry of a `BTreeMap`.
+    fn aim_usb_reset(
+        imei: Option<&str>,
+        census: &BTreeMap<String, String>,
+        remembered: Option<&edge_store::ModemUsbSite>,
+        identity_now: Option<&edge_modem::UsbIdentity>,
+    ) -> Result<UsbAim, SendError> {
+        let Some(imei) = imei.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err(SendError::new(
+                "modem_not_specified",
+                "a USB reset has to name the modem it is for; there is no default target",
+            ));
+        };
+        if let Some((device, _)) = census.iter().find(|(_, found)| *found == imei) {
+            return Ok(UsbAim {
+                device: device.clone(),
+                evidence: "answering",
+                recorded_at: None,
+            });
+        }
+        let Some(site) = remembered else {
+            return Err(SendError::new(
+                "modem_not_found",
+                format!(
+                    "imei {imei} did not answer on any control port, \
+                     and no USB position was ever recorded for it"
+                ),
+            ));
+        };
+        let Some(identity) = identity_now else {
+            return Err(SendError::new(
+                "modem_not_found",
+                format!(
+                    "imei {imei} was last seen on USB device {}, which is not on the bus now",
+                    site.usb_device
+                ),
+            ));
+        };
+        if identity.vendor != site.vendor_id || identity.product != site.product_id {
+            return Err(SendError::new(
+                "modem_moved",
+                format!(
+                    "USB device {} now reports {identity}, not the {}:{} recorded for imei {imei}",
+                    site.usb_device, site.vendor_id, site.product_id
+                ),
+            ));
+        }
+        if let Some(other) = census.get(&site.usb_device) {
+            return Err(SendError::new(
+                "modem_moved",
+                format!(
+                    "USB device {} is imei {other} right now, not imei {imei}; \
+                     refusing to reset a module that is answering",
+                    site.usb_device
+                ),
+            ));
+        }
+        Ok(UsbAim {
+            device: site.usb_device.clone(),
+            evidence: "remembered",
+            recorded_at: Some(site.seen_at),
+        })
+    }
+
+    /// Ask every AT control port who is behind it, right now.
+    ///
+    /// Deliberately AT and not QMI. Opening a `cdc-wdm` node and sending
+    /// `CTL SYNC` is itself how a healthy stick gets desynced — that is how
+    /// this bench went from two working modules to one on 2026-08-23 — so a
+    /// census taken in order to protect working modules must not use the
+    /// channel that breaks them. The AT control interface is present in every
+    /// usbnet mode and does not touch the QMI stack.
+    ///
+    /// Returns `usb device -> imei`, keyed by device because the question
+    /// being asked is "who is at this position", not "where is this module".
+    /// Ports that do not answer contribute nothing, which is correct: a
+    /// silent port is not evidence about anybody.
+    ///
+    /// The caller must already hold the radio lock.
+    fn usb_census() -> BTreeMap<String, String> {
+        let mut census = BTreeMap::new();
+        for path in edge_modem::at_control_ports() {
+            let Some(device) = edge_modem::usb_device_of_at(&path) else {
+                continue;
+            };
+            let Ok(mut port) = edge_modem::AtPort::open_with_timeout(&path, AT_PROBE_TIMEOUT) else {
+                continue;
+            };
+            let Ok(exchange) = port.command_with_timeout("AT+CGSN", AT_PROBE_TIMEOUT) else {
+                continue;
+            };
+            if !exchange.succeeded() {
+                continue;
+            }
+            let Some(imei) = edge_modem::first_bare_digits(&exchange.lines) else {
+                continue;
+            };
+            census.insert(device, imei);
+        }
+        census
+    }
+
     /// Clears the busy marker when the command finishes, however it finishes.
     struct BusyGuard {
         busy: Arc<Mutex<Option<PathBuf>>>,
@@ -258,6 +403,13 @@ mod linux {
     struct RadioPort {
         radio: Radio,
         proxies: Arc<ProxyRuntime>,
+        /// The local database, for the one command that has to work when
+        /// nothing on the bench will answer. `reset_modem_usb` aims by the
+        /// last recorded bus position, and an index that lives only in this
+        /// process is empty exactly when it is needed most: the agent had
+        /// been restarted, so the two desynced sticks on 2026-08-23 could not
+        /// be named at all and the recovery answered `modem_not_found`.
+        store: Arc<SharedStore>,
     }
 
     impl RadioPort {
@@ -313,6 +465,70 @@ mod linux {
                 ));
             }
             Ok(result)
+        }
+
+        /// Aim a USB recovery and carry it out.
+        ///
+        /// The single place both callers go through, so the panel and the
+        /// cloud cannot end up with two different ideas of what is a legal
+        /// target. Nothing here consults `Radio::by_imei`: that index is a
+        /// cache of the last successful QMI probe and is never invalidated,
+        /// so after a `cdc-wdm` number is reassigned it points at whichever
+        /// stick inherited the number. Fine for a status read, not fine for
+        /// deciding which module to take down.
+        fn recover_usb(
+            &self,
+            imei: Option<&str>,
+        ) -> Result<(UsbAim, edge_modem::UsbReset), SendError> {
+            // Held across the whole thing so a poll cannot open the character
+            // device while the module is de-authorised, and so the census is
+            // taken with nothing else on these ports.
+            let _lock = self.radio.lock.lock().expect("radio");
+            let census = usb_census();
+            let remembered = match imei.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(imei) => self
+                    .store
+                    .0
+                    .lock()
+                    .expect("store")
+                    .modem_usb_site(imei)
+                    .map_err(|error| SendError::new("store_unavailable", error.to_string()))?,
+                None => None,
+            };
+            let identity_now = remembered
+                .as_ref()
+                .and_then(|site| edge_modem::usb_identity(&site.usb_device));
+            let aim = aim_usb_reset(imei, &census, remembered.as_ref(), identity_now.as_ref())?;
+
+            // The panel compares its busy marker against `cdc-wdm` paths, so
+            // hold the node this device has right now if it has one. Resolved
+            // from sysfs rather than from the index: the index is what may be
+            // stale, and the point of holding it is to keep the poll loop off
+            // this particular device. A module with no QMI node has its bus
+            // position stand in, the same way `with_at_port` does.
+            let holding = cdc_wdm_paths()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|path| {
+                    edge_modem::usb_device_of_qmi(path).as_deref() == Some(aim.device.as_str())
+                })
+                .unwrap_or_else(|| PathBuf::from(&aim.device));
+            let _busy = self.radio.hold(&holding);
+            log_line(format!(
+                "usb recovery imei={} device={} evidence={} census={}",
+                imei.unwrap_or(""),
+                aim.device,
+                aim.evidence,
+                census.len()
+            ));
+            let reset = edge_modem::recover_usb_device(&aim.device)
+                .map_err(|error| SendError::new("usb_reset_failed", error.to_string()))?;
+            // The index still holds the `cdc-wdm` path this module had before
+            // it went away, and that path is about to belong to whoever the
+            // kernel hands the number to next. Ask for a rescan so the poll
+            // loop rebuilds it from what is actually on the bus.
+            self.radio.request_rescan();
+            Ok((aim, reset))
         }
 
         /// Reads `AT+QCFG="usbnet"` back after the module has re-enumerated.
@@ -531,8 +747,32 @@ mod linux {
         }
 
         fn reset_usb(&mut self, imei: &str) -> Result<JsonValue, SendError> {
-            let result = Actions::usb_reset(self, Some(imei.to_string())).map_err(action_failed)?;
-            json_details(&result)
+            // Not routed through `Actions::usb_reset`: that shape is the
+            // panel's and carries only a device and a node. A destructive
+            // action taken from the console has to say what it aimed by and
+            // what the bus looked like afterwards, or the only way to find
+            // out is to log in to the box — which is the situation this
+            // command exists to avoid.
+            let (aim, reset) = self.recover_usb(Some(imei))?;
+            json_details(&serde_json::json!({
+                "device": reset.device,
+                "node": reset.node.display().to_string(),
+                // `answering` or `remembered`. Worth reading: a remembered
+                // aim is the best available guess at a module that has gone
+                // silent, not a confirmed identification.
+                "evidence": aim.evidence,
+                "recorded_at": aim.recorded_at,
+                // `reauthorize` or `port_reset`. On this bench the modules
+                // arrive over USB/IP, where `vhci_hcd` answers a port reset
+                // locally and the module never sees it -- a `USBDEVFS_RESET`
+                // on 2026-08-23 left the stick just as desynced as it found
+                // it. `reauthorize` unbinds every interface driver and puts
+                // `SET_CONFIGURATION` on the wire, which does reach it.
+                "recovery": reset.recovery.wire(),
+                "devnum_before": reset.devnum_before,
+                "devnum_after": reset.devnum_after,
+                "returned_after_ms": reset.returned_after_ms,
+            }))
         }
 
         fn set_data_network(&mut self, imei: &str, enabled: bool) -> Result<JsonValue, SendError> {
@@ -814,6 +1054,7 @@ mod linux {
             let mut port = RadioPort {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
+                store: self.store.clone(),
             };
             SendPort::send_sms(
                 &mut port,
@@ -832,6 +1073,7 @@ mod linux {
             let mut port = RadioPort {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
+                store: self.store.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
                 .map_err(|error| PanelError::Action(error.to_string()))
@@ -1047,15 +1289,11 @@ mod linux {
         }
 
         fn usb_reset(&self, imei: Option<String>) -> Result<UsbResetResult, PanelError> {
-            // Held across the reset so a poll cannot open the character device
-            // while the module is re-enumerating.
-            let _lock = self.radio.lock.lock().expect("radio");
-            let qmi_path = self
-                .radio
-                .path_for(imei.as_deref())
-                .map_err(|error| PanelError::Action(error.to_string()))?;
-            let _busy = self.radio.hold(&qmi_path);
-            let reset = edge_modem::reset_for_qmi(&qmi_path)
+            // The panel's shape carries only where the reset landed. The
+            // grounds it landed on are in the log line and in the cloud
+            // receipt, which is where a destructive action gets read back.
+            let (_aim, reset) = self
+                .recover_usb(imei.as_deref())
                 .map_err(|error| PanelError::Action(error.to_string()))?;
             Ok(UsbResetResult {
                 device: reset.device,
@@ -1146,10 +1384,12 @@ mod linux {
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
             proxies: proxies.clone(),
+            store: shared.clone(),
         })));
         let panel_actions = Arc::new(RadioPort {
             radio: radio.clone(),
             proxies: proxies.clone(),
+            store: shared.clone(),
         });
 
         // The panel reads this to report cloud vs local, so what it shows is the
@@ -1467,6 +1707,7 @@ mod linux {
                         usb: snapshot.usb.clone(),
                     },
                 );
+                remember_usb_site(shared, &snapshot.imei, snapshot.usb.as_deref(), now);
             }
         }
 
@@ -1476,6 +1717,45 @@ mod linux {
             return Err("no /dev/cdc-wdm* and no AT control port answered".into());
         }
         Ok(())
+    }
+
+    /// Write down where a module was just proven to be.
+    ///
+    /// Only for snapshots the module itself produced — a `state == "online"`
+    /// row means something answered, over QMI or over AT. An `absent_snapshot`
+    /// is assembled from memory, and recording its position would turn a
+    /// guess into a record and then, later, into the aim of a reset.
+    ///
+    /// Failure is logged and not propagated: losing this row degrades a
+    /// future recovery to a clear refusal, which is a far smaller problem
+    /// than a poll pass that stops reporting the fleet.
+    fn remember_usb_site(
+        shared: &Arc<SharedStore>,
+        imei: &str,
+        usb: Option<&str>,
+        now: i64,
+    ) {
+        let Some(usb) = usb else { return };
+        // Read now rather than assumed: the pair is what a recorded position
+        // is checked against later, and recording a remembered value would
+        // make that check compare the record with itself.
+        let Some(identity) = edge_modem::usb_identity(usb) else {
+            return;
+        };
+        if let Err(error) = shared
+            .0
+            .lock()
+            .expect("store")
+            .remember_modem_usb_site(&edge_store::ModemUsbSite {
+                imei: imei.to_string(),
+                usb_device: usb.to_string(),
+                vendor_id: identity.vendor,
+                product_id: identity.product,
+                seen_at: now,
+            })
+        {
+            log_error(format!("usb position for imei={imei} not recorded: {error}"));
+        }
     }
 
     /// A module the agent knows about but cannot reach right now.
@@ -2759,6 +3039,199 @@ mod linux {
         fn discovery_spells_itself_the_way_the_contract_does() {
             assert_eq!(Discovery::Qmi.wire(), "qmi");
             assert_eq!(Discovery::At.wire(), "at");
+        }
+    }
+
+    /// Aiming a USB recovery.
+    ///
+    /// Everything here is about a command that takes hardware down. The bench
+    /// has three sticks, no second set, and nobody who can reach them, so the
+    /// tests are written from the losing side: what must this refuse to do.
+    #[cfg(test)]
+    mod usb_aim_tests {
+        use super::*;
+
+        const ALIVE: &str = "867018069509705";
+        const WEDGED: &str = "862547055142811";
+        const OTHER: &str = "867018069514820";
+
+        fn quectel() -> edge_modem::UsbIdentity {
+            edge_modem::UsbIdentity {
+                vendor: "2c7c".into(),
+                product: "0125".into(),
+            }
+        }
+
+        fn site(imei: &str, device: &str) -> edge_store::ModemUsbSite {
+            edge_store::ModemUsbSite {
+                imei: imei.into(),
+                usb_device: device.into(),
+                vendor_id: "2c7c".into(),
+                product_id: "0125".into(),
+                seen_at: 1_787_000_000_000,
+            }
+        }
+
+        fn census(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(device, imei)| ((*device).to_string(), (*imei).to_string()))
+                .collect()
+        }
+
+        /// The reason this card exists. Neither QMI nor AT can name the
+        /// module, and the recovery still has to find it.
+        #[test]
+        fn a_silent_module_is_still_found_by_its_recorded_position() {
+            let aim = aim_usb_reset(
+                Some(WEDGED),
+                &census(&[("4-3", ALIVE)]),
+                Some(&site(WEDGED, "4-2")),
+                Some(&quectel()),
+            )
+            .expect("aimed");
+            assert_eq!(aim.device, "4-2");
+            assert_eq!(aim.evidence, "remembered");
+            assert_eq!(aim.recorded_at, Some(1_787_000_000_000));
+        }
+
+        /// A module that answers is identified, not looked up. The record is
+        /// not even consulted, so a stale one cannot override the truth.
+        #[test]
+        fn a_module_that_answers_is_taken_at_its_word() {
+            let aim = aim_usb_reset(
+                Some(ALIVE),
+                &census(&[("4-3", ALIVE)]),
+                Some(&site(ALIVE, "4-1")),
+                Some(&quectel()),
+            )
+            .expect("aimed");
+            assert_eq!(aim.device, "4-3");
+            assert_eq!(aim.evidence, "answering");
+            assert_eq!(aim.recorded_at, None);
+        }
+
+        /// Red against the behaviour this replaces.
+        ///
+        /// `Radio::path_for(None)` answered a missing IMEI with
+        /// `map.values().next()` — the first entry of a `BTreeMap` — and the
+        /// local panel's reset endpoint takes `imei` as an `Option`. So a
+        /// `POST /api/usb-reset {}` used to take down whichever module sorted
+        /// first. There is no safe default target for this command.
+        #[test]
+        fn a_reset_with_no_target_named_is_refused() {
+            for missing in [None, Some(""), Some("  ")] {
+                let error = aim_usb_reset(
+                    missing,
+                    &census(&[("4-1", OTHER), ("4-2", WEDGED), ("4-3", ALIVE)]),
+                    None,
+                    None,
+                )
+                .expect_err("a reset with no target must be refused");
+                assert_eq!(error.reason_code, "modem_not_specified");
+            }
+        }
+
+        /// Nothing answered and nothing was ever recorded. The honest answer
+        /// is that the module cannot be located, not a guess at the only
+        /// device on the bus.
+        #[test]
+        fn an_unknown_module_is_refused_even_when_one_device_is_free() {
+            let error = aim_usb_reset(
+                Some(WEDGED),
+                &census(&[("4-3", ALIVE)]),
+                None,
+                Some(&quectel()),
+            )
+            .expect_err("refused");
+            assert_eq!(error.reason_code, "modem_not_found");
+            assert!(
+                error.message.contains("no USB position was ever recorded"),
+                "{}",
+                error.message
+            );
+        }
+
+        /// A record whose device is gone is a record, not a target. Resetting
+        /// "the closest thing still there" is how the wrong stick gets hit.
+        #[test]
+        fn a_recorded_position_that_is_empty_now_is_refused() {
+            let error = aim_usb_reset(Some(WEDGED), &census(&[]), Some(&site(WEDGED, "4-2")), None)
+                .expect_err("refused");
+            assert_eq!(error.reason_code, "modem_not_found");
+            assert!(error.message.contains("4-2"), "{}", error.message);
+        }
+
+        /// Something else is at that position now. Different hardware, so the
+        /// record says nothing about it.
+        #[test]
+        fn a_position_holding_different_hardware_is_refused() {
+            let error = aim_usb_reset(
+                Some(WEDGED),
+                &census(&[]),
+                Some(&site(WEDGED, "4-2")),
+                Some(&edge_modem::UsbIdentity {
+                    vendor: "0e0f".into(),
+                    product: "0002".into(),
+                }),
+            )
+            .expect_err("refused");
+            assert_eq!(error.reason_code, "modem_moved");
+            assert!(error.message.contains("0e0f:0002"), "{}", error.message);
+        }
+
+        /// The one that matters most. Sticks do get re-enumerated onto other
+        /// positions, and a stale record then points at a module that is
+        /// perfectly healthy. Losing a working modem to a recovery aimed at a
+        /// broken one is worse than not recovering the broken one.
+        #[test]
+        fn a_stale_record_never_takes_down_a_module_that_is_answering() {
+            let error = aim_usb_reset(
+                Some(WEDGED),
+                &census(&[("4-2", ALIVE)]),
+                Some(&site(WEDGED, "4-2")),
+                Some(&quectel()),
+            )
+            .expect_err("refused");
+            assert_eq!(error.reason_code, "modem_moved");
+            assert!(error.message.contains(ALIVE), "{}", error.message);
+            assert!(
+                error.message.contains("refusing to reset a module that is answering"),
+                "{}",
+                error.message
+            );
+        }
+
+        /// The record may be stale in the other direction too: the module has
+        /// moved and is answering somewhere else. Its current position wins,
+        /// and the position it used to hold is left alone.
+        #[test]
+        fn a_module_that_moved_is_reset_where_it_is_now() {
+            let aim = aim_usb_reset(
+                Some(ALIVE),
+                &census(&[("4-1", ALIVE)]),
+                Some(&site(ALIVE, "4-3")),
+                Some(&quectel()),
+            )
+            .expect("aimed");
+            assert_eq!(aim.device, "4-1");
+            assert_eq!(aim.evidence, "answering");
+        }
+
+        /// A census with nothing in it means every port is silent, which is
+        /// the shape of the 2026-08-23 bench. The recorded position is then
+        /// the only evidence there is, and it is allowed to be used.
+        #[test]
+        fn a_wholly_silent_bench_can_still_be_aimed_at() {
+            let aim = aim_usb_reset(
+                Some(WEDGED),
+                &census(&[]),
+                Some(&site(WEDGED, "4-2")),
+                Some(&quectel()),
+            )
+            .expect("aimed");
+            assert_eq!(aim.device, "4-2");
+            assert_eq!(aim.evidence, "remembered");
         }
     }
 }

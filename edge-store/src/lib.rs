@@ -11,12 +11,34 @@ use rusqlite::{params, Connection};
 
 pub use outbox::{CapacityAlert, DurableOutbox, QueueError, DEFAULT_MAX_RECORDS};
 
+/// Where each module was last seen on the USB bus.
+///
+/// Separate from `local_modems` because it answers a different question and
+/// has a different key discipline: `local_modems` is what the offline panel
+/// shows, while this is the aim of a destructive recovery and therefore has
+/// to be unambiguous. The unique index on `usb_device` is the point — two
+/// rows claiming one bus position would be exactly the state in which a
+/// reset could land on the wrong stick, so the newest observation evicts the
+/// older claim rather than sitting beside it.
+const MODEM_USB_SITES: &str = "\
+CREATE TABLE IF NOT EXISTS modem_usb_sites (
+    imei       TEXT PRIMARY KEY,
+    usb_device TEXT NOT NULL,
+    vendor_id  TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    seen_at    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS modem_usb_sites_device
+    ON modem_usb_sites (usb_device);
+";
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
     include_str!("../migrations/0003_local_inbox.sql"),
     include_str!("../migrations/0004_modem_network.sql"),
     include_str!("../migrations/0005_modem_home.sql"),
+    MODEM_USB_SITES,
 ];
 
 /// An opened edge database with migrations applied.
@@ -68,6 +90,7 @@ impl Store {
             });
         }
         if target < current {
+            self.conn.execute_batch("DROP TABLE IF EXISTS modem_usb_sites;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_messages;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_modems;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_gaps;")?;
@@ -262,6 +285,70 @@ impl Store {
         Ok(())
     }
 
+    /// Record where a module was just observed on the USB bus.
+    ///
+    /// Only ever called with an observation that was proven at the time — a
+    /// module that answered QMI or AT — because this record is what a
+    /// destructive recovery aims by when nothing answers any more.
+    ///
+    /// Any older row claiming the same bus position is deleted, not kept.
+    /// Sticks do get re-enumerated onto other positions, and the alternative
+    /// to eviction is two IMEIs pointing at one device: an aim that cannot be
+    /// resolved is a refusal, but an aim that resolves to the wrong stick is
+    /// a reset of somebody else's modem.
+    pub fn remember_modem_usb_site(&self, site: &ModemUsbSite) -> Result<(), StoreError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM modem_usb_sites WHERE usb_device = ?1 AND imei <> ?2",
+            params![site.usb_device, site.imei],
+        )?;
+        transaction.execute(
+            "INSERT INTO modem_usb_sites (imei, usb_device, vendor_id, product_id, seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(imei) DO UPDATE SET
+                usb_device = excluded.usb_device,
+                vendor_id = excluded.vendor_id,
+                product_id = excluded.product_id,
+                seen_at = excluded.seen_at",
+            params![
+                site.imei,
+                site.usb_device,
+                site.vendor_id,
+                site.product_id,
+                site.seen_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The last recorded bus position of one module, if there is one.
+    pub fn modem_usb_site(&self, imei: &str) -> Result<Option<ModemUsbSite>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT imei, usb_device, vendor_id, product_id, seen_at
+               FROM modem_usb_sites
+              WHERE imei = ?1",
+        )?;
+        let mut rows = statement.query_map(params![imei], read_usb_site)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every recorded bus position, newest observation first.
+    pub fn modem_usb_sites(&self) -> Result<Vec<ModemUsbSite>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT imei, usb_device, vendor_id, product_id, seen_at
+               FROM modem_usb_sites
+              ORDER BY seen_at DESC, imei",
+        )?;
+        let rows = statement
+            .query_map([], read_usb_site)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi
@@ -319,6 +406,35 @@ pub struct LocalModem {
     pub imsi: Option<String>,
 }
 
+/// Where one module was last proven to sit on the USB bus.
+///
+/// The bus position (`4-3`) is the field that matters. A `cdc-wdm` number is
+/// reassigned every time the driver rebinds — the bench watched `cdc-wdm2`
+/// come back on a stick it had not been on — whereas the position only moves
+/// when the stick itself is re-attached. `vendor_id`/`product_id` are carried
+/// so a recorded position can be checked against what is at that position
+/// now, instead of being believed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModemUsbSite {
+    pub imei: String,
+    pub usb_device: String,
+    pub vendor_id: String,
+    pub product_id: String,
+    /// Unix milliseconds of the observation, so an aim can say how old the
+    /// evidence it used was.
+    pub seen_at: i64,
+}
+
+fn read_usb_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<ModemUsbSite> {
+    Ok(ModemUsbSite {
+        imei: row.get(0)?,
+        usb_device: row.get(1)?,
+        vendor_id: row.get(2)?,
+        product_id: row.get(3)?,
+        seen_at: row.get(4)?,
+    })
+}
+
 /// One persisted outbox row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboxRow {
@@ -359,5 +475,96 @@ impl Error for StoreError {
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sqlite(value)
+    }
+}
+
+#[cfg(test)]
+mod usb_site_tests {
+    use super::*;
+
+    fn site(imei: &str, device: &str, seen_at: i64) -> ModemUsbSite {
+        ModemUsbSite {
+            imei: imei.into(),
+            usb_device: device.into(),
+            vendor_id: "2c7c".into(),
+            product_id: "0125".into(),
+            seen_at,
+        }
+    }
+
+    /// The whole reason this table exists: the index the agent aimed by lived
+    /// in memory, so a restart left the one recovery for a desynced module
+    /// with nothing to aim at.
+    #[test]
+    fn a_recorded_position_outlives_the_process() {
+        let store = Store::open_in_memory().expect("open");
+        store
+            .remember_modem_usb_site(&site("867018069509705", "4-3", 100))
+            .expect("remember");
+        let found = store
+            .modem_usb_site("867018069509705")
+            .expect("read")
+            .expect("recorded");
+        assert_eq!(found.usb_device, "4-3");
+        assert_eq!(found.vendor_id, "2c7c");
+        assert_eq!(found.seen_at, 100);
+    }
+
+    #[test]
+    fn a_module_that_was_never_seen_has_no_position() {
+        let store = Store::open_in_memory().expect("open");
+        assert_eq!(store.modem_usb_site("862547055142811").expect("read"), None);
+    }
+
+    /// A stick that re-enumerates onto another position must not leave its old
+    /// claim behind. Two rows pointing at one bus position is precisely the
+    /// state in which a reset aimed at one IMEI lands on another module.
+    #[test]
+    fn the_newest_observation_evicts_the_older_claim() {
+        let store = Store::open_in_memory().expect("open");
+        store
+            .remember_modem_usb_site(&site("862547055142811", "4-2", 100))
+            .expect("first");
+        store
+            .remember_modem_usb_site(&site("867018069514820", "4-2", 200))
+            .expect("second");
+
+        assert_eq!(store.modem_usb_site("862547055142811").expect("read"), None);
+        assert_eq!(
+            store
+                .modem_usb_site("867018069514820")
+                .expect("read")
+                .expect("recorded")
+                .usb_device,
+            "4-2"
+        );
+        let all = store.modem_usb_sites().expect("list");
+        assert_eq!(all.len(), 1, "one position, one claimant: {all:?}");
+    }
+
+    #[test]
+    fn a_module_that_moved_keeps_one_row() {
+        let store = Store::open_in_memory().expect("open");
+        store
+            .remember_modem_usb_site(&site("867018069509705", "4-3", 100))
+            .expect("first");
+        store
+            .remember_modem_usb_site(&site("867018069509705", "4-1", 200))
+            .expect("moved");
+        let all = store.modem_usb_sites().expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].usb_device, "4-1");
+        assert_eq!(all[0].seen_at, 200);
+    }
+
+    #[test]
+    fn positions_survive_a_rollback_and_replay() {
+        let mut store = Store::open_in_memory().expect("open");
+        store.rollback_to(0).expect("rollback");
+        store.migrate().expect("re-upgrade");
+        store
+            .remember_modem_usb_site(&site("867018069509705", "4-3", 100))
+            .expect("remember after rebuild");
+        assert!(store.modem_usb_site("867018069509705").expect("read").is_some());
     }
 }
