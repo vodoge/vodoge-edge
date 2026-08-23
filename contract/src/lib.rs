@@ -510,6 +510,44 @@ pub struct ResetModemUsbCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SetDataNetworkCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetUsbnetModeCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "mode")]
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReregisterNetworkCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshModemsCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListEsimProfilesCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -753,6 +791,23 @@ pub enum Command {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
     },
+    SetDataNetwork {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "enabled")]
+        enabled: bool,
+    },
+    SetUsbnetMode {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "mode")]
+        mode: String,
+    },
+    ReregisterNetwork {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    RefreshModems,
     ConfigureProxy {
         #[serde(rename = "instances")]
         instances: Vec<ProxyInstanceSpec>,

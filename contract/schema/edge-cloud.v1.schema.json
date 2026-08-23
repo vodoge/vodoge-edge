@@ -637,6 +637,10 @@
       { "$ref": "#/$defs/SelectOperatorCommand" },
       { "$ref": "#/$defs/ModemReportCommand" },
       { "$ref": "#/$defs/ResetModemUsbCommand" },
+      { "$ref": "#/$defs/SetDataNetworkCommand" },
+      { "$ref": "#/$defs/SetUsbnetModeCommand" },
+      { "$ref": "#/$defs/ReregisterNetworkCommand" },
+      { "$ref": "#/$defs/RefreshModemsCommand" },
       { "$ref": "#/$defs/ConfigureProxyCommand" },
       { "$ref": "#/$defs/ProxyLifecycleCommand" },
       { "$ref": "#/$defs/ProbeUpstreamProxyCommand" },
@@ -745,6 +749,43 @@
       "properties": {
         "kind": { "const": "ResetModemUsb" },
         "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "SetDataNetworkCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "enabled"],
+      "properties": {
+        "kind": { "const": "SetDataNetwork" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "SetUsbnetModeCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "mode"],
+      "properties": {
+        "kind": { "const": "SetUsbnetMode" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "mode": { "type": "string", "enum": ["rmnet", "ecm", "mbim", "rndis"] }
+      }
+    },
+    "ReregisterNetworkCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ReregisterNetwork" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "RefreshModemsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "RefreshModems" }
       }
     },
     "ListEsimProfilesCommand": {
