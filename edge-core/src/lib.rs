@@ -24,7 +24,7 @@ pub use capability::{
 };
 pub use concat::{assemble, AssembledSms, ConcatPart};
 pub use gsm7::decode as decode_gsm7;
-pub use pdu::{decode_deliver, hex, Deliver};
+pub use pdu::{decode_deliver, decode_status_report, hex, Deliver, StatusReport};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{

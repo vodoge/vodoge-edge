@@ -7,8 +7,14 @@ const GSM7_MAX_SEPTETS: usize = 160;
 const UCS2_MAX_CHARS: usize = 70;
 
 /// Encode one SMS-SUBMIT PDU including a zero-length SMSC prefix.
-pub fn encode_submit(to: &str, body: &str) -> Result<Vec<u8>, PduError> {
-    let tpdu = encode_tpdu(to, body)?;
+///
+/// `reference` becomes TP-MR. It is the caller's because it is the only thing
+/// that ties a later SMS-STATUS-REPORT back to this send: the report quotes
+/// the reference and nothing else about the original. It used to be a
+/// hardcoded zero, which was harmless while nothing read the reports back and
+/// would have made every one of them ambiguous the moment something did.
+pub fn encode_submit(to: &str, body: &str, reference: u8) -> Result<Vec<u8>, PduError> {
+    let tpdu = encode_tpdu(to, body, reference)?;
     let mut pdu = Vec::with_capacity(1 + tpdu.len());
     pdu.push(0x00);
     pdu.extend_from_slice(&tpdu);
@@ -39,15 +45,27 @@ impl std::fmt::Display for PduError {
 
 impl std::error::Error for PduError {}
 
-fn encode_tpdu(to: &str, body: &str) -> Result<Vec<u8>, PduError> {
+fn encode_tpdu(to: &str, body: &str, reference: u8) -> Result<Vec<u8>, PduError> {
     if body.is_empty() {
         return Err(PduError::EmptyBody);
     }
     let (digit_count, toa, address) = encode_address(to)?;
     let gsm7 = pack_gsm7(body);
     let mut tpdu = Vec::new();
-    tpdu.push(0x01);
-    tpdu.push(0x00);
+    // TP-MTI 0b01 (SUBMIT) with TP-SRR set.
+    //
+    // The status-report-request bit is the whole reason a `+CDS` ever arrives.
+    // Nothing in the modem, the SMSC, or any AT setting can conjure a delivery
+    // receipt for a message that did not ask for one -- `AT+CSMS=1` and
+    // `AT+CNMI` only decide what happens to a report that exists. This octet
+    // is where it is decided that one should.
+    //
+    // Always on rather than per-message: every send goes through one console
+    // form with no "confirm delivery" checkbox, and a receipt the operator did
+    // not ask for costs nothing while a missing one cannot be recovered after
+    // the fact.
+    tpdu.push(0x21);
+    tpdu.push(reference);
     tpdu.push(digit_count);
     tpdu.push(toa);
     tpdu.extend_from_slice(&address);
@@ -153,18 +171,36 @@ mod tests {
 
     #[test]
     fn ascii_submit_uses_gsm7_and_default_smsc() {
-        let pdu = encode_submit("12345", "Hi").expect("pdu");
+        let pdu = encode_submit("12345", "Hi", 0x00).expect("pdu");
         assert_eq!(
             pdu,
             [
-                0x00, 0x01, 0x00, 0x05, 0x81, 0x21, 0x43, 0xf5, 0x00, 0x00, 0x02, 0xc8, 0x34
+                0x00, 0x21, 0x00, 0x05, 0x81, 0x21, 0x43, 0xf5, 0x00, 0x00, 0x02, 0xc8, 0x34
             ]
         );
     }
 
+    // The bit that asks the network for a delivery receipt. Named in its own
+    // test because the byte-exact case above would still pass with it cleared
+    // if someone updated the expected array to match the code.
+    #[test]
+    fn submit_requests_a_status_report() {
+        let pdu = encode_submit("12345", "Hi", 0x00).expect("pdu");
+        assert_eq!(pdu[1] & 0x20, 0x20, "TP-SRR must be set");
+        assert_eq!(pdu[1] & 0x03, 0x01, "TP-MTI must still say SUBMIT");
+    }
+
+    // TP-MR is what a status report quotes back. A send that ignored the
+    // caller's reference would make every report point at the same message.
+    #[test]
+    fn the_caller_chooses_the_message_reference() {
+        let pdu = encode_submit("12345", "Hi", 0x9c).expect("pdu");
+        assert_eq!(pdu[2], 0x9c);
+    }
+
     #[test]
     fn plus_prefix_is_international() {
-        let pdu = encode_submit("+8613800138000", "Hi").expect("pdu");
+        let pdu = encode_submit("+8613800138000", "Hi", 0x00).expect("pdu");
         assert_eq!(pdu[4], 0x91);
         assert_eq!(pdu[3], 13);
     }
@@ -174,7 +210,7 @@ mod tests {
         // 下标对照 ascii_submit_uses_gsm7_and_default_smsc 里的完整布局：
         // [0]SMSC [1]首字节 [2]MR [3]位数 [4]TOA [5..8]地址 [8]PID [9]DCS [10]UDL [11..]数据
         // PID 那一字节容易漏算——漏了会把 DCS 的断言错位到 PID 上。
-        let pdu = encode_submit("10086", "你好").expect("pdu");
+        let pdu = encode_submit("10086", "你好", 0x00).expect("pdu");
         assert_eq!(pdu[0], 0x00);
         assert_eq!(pdu[8], 0x00, "PID");
         assert_eq!(pdu[9], 0x08, "DCS 应为 UCS-2");
@@ -184,6 +220,9 @@ mod tests {
 
     #[test]
     fn empty_destination_is_rejected() {
-        assert_eq!(encode_submit(" ", "Hi"), Err(PduError::EmptyDestination));
+        assert_eq!(
+            encode_submit(" ", "Hi", 0x00),
+            Err(PduError::EmptyDestination)
+        );
     }
 }

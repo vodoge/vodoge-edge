@@ -277,9 +277,12 @@ struct RecordingPort {
 }
 
 impl edge_agent::SendPort for RecordingPort {
-    fn send_sms(&mut self, _send: &edge_agent::SmsSend) -> Result<(), edge_agent::SendError> {
+    fn send_sms(
+        &mut self,
+        _send: &edge_agent::SmsSend,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
         self.calls.push("send_sms".into());
-        Ok(())
+        Ok(serde_json::Value::Null)
     }
 
     fn run_at(
@@ -548,8 +551,11 @@ fn an_action_with_no_reading_sends_no_details() {
 fn an_unimplemented_action_fails_with_its_name() {
     struct BarePort;
     impl edge_agent::SendPort for BarePort {
-        fn send_sms(&mut self, _send: &edge_agent::SmsSend) -> Result<(), edge_agent::SendError> {
-            Ok(())
+        fn send_sms(
+            &mut self,
+            _send: &edge_agent::SmsSend,
+        ) -> Result<serde_json::Value, edge_agent::SendError> {
+            Ok(serde_json::Value::Null)
         }
     }
 

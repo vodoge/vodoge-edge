@@ -21,6 +21,7 @@ pub enum MessageKind {
     CommandDeliver,
     CommandReceipt,
     SmsReceived,
+    SmsStatusReport,
     DeviceState,
     CommandResult,
     EsimInventory,
@@ -42,6 +43,7 @@ impl MessageKind {
             Self::CommandDeliver => "CommandDeliver",
             Self::CommandReceipt => "CommandReceipt",
             Self::SmsReceived => "SmsReceived",
+            Self::SmsStatusReport => "SmsStatusReport",
             Self::DeviceState => "DeviceState",
             Self::CommandResult => "CommandResult",
             Self::EsimInventory => "EsimInventory",
@@ -63,6 +65,7 @@ impl MessageKind {
             Self::CommandDeliver => false,
             Self::CommandReceipt => false,
             Self::SmsReceived => true,
+            Self::SmsStatusReport => true,
             Self::DeviceState => true,
             Self::CommandResult => true,
             Self::EsimInventory => true,
@@ -276,6 +279,27 @@ pub struct SmsReceivedPayload {
     pub encoding: String,
     #[serde(rename = "modem_storage_index", default, skip_serializing_if = "Option::is_none")]
     pub modem_storage_index: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmsStatusReportPayload {
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "peer")]
+    pub peer: String,
+    #[serde(rename = "reference")]
+    pub reference: i64,
+    #[serde(rename = "status")]
+    pub status: String,
+    #[serde(rename = "status_code", default, skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<i64>,
+    #[serde(rename = "reported_at")]
+    pub reported_at: i64,
+    #[serde(rename = "submitted_at", default, skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<i64>,
+    #[serde(rename = "delivered_at", default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

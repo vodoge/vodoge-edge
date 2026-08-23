@@ -24,7 +24,7 @@ fn main() {
 mod linux {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
     use std::sync::MutexGuard;
 
@@ -400,17 +400,52 @@ mod linux {
         }
     }
 
+    /// The next TP-MR to put on an outgoing SMS.
+    ///
+    /// One counter for the whole agent rather than one per module: the field
+    /// is eight bits, a receipt is matched by device and recipient as well as
+    /// by reference, and a shared counter makes two sends close together
+    /// differ even when they leave on different sticks.
+    static NEXT_MESSAGE_REFERENCE: AtomicU32 = AtomicU32::new(0);
+
     impl SendPort for RadioPort {
-        fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError> {
-            let pdu = encode_submit(&send.to, &send.body)
+        fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
+            // TP-MR, chosen here and reported back. A delivery receipt names
+            // the message it is about by this number and by nothing else, so
+            // it has to be both known to us and different from the last one:
+            // the encoder used to write a constant zero, which would make
+            // every receipt on the device point at the same send.
+            //
+            // Eight bits is all the field has, so it wraps after 256 messages.
+            // That is the protocol's limit, not a choice; the cloud narrows a
+            // repeat by device and recipient and takes the most recent match.
+            let reference = (NEXT_MESSAGE_REFERENCE.fetch_add(1, Ordering::Relaxed) & 0xff) as u8;
+            let pdu = encode_submit(&send.to, &send.body, reference)
                 .map_err(|error| SendError::new("pdu_encode_failed", error.to_string()))?;
-            self.radio
+            let assigned = self
+                .radio
                 .with_client(send.modem_imei.as_deref(), |client| {
                     client
                         .send_sms(0x06, &pdu)
-                        .map(|_| ())
                         .map_err(|error| SendError::new("send_failed", error.to_string()))
-                })
+                })?;
+            // The modem answers with the reference it actually used. It is
+            // normally the one in the PDU -- RAW_SEND transmits the bytes as
+            // given -- but where firmware substitutes its own, the report will
+            // quote the firmware's and not ours, so the modem's answer wins
+            // and ours is kept alongside to make a disagreement visible.
+            if let Some(assigned) = assigned {
+                if assigned != u16::from(reference) {
+                    log_error(format!(
+                        "sms reference {reference} was replaced by the modem with {assigned}"
+                    ));
+                }
+            }
+            Ok(serde_json::json!({
+                "message_reference": assigned.unwrap_or(u16::from(reference)),
+                "requested_reference": reference,
+                "status_report_requested": true,
+            }))
         }
 
         fn restart_modem(&mut self, imei: &str) -> Result<(), SendError> {
@@ -789,6 +824,7 @@ mod linux {
                     iccid: None,
                 },
             )
+            .map(|_| ())
             .map_err(|error| PanelError::Action(error.to_string()))
         }
 
@@ -1798,9 +1834,25 @@ mod linux {
         // the port that is already paired with this modem. A stick with no
         // signal and a stick whose strength was never read look identical
         // upstream otherwise.
-        let quality = read_radio_quality(path);
+        let at_pass = read_at_pass(path);
+        let quality = at_pass.quality;
         let now = unix_ms();
         radio.remember(&imei, path);
+
+        // Delivery receipts, before the inbox sweep and before anything can
+        // return early. A receipt settles a message the console is already
+        // showing as sent, so losing one leaves that message looking stuck
+        // forever -- there is no second copy and the network does not resend.
+        for report in &at_pass.reports {
+            if report.peer.is_empty() {
+                log_error(format!(
+                    "status report ref={} has no recipient address; nothing to settle",
+                    report.reference
+                ));
+                continue;
+            }
+            enqueue_status_report(outbox, &imei, report, now)?;
+        }
         {
             let store = shared.0.lock().expect("store");
             store
@@ -1954,23 +2006,259 @@ mod linux {
         append_kind(outbox, "SmsReceived", payload)
     }
 
-    /// `AT+CSQ` and `AT+QCSQ` on the control port paired with this QMI node.
+    /// What one AT pass over a module's control port produced.
+    struct AtPass {
+        quality: RadioQuality,
+        reports: Vec<edge_core::StatusReport>,
+    }
+
+    impl Default for AtPass {
+        fn default() -> Self {
+            Self {
+                quality: RadioQuality::default(),
+                reports: Vec::new(),
+            }
+        }
+    }
+
+    /// `AT+CSQ`, `AT+QCSQ` and the delivery-receipt store, on one open.
     ///
     /// Best effort by design: the poll must not fail because a diagnostic
     /// reading did not come back. A stick whose AT port is busy simply
-    /// reports no quality this round.
+    /// reports no quality and no receipts this round.
     ///
-    /// Both readings share one open. They are asked of the same port a
-    /// fraction of a second apart, and opening it twice doubles the chance of
+    /// All of it shares one open. These are asked of the same port a fraction
+    /// of a second apart, and opening it repeatedly multiplies the chance of
     /// colliding with a command the console is running on the same port.
-    fn read_radio_quality(qmi_path: &Path) -> RadioQuality {
+    fn read_at_pass(qmi_path: &Path) -> AtPass {
         let Some(at_path) = edge_modem::at_port_for_qmi(qmi_path) else {
-            return RadioQuality::default();
+            return AtPass::default();
         };
         let Ok(mut port) = edge_modem::AtPort::open(&at_path) else {
-            return RadioQuality::default();
+            return AtPass::default();
         };
-        read_radio_quality_on(&mut port)
+        AtPass {
+            quality: read_radio_quality_on(&mut port),
+            reports: collect_status_reports(&mut port),
+        }
+    }
+
+    /// Reads and clears the module's delivery receipts.
+    ///
+    /// Receipts are not in the inbox. `AT+CPMS=?` on these EC20s offers four
+    /// stores -- ME, MT, SM, SR -- and a status report goes to SR, which QMI
+    /// WMS cannot name at all: its storage enum is UIM and NV, so the QMI
+    /// sweep that collects arriving messages will never see one. That is why
+    /// this lives on the serial side rather than beside collect_inbound.
+    ///
+    /// Everything listed is deleted, decoded or not. The store holds a few
+    /// hundred and every outbound message now asks for a receipt, so a reader
+    /// that left behind what it could not parse would fill it and then stop
+    /// receiving -- a fault that appears days later and looks like receipts
+    /// going missing at random.
+    fn collect_status_reports(port: &mut edge_modem::AtPort) -> Vec<edge_core::StatusReport> {
+        if !enable_status_reports(port) {
+            return Vec::new();
+        }
+        let Some(used) = select_report_store(port) else {
+            return Vec::new();
+        };
+        if used == 0 {
+            restore_message_store(port);
+            return Vec::new();
+        }
+
+        let mut reports = Vec::new();
+        // PDU mode. Text mode renders a status report as fields the module has
+        // already interpreted, and TP-MR -- the only thing that ties it to a
+        // send -- is not among them.
+        if !at_ok(port, "AT+CMGF=0") {
+            restore_message_store(port);
+            return reports;
+        }
+        let listing = match port.command("AT+CMGL=4") {
+            Ok(exchange) if exchange.succeeded() => exchange.lines,
+            _ => {
+                restore_message_store(port);
+                return reports;
+            }
+        };
+
+        let mut indexes = Vec::new();
+        let mut pending_index: Option<u32> = None;
+        for line in &listing {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("+CMGL:") {
+                pending_index = rest
+                    .split(',')
+                    .next()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                continue;
+            }
+            let Some(index) = pending_index.take() else {
+                continue;
+            };
+            indexes.push(index);
+            let Some(bytes) = decode_hex(line) else {
+                log_error(format!("status report {index} is not hex: {line}"));
+                continue;
+            };
+            // The bytes are logged whatever happens to them. A receipt is one
+            // short line, one per sent message, and when a delivery lands on
+            // the wrong conversation or on none the PDU is the only evidence
+            // of what the network actually said.
+            match edge_core::decode_status_report(&bytes) {
+                Some(report) => {
+                    log_line(format!(
+                        "status report index={index} ref={} peer={} status={} code={:#04x} pdu={}",
+                        report.reference, report.peer, report.status, report.status_code, line
+                    ));
+                    reports.push(report);
+                }
+                None => log_error(format!("status report {index} undecodable: pdu={line}")),
+            }
+        }
+
+        for index in indexes {
+            if !at_ok(port, &format!("AT+CMGD={index}")) {
+                log_error(format!(
+                    "status report {index} not deleted; the store will fill"
+                ));
+            }
+        }
+        restore_message_store(port);
+        reports
+    }
+
+    /// Turns delivery receipts on, if they are not already.
+    ///
+    /// Two settings, both persistent per module, both off on this bench:
+    ///
+    /// AT+CSMS=1 selects phase 2+, without which the module has no way to hand
+    /// a status report over at all. It read 0 on all three sticks.
+    ///
+    /// The fourth parameter of AT+CNMI is the one for status reports, and it
+    /// read 0 -- discard. 2 stores the report and notifies, which is what this
+    /// wants. 1 would deliver it straight to whichever serial port happens to
+    /// be open, and in phase 2+ that also obliges the reader to acknowledge
+    /// every one with +CNMA before the module will accept the next; a poll
+    /// that opens the port for a moment every eight seconds would lose most of
+    /// them and wedge the rest. Only that one parameter is touched, so the
+    /// arriving-message path keeps whatever it was set to.
+    fn enable_status_reports(port: &mut edge_modem::AtPort) -> bool {
+        let service = at_fields(port, "AT+CSMS?", "+CSMS:")
+            .and_then(|fields| fields.first().and_then(|value| value.parse::<u8>().ok()));
+        if service != Some(1) && !at_ok(port, "AT+CSMS=1") {
+            log_error("AT+CSMS=1 refused; delivery receipts stay off".to_string());
+            return false;
+        }
+        let Some(cnmi) = at_fields(port, "AT+CNMI?", "+CNMI:") else {
+            return false;
+        };
+        if cnmi.len() < 4 {
+            return false;
+        }
+        if cnmi[3] == "2" {
+            return true;
+        }
+        let bfr = cnmi.get(4).map(String::as_str).unwrap_or("0");
+        let command = format!("AT+CNMI={},{},{},2,{}", cnmi[0], cnmi[1], cnmi[2], bfr);
+        if !at_ok(port, &command) {
+            log_error(format!("{command} refused; delivery receipts stay off"));
+            return false;
+        }
+        true
+    }
+
+    /// Points reads and deletes at the status-report store, returning how many
+    /// are in it. Only the read store moves, so where arriving messages are
+    /// written is left exactly as it was.
+    fn select_report_store(port: &mut edge_modem::AtPort) -> Option<u32> {
+        at_fields(port, "AT+CPMS=\"SR\"", "+CPMS:")
+            .and_then(|fields| fields.first().and_then(|value| value.parse::<u32>().ok()))
+    }
+
+    /// Puts the read store back so a console AT session finds the module as it
+    /// was.
+    fn restore_message_store(port: &mut edge_modem::AtPort) {
+        let _ = port.command("AT+CPMS=\"ME\"");
+    }
+
+    fn at_ok(port: &mut edge_modem::AtPort, command: &str) -> bool {
+        port.command(command)
+            .map(|exchange| exchange.succeeded())
+            .unwrap_or(false)
+    }
+
+    /// Runs a query and splits the named response line on commas.
+    ///
+    /// Quotes are stripped, so a caller never has to know which fields the
+    /// module chose to quote. +CPMS answers with them and +CSMS without.
+    fn at_fields(
+        port: &mut edge_modem::AtPort,
+        command: &str,
+        prefix: &str,
+    ) -> Option<Vec<String>> {
+        let exchange = port.command(command).ok()?;
+        if !exchange.succeeded() {
+            return None;
+        }
+        let line = exchange
+            .lines
+            .iter()
+            .find(|line| line.trim_start().starts_with(prefix))?;
+        Some(
+            line.trim_start()
+                .trim_start_matches(prefix)
+                .split(',')
+                .map(|field| field.trim().trim_matches('"').to_string())
+                .collect(),
+        )
+    }
+
+    fn decode_hex(text: &str) -> Option<Vec<u8>> {
+        let text = text.trim();
+        if text.is_empty() || text.len() % 2 != 0 {
+            return None;
+        }
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+            .collect()
+    }
+
+    /// Queues one delivery receipt for the cloud.
+    ///
+    /// Deliberately its own uplink kind rather than a variant of SmsReceived.
+    /// They are different events with different projections -- one inserts a
+    /// message, the other settles one that already exists -- and folding them
+    /// together would also fire the "new SMS" notification for every receipt.
+    fn enqueue_status_report(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        imei: &str,
+        report: &edge_core::StatusReport,
+        now: i64,
+    ) -> Result<(), String> {
+        let mut payload = serde_json::json!({
+            "modem_imei": imei,
+            "peer": report.peer,
+            "reference": report.reference,
+            "status": report.status,
+            "status_code": report.status_code,
+            "reported_at": now,
+        });
+        // Absent rather than zero when the module gave a timestamp that is not
+        // BCD. A discharge time of 1970 on an operator's screen is worse than
+        // none, because it looks like an answer.
+        if let Some(map) = payload.as_object_mut() {
+            if let Some(at) = report.delivered_at {
+                map.insert("delivered_at".into(), serde_json::json!(at));
+            }
+            if let Some(at) = report.submitted_at {
+                map.insert("submitted_at".into(), serde_json::json!(at));
+            }
+        }
+        append_kind(outbox, "SmsStatusReport", payload)
     }
 
     /// The same two readings on a port that is already open.

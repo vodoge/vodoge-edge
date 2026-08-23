@@ -67,7 +67,15 @@ impl Error for SendError {}
 
 /// Executes `SendSms` without requiring a real modem.
 pub trait SendPort {
-    fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError>;
+    /// Sends one SMS and returns what the modem said about it.
+    ///
+    /// The JSON goes into the result's `details`, like every diagnostic below,
+    /// and it is not decoration here: it carries the TP-MR the network will
+    /// quote back in the delivery receipt. Without it the cloud can only guess
+    /// which sent message a `+CDS` belongs to by picking the most recent one
+    /// to that number, which is right on a quiet bench and silently wrong the
+    /// first time two messages to one recipient are in flight together.
+    fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError>;
     fn restart_modem(&mut self, _imei: &str) -> Result<(), SendError> {
         Err(unsupported("restart_modem"))
     }
@@ -227,12 +235,12 @@ impl FakeSendPort {
 }
 
 impl SendPort for FakeSendPort {
-    fn send_sms(&mut self, send: &SmsSend) -> Result<(), SendError> {
+    fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
         if let Some(error) = self.error.clone() {
             return Err(error);
         }
         self.sent.push(send.clone());
-        Ok(())
+        Ok(JsonValue::Null)
     }
 
     fn restart_modem(&mut self, imei: &str) -> Result<(), SendError> {
@@ -558,25 +566,15 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     modem_imei: modem_imei.clone(),
                     iccid: iccid.clone(),
                 };
-                let result = match self.port.send_sms(&send) {
-                    Ok(()) => terminal_result(
-                        &payload.cmd_id,
-                        RESULT_SUCCEEDED,
-                        now_ms,
-                        attempts,
-                        None,
-                        None,
-                    ),
-                    Err(error) => terminal_result(
-                        &payload.cmd_id,
-                        RESULT_FAILED,
-                        now_ms,
-                        attempts,
-                        Some(error.reason_code.as_str()),
-                        Some(error.message.as_str()),
-                    ),
-                };
-                Ok((result, true))
+                // Same shape as the diagnostic relays: whatever the port
+                // reported travels back in `details`. For a send that is the
+                // message reference, which the cloud stores against the
+                // message so a later status report settles the right one.
+                let outcome = self.port.send_sms(&send);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
             }
             Command::RestartModem { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);

@@ -52,6 +52,7 @@
     "CommandDeliver": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 131072 },
     "CommandReceipt": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 4096 },
     "SmsReceived": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
+    "SmsStatusReport": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 4096 },
     "DeviceState": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
     "CommandResult": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
     "EsimInventory": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
@@ -146,6 +147,13 @@
           }
         },
         {
+          "if": { "properties": { "kind": { "const": "SmsStatusReport" } }, "required": ["kind"] },
+          "then": {
+            "required": ["seq"],
+            "properties": { "payload": { "$ref": "#/$defs/SmsStatusReportPayload" } }
+          }
+        },
+        {
           "if": { "properties": { "kind": { "const": "DeviceState" } }, "required": ["kind"] },
           "then": {
             "required": ["seq"],
@@ -195,6 +203,7 @@
         "CommandDeliver",
         "CommandReceipt",
         "SmsReceived",
+        "SmsStatusReport",
         "DeviceState",
         "CommandResult",
         "EsimInventory",
@@ -461,6 +470,31 @@
         "bearer": { "type": "string", "enum": ["cs", "ims", "nas", "unknown"] },
         "encoding": { "type": "string", "enum": ["gsm7", "ucs2", "8bit", "unknown"] },
         "modem_storage_index": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "SmsStatusReportPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An SMS-STATUS-REPORT the network sent about a message this device submitted. Not a command receipt: that says the modem took the message, this says the network handed it over.",
+      "required": ["modem_imei", "peer", "reference", "status", "reported_at"],
+      "properties": {
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "peer": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "reference": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "TP-MR of the original submission. Eight bits on the wire; carried wider because the modem reports the value it used and firmware is not obliged to keep it in range."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["delivered", "pending", "failed", "unknown"],
+          "description": "TP-ST reduced to an outcome. `pending` means the service centre is still trying, which is neither delivered nor failed."
+        },
+        "status_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "reported_at": { "$ref": "#/$defs/EpochMillis" },
+        "submitted_at": { "$ref": "#/$defs/EpochMillis" },
+        "delivered_at": { "$ref": "#/$defs/EpochMillis" }
       }
     },
     "ProxyTrafficPayload": {
