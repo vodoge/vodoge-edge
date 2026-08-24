@@ -399,6 +399,18 @@ impl edge_agent::SendPort for RecordingPort {
         self.calls.push(format!("retrieve_esim_notification {sequence_number}"));
         Ok(serde_json::json!({"delivered": false}))
     }
+
+    fn initiate_esim_authentication(
+        &mut self,
+        _imei: &str,
+        smdp_address: Option<&str>,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!(
+            "initiate_esim_authentication {}",
+            smdp_address.unwrap_or("from-chip")
+        ));
+        Ok(serde_json::json!({"transaction_id": "E4F6996D64A543FC8A7F6F8F97F9428D"}))
+    }
 }
 
 fn deliver(command: Command, port: RecordingPort) -> (CommandResultPayload, Vec<String>) {
@@ -524,6 +536,23 @@ fn every_relayed_command_reaches_the_port() {
                 sequence_number: 3,
             },
             "retrieve_esim_notification 3",
+        ),
+        (
+            // No address supplied, so the chip is asked where to go. That is
+            // the normal case: the bench eUICCs have no default SM-DP+ and
+            // the address comes off their pending notifications.
+            Command::InitiateEsimAuthentication {
+                modem_imei: IMEI.into(),
+                smdp_address: None,
+            },
+            "initiate_esim_authentication from-chip",
+        ),
+        (
+            Command::InitiateEsimAuthentication {
+                modem_imei: IMEI.into(),
+                smdp_address: Some("wbg.prod.ondemandconnectivity.com".into()),
+            },
+            "initiate_esim_authentication wbg.prod.ondemandconnectivity.com",
         ),
     ];
 

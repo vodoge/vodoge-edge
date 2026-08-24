@@ -31,7 +31,7 @@ mod linux {
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
     use edge_core::{assemble, CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
     use edge_modem::{
-        collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice,
+        collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice, Es9pClient,
         NasRegistrationState, OperatingMode, QmiClient,
     };
     use edge_panel::{
@@ -1118,6 +1118,137 @@ mod linux {
             })
         }
 
+        /// One ES9+ `InitiateAuthentication` against a real SM-DP+.
+        ///
+        /// The chip is read first and the server second, in that order, so
+        /// the challenge the server signs is one this card produced moments
+        /// earlier rather than one from a previous session.
+        ///
+        /// Nothing is written anywhere. This stops at the server's signed
+        /// answer: `AuthenticateServer` would put an RSP session on the card,
+        /// and delivering a notification would change the state of a real
+        /// paid account. Both belong to the download slice.
+        fn initiate_esim_authentication(
+            &mut self,
+            imei: &str,
+            smdp_address: Option<&str>,
+        ) -> Result<JsonValue, SendError> {
+            // Built per call rather than once at start-up. A CI root is an
+            // asset with an expiry, and reloading here means installing a new
+            // one takes effect without restarting the agent -- which matters
+            // because the failure it prevents is the whole fleet losing the
+            // ability to download profiles on a date nobody noticed.
+            let directory = edge_modem::trust_dir();
+            let client = Es9pClient::from_trust_dir(&directory).map_err(|error| {
+                SendError::new("esim_trust_anchors_unavailable", error.to_string())
+            })?;
+
+            let inputs = self.radio.with_client(Some(imei), |client| {
+                client
+                    .read_esim_authentication_inputs(ESIM_SLOT)
+                    .map_err(|error| {
+                        SendError::new("esim_authentication_inputs_failed", error.to_string())
+                    })
+            })?;
+
+            let (address, source) = match smdp_address {
+                Some(address) => (address.to_string(), "request"),
+                None => match inputs.addresses.default_dp_address.clone() {
+                    Some(address) => (address, "euicc_configured_addresses"),
+                    // Deliberately not rootDsAddress. Both bench chips report
+                    // testrootsmds.gsma.com, which is GSMA's test discovery
+                    // server signed by the SGP.26 test CI -- a production-CI
+                    // chip would refuse it, so trying would waste a round trip
+                    // and produce a failure that reads like a network fault.
+                    None => match inputs.notification_addresses.first() {
+                        Some(address) => (address.clone(), "pending_notification"),
+                        None => {
+                            return Err(SendError::new(
+                                "esim_smdp_address_unknown",
+                                format!(
+                                    "chip has no default SM-DP+ and no pending notification to \
+                                     take an address from{}",
+                                    inputs
+                                        .addresses
+                                        .root_ds_address
+                                        .as_ref()
+                                        .map(|root| format!(
+                                            " (its root SM-DS is {root}, which is not an SM-DP+)"
+                                        ))
+                                        .unwrap_or_default()
+                                ),
+                            ))
+                        }
+                    },
+                },
+            };
+
+            let start = client
+                .initiate_authentication(&address, &inputs.challenge, &inputs.info1.raw)
+                .map_err(|error| {
+                    SendError::new("esim_initiate_authentication_failed", error.to_string())
+                })?;
+
+            let chip_ci_keys = inputs.info1.ci_key_ids_for_verification.clone();
+            json_details(&EsimAuthenticationBody {
+                imei: imei.to_string(),
+                eid: inputs.eid,
+                smdp_address: start.smdp_address.clone(),
+                smdp_address_source: source,
+                configured_default_smdp: inputs.addresses.default_dp_address,
+                configured_root_smds: inputs.addresses.root_ds_address,
+                configured_addresses_error: inputs.addresses_error,
+                notification_addresses: inputs.notification_addresses,
+                notification_addresses_error: inputs.notification_addresses_error,
+                euicc_challenge: hex_string(&inputs.challenge),
+                euicc_info1_bytes: inputs.info1.raw.len(),
+                sgp22_version: inputs.info1.svn,
+                transaction_id: start.transaction_id.clone(),
+                server_address: start.server_address.clone(),
+                server_challenge: start.server_challenge.clone(),
+                echoed_euicc_challenge: start.echoed_euicc_challenge.clone(),
+                server_signed1_bytes: start.server_signed1.len(),
+                server_signature1_bytes: start.server_signature1.len(),
+                euicc_ci_pkid_to_be_used: start.euicc_ci_pkid_to_be_used.clone(),
+                // Whether the CI the server picked is one this chip will
+                // actually verify against. The two can disagree, and that
+                // disagreement is exactly what stops a download later.
+                ci_key_accepted_by_chip: chip_ci_keys
+                    .iter()
+                    .any(|key| key == &start.euicc_ci_pkid_to_be_used),
+                chip_ci_key_ids: chip_ci_keys,
+                certificate_key_id: start.verification.certificate_key_id.clone(),
+                certificate_authority_key_id: start
+                    .verification
+                    .certificate_authority_key_id
+                    .clone(),
+                certificate_sha256: start.verification.certificate_sha256.clone(),
+                certificate_not_after: start.verification.certificate_not_after.clone(),
+                certificate_signed_by_ci: start.verification.certificate_signed_by_ci,
+                server_signature_valid: start.verification.server_signature_valid,
+                challenge_echoed: start.verification.challenge_echoed,
+                trust_anchor_label: start.verification.trust_anchor_label.clone(),
+                trust_anchor_key_id: start.verification.trust_anchor_key_id.clone(),
+                trust_directory: directory.display().to_string(),
+                trust_anchors: client
+                    .anchors()
+                    .iter()
+                    .map(|anchor| TrustAnchorBody {
+                        label: anchor.label.clone(),
+                        key_id: anchor.key_id.clone(),
+                        sha256: anchor.sha256.clone(),
+                        not_after: anchor.not_after.clone(),
+                    })
+                    .collect(),
+                negotiated_tls: start.negotiated_tls.clone(),
+                admin_protocol: start.admin_protocol.clone(),
+                http_status: start.http_status,
+                elapsed_ms: start.elapsed_ms,
+                profile_downloaded: false,
+                stopped_after: AUTHENTICATION_STOP_POINT,
+            })
+        }
+
         fn configure_proxy(
             &mut self,
             instances: &JsonValue,
@@ -1310,6 +1441,89 @@ mod linux {
         /// successful retry.
         delivery_blocked_by: &'static str,
     }
+
+    /// `initiate_esim_authentication` as the console receives it.
+    ///
+    /// Long on purpose. This command exists to produce evidence, and evidence
+    /// that reduces to "it worked" is not evidence: the point is which server
+    /// answered, which CI root vouched for it, which key the chip would have
+    /// accepted, and how far the exchange deliberately did not go.
+    #[derive(serde::Serialize)]
+    struct EsimAuthenticationBody {
+        imei: String,
+        eid: String,
+        /// The SM-DP+ that answered.
+        smdp_address: String,
+        /// Where that address came from: `request`,
+        /// `euicc_configured_addresses` or `pending_notification`.
+        smdp_address_source: &'static str,
+        configured_default_smdp: Option<String>,
+        /// The root discovery server the chip names. Not used as a target:
+        /// the bench chips point at GSMA's test SM-DS, which a production-CI
+        /// chip cannot authenticate.
+        configured_root_smds: Option<String>,
+        configured_addresses_error: Option<String>,
+        notification_addresses: Vec<String>,
+        notification_addresses_error: Option<String>,
+        /// The sixteen bytes this chip generated for this exchange.
+        euicc_challenge: String,
+        euicc_info1_bytes: usize,
+        sgp22_version: Option<String>,
+        /// What the SM-DP+ calls this session.
+        transaction_id: String,
+        /// The address inside the server's signed structure.
+        server_address: String,
+        server_challenge: String,
+        /// The chip's challenge as the server echoed it back, signed.
+        echoed_euicc_challenge: String,
+        server_signed1_bytes: usize,
+        server_signature1_bytes: usize,
+        /// The CI key the server expects this eUICC to verify with.
+        euicc_ci_pkid_to_be_used: String,
+        /// Whether that key is one the chip actually lists.
+        ci_key_accepted_by_chip: bool,
+        chip_ci_key_ids: Vec<String>,
+        certificate_key_id: String,
+        certificate_authority_key_id: String,
+        certificate_sha256: String,
+        certificate_not_after: String,
+        /// The GSMA CI root's key verified the SM-DP+ certificate.
+        certificate_signed_by_ci: bool,
+        /// That certificate's key verified `serverSignature1`.
+        server_signature_valid: bool,
+        /// The echoed challenge is the one this chip produced, so the answer
+        /// cannot be a replay of an earlier session.
+        challenge_echoed: bool,
+        trust_anchor_label: String,
+        trust_anchor_key_id: String,
+        /// Where the CI roots were read from, so an operator can see which
+        /// set was in force rather than assuming.
+        trust_directory: String,
+        trust_anchors: Vec<TrustAnchorBody>,
+        negotiated_tls: Option<String>,
+        admin_protocol: Option<String>,
+        http_status: u16,
+        elapsed_ms: u64,
+        /// It was not. Stated rather than implied.
+        profile_downloaded: bool,
+        stopped_after: &'static str,
+    }
+
+    /// One CI root as it was loaded.
+    #[derive(serde::Serialize)]
+    struct TrustAnchorBody {
+        label: String,
+        key_id: String,
+        sha256: String,
+        /// A CI root expires. Rendering the date is what makes a rotation
+        /// something someone can plan rather than something that happens.
+        not_after: String,
+    }
+
+    /// Where this command stops, and why that is a choice.
+    const AUTHENTICATION_STOP_POINT: &str =
+        "the server's signed answer. AuthenticateServer would open an RSP session on the card \
+         and handleNotification would change a real account, so neither runs here";
 
     /// What still stands between a retrieved notification and a delivered one.
     const NOTIFICATION_DELIVERY_BLOCKER: &str =

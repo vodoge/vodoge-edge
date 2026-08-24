@@ -266,6 +266,12 @@
       "type": "string",
       "pattern": "^[0-9]{14,16}$"
     },
+    "SmdpAddress": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$"
+    },
     "Sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
@@ -718,6 +724,7 @@
       { "$ref": "#/$defs/ListEsimProfilesCommand" },
       { "$ref": "#/$defs/ReadEsimInfoCommand" },
       { "$ref": "#/$defs/RetrieveEsimNotificationCommand" },
+      { "$ref": "#/$defs/InitiateEsimAuthenticationCommand" },
       { "$ref": "#/$defs/RunAtCommandCommand" },
       { "$ref": "#/$defs/SendUssdCommand" },
       { "$ref": "#/$defs/SetRadioCommand" },
@@ -902,6 +909,16 @@
         "kind": { "const": "RetrieveEsimNotification" },
         "modem_imei": { "$ref": "#/$defs/Imei" },
         "sequence_number": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    },
+    "InitiateEsimAuthenticationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "InitiateEsimAuthentication" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "smdp_address": { "$ref": "#/$defs/SmdpAddress" }
       }
     },
     "ConfigureProxyCommand": {

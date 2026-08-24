@@ -626,6 +626,17 @@ pub struct RetrieveEsimNotificationCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct InitiateEsimAuthenticationCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "smdp_address", default, skip_serializing_if = "Option::is_none")]
+    pub smdp_address: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigureProxyCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -824,6 +835,13 @@ pub enum Command {
         modem_imei: String,
         #[serde(rename = "sequence_number")]
         sequence_number: i64,
+    },
+    InitiateEsimAuthentication {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "smdp_address")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        smdp_address: Option<String>,
     },
     RunAtCommand {
         #[serde(rename = "modem_imei")]

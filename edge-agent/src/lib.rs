@@ -192,6 +192,24 @@ pub trait SendPort {
         Err(unsupported("retrieve_esim_notification"))
     }
 
+    /// Start an ES9+ session with an SM-DP+ and stop at its signed answer.
+    ///
+    /// Read-only on both sides. `InitiateAuthentication` is the one ES9+
+    /// function that needs no activation code and leaves no trace on an
+    /// account, so it is what proves the chain from this chip to a real
+    /// server without touching either.
+    ///
+    /// `smdp_address` is optional because the chip usually knows one: its
+    /// configured default, or failing that the address its pending
+    /// notifications name.
+    fn initiate_esim_authentication(
+        &mut self,
+        _imei: &str,
+        _smdp_address: Option<&str>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("initiate_esim_authentication"))
+    }
+
     // The proxy actions. These are device-level rather than modem-level: a
     // configuration names the modems it wants, so applying it is one operation
     // over the whole set.
@@ -841,6 +859,19 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 let outcome = self
                     .port
                     .retrieve_esim_notification(modem_imei, *sequence_number);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::InitiateEsimAuthentication {
+                modem_imei,
+                smdp_address,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self
+                    .port
+                    .initiate_esim_authentication(modem_imei, smdp_address.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
