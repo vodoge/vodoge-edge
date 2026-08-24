@@ -16,3 +16,95 @@ jobs:
         run: sh scripts/check-core-deps.sh
       - name: Contract types match schema
         run: python3 contract/codegen/generate.py --check --schema contract/schema/edge-cloud.v1.schema.json --rust contract/src/lib.rs
+
+  go:
+    # Until T041 this workflow was Rust only: neither the voice/ module from
+    # T040a nor anything else Go had ever been compiled by CI. Both Go modules
+    # are covered here.
+    runs-on: ubuntu-latest
+    env:
+      # Neither module belongs to a workspace, and an inherited go.work would
+      # silently change which sources are built.
+      GOWORK: off
+      VODOGE_VENDOR_MIRROR: ${{ github.workspace }}/../vendor-mirror
+      VODOGE_VOWIFI_COMMIT: 1e9c6e6
+      # A Linux checkout has no reason to carry CRLF, so EOL differences in the
+      # mirror are drift here even though they are tolerated on a Windows
+      # workstation.
+      VODOGE_VERIFY_STRICT_EOL: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Materialise the read-only vowifi-go mirror
+        # The mirror is not vendored into this repository; voice/go.mod and
+        # vowifi/go.mod reach it through a replace directive at ../../
+        # vendor-mirror. checkout-index rather than clone, so the result has no
+        # .git of its own and matches the layout on the workstation exactly.
+        run: |
+          set -eux
+          mirror="$(cd "$GITHUB_WORKSPACE/.." && pwd)/vendor-mirror"
+          worktree="$mirror/vowifi-go-$VODOGE_VOWIFI_COMMIT"
+          mkdir -p "$worktree"
+          git clone --quiet --bare https://github.com/boa-z/vowifi-go.git "$mirror/vowifi-go.git"
+          GIT_INDEX_FILE="$mirror/.verify-index" git -c core.autocrlf=false \
+            --git-dir="$mirror/vowifi-go.git" --work-tree="$worktree" \
+            read-tree "$VODOGE_VOWIFI_COMMIT"
+          GIT_INDEX_FILE="$mirror/.verify-index" git -c core.autocrlf=false \
+            --git-dir="$mirror/vowifi-go.git" --work-tree="$worktree" \
+            checkout-index -a -f
+          rm -f "$mirror/.verify-index"
+
+      - name: vendor-mirror is byte-identical to vowifi-go.git@1e9c6e6
+        # Fail on drift. T040/T041 forbid editing the mirror, and `go build
+        # -overlay` is banned for the same reason: it would leave this check
+        # green while the compiled artifact stopped matching the source tree.
+        run: sh scripts/verify-vendor-mirror.sh
+
+      - name: gofmt
+        run: |
+          set -eu
+          status=0
+          for module in voice vowifi; do
+            out=$(gofmt -l "$module")
+            if [ -n "$out" ]; then
+              echo "gofmt would rewrite:"
+              echo "$out"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: go vet
+        run: |
+          set -eux
+          for module in voice vowifi; do
+            (cd "$module" && go vet ./...)
+          done
+
+      - name: go mod tidy is a no-op
+        run: |
+          set -eux
+          for module in voice vowifi; do
+            (cd "$module" && go mod tidy -diff)
+          done
+
+      - name: go test
+        run: |
+          set -eux
+          for module in voice vowifi; do
+            (cd "$module" && go test ./...)
+          done
+
+      - name: cross-compile for the edge machine
+        # The edge VM has no Go toolchain, so every binary is cross-compiled on
+        # a workstation and copied over. Building it here keeps that path honest.
+        run: |
+          set -eux
+          for module in voice vowifi; do
+            (cd "$module" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./...)
+          done
