@@ -41,7 +41,22 @@ pub const ISD_R_AID: &[u8] = &[
 ];
 
 /// GlobalPlatform GET DATA for tag `5A` (EID).
+///
+/// Only a fallback now. Both eUICCs on the bench answer `6D00` to this and
+/// answer the ES10c `GetEUICCData` form, so the ES10c one is tried first.
 pub const GET_EID_APDU: &[u8] = &[0x80, 0xca, 0x00, 0x5a, 0x00];
+
+/// How many `GET RESPONSE` continuations one command may be given.
+///
+/// A card that has more to say answers `61 xx` and expects to be asked again,
+/// and it can do that many times over: `RetrieveNotificationsList` on the
+/// bench chip returns 3333 bytes in fifteen rounds. Doing one round and
+/// stopping — which is what this crate used to do — hands the caller the first
+/// 255 bytes of an answer and no indication that the rest exists.
+///
+/// The bound is here so a card answering `61xx` forever cannot wedge the poll
+/// loop, not because a real answer is expected to be short.
+pub const MAX_GET_RESPONSE_ROUNDS: usize = 256;
 
 /// APDU status words plus any returned data bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]

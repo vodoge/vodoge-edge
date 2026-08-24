@@ -1,12 +1,13 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    dms, nas, uim, unique_tlv, wms, AllocationError, ApduResponse, CellLocationInfo,
+    dms, es10c, nas, uim, unique_tlv, wms, AllocationError, ApduResponse, CellLocationInfo,
     ClientAllocationRequest, ClientAssignment, ClientId, ClientRegistry, ClientRegistryError,
-    CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, ListedMessage, MessageId,
-    MessageMode, MessageTag, NasError, OperatingMode, PendingTransactions, QmiRequest, QmiResponse,
-    QmiResult, RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError,
-    TransactionId, UimError, WireError, WmsError,
+    CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, EuiccInfo2, ListedMessage,
+    MessageId, MessageMode, MessageTag, NasError, NotificationMetadata, OperatingMode,
+    PendingNotification, PendingTransactions, Profile, QmiRequest, QmiResponse, QmiResult,
+    RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError, TransactionId,
+    UimError, WireError, WmsError,
 };
 
 /// CTL message that asks the modem to resynchronize control state.
@@ -249,10 +250,34 @@ impl<T: QmiTransport> QmiClient<T> {
         Ok(uim::decode_iccid(&bytes)?)
     }
 
+    /// Open the ISD-R application on `slot` for as long as the returned value
+    /// lives.
+    ///
+    /// The channel closes when the session is dropped, which covers the paths
+    /// a caller forgets: an early `?`, a panic, a command that failed halfway
+    /// through a sequence. Leaking one is not harmless — an eUICC offers only
+    /// a few logical channels, and once they are gone every later profile
+    /// operation fails to open one — and the previous design defended against
+    /// that by opening and closing around every single APDU, which cannot
+    /// carry a stateful sequence at all.
+    pub fn isdr_session(&mut self, slot: u8) -> Result<IsdrSession<'_, T>, SessionError> {
+        let channel = self
+            .open_logical_channel(slot, uim::ISD_R_AID)
+            .map_err(|error| SessionError::transport(format!("open ISD-R channel: {error}")))?;
+        Ok(IsdrSession {
+            client: self,
+            slot,
+            channel,
+            closed: false,
+        })
+    }
+
     /// List every profile the eUICC holds.
-    pub fn list_profiles(&mut self, slot: u8) -> Result<Vec<crate::Profile>, SessionError> {
-        let bytes = self.isdr_exchange(slot, &crate::es10c::get_profiles_apdu())?;
-        Ok(crate::es10c::parse_profiles(&bytes)?)
+    pub fn list_profiles(&mut self, slot: u8) -> Result<Vec<Profile>, SessionError> {
+        let mut session = self.isdr_session(slot)?;
+        let profiles = session.list_profiles()?;
+        session.close()?;
+        Ok(profiles)
     }
 
     /// Enable or disable one profile by ICCID.
@@ -266,61 +291,74 @@ impl<T: QmiTransport> QmiClient<T> {
         iccid: &str,
         enable: bool,
     ) -> Result<(), SessionError> {
-        let apdu = if enable {
-            crate::es10c::enable_profile_apdu(iccid, true)?
+        let payload = if enable {
+            es10c::enable_profile_payload(iccid, true)?
         } else {
-            crate::es10c::disable_profile_apdu(iccid, true)?
+            es10c::disable_profile_payload(iccid, true)?
         };
-        let bytes = self.isdr_exchange(slot, &apdu)?;
-        Ok(crate::es10c::parse_profile_result(&bytes, enable)?)
-    }
-
-    /// Open the ISD-R channel, run one APDU including any GET RESPONSE, and
-    /// close the channel even when the exchange failed.
-    ///
-    /// Leaking a logical channel is not harmless: an eUICC offers only a few,
-    /// and once they are gone every later profile operation fails to open one.
-    fn isdr_exchange(&mut self, slot: u8, apdu: &[u8]) -> Result<Vec<u8>, SessionError> {
-        let channel = self
-            .open_logical_channel(slot, uim::ISD_R_AID)
-            .map_err(|error| SessionError::transport(format!("open ISD-R channel: {error}")))?;
-        let result = (|| {
-            let mut rapdu = self
-                .send_apdu(slot, channel, apdu)
-                .map_err(|error| SessionError::transport(format!("ES10c command: {error}")))?;
-            if let Some(get_response) = rapdu.get_response_apdu() {
-                rapdu = self
-                    .send_apdu(slot, channel, &get_response)
-                    .map_err(|error| SessionError::transport(format!("GET RESPONSE: {error}")))?;
-            }
-            Ok(rapdu.data.clone())
-        })();
-        // A failed close is worth reporting — an eUICC offers only a few
-        // logical channels and a leaked one makes every later profile
-        // operation fail to open — but it must not discard an exchange that
-        // already succeeded. Throwing away the profile list because cleanup
-        // failed leaves the operator with an error and no data.
-        if let Err(error) = self.close_logical_channel(slot, channel) {
-            eprintln!("close ISD-R channel {channel} on slot {slot}: {error}");
-        }
-        result
+        let mut session = self.isdr_session(slot)?;
+        let bytes = session.execute(&payload)?;
+        let outcome = es10c::parse_profile_result(&bytes, enable);
+        session.close()?;
+        Ok(outcome?)
     }
 
     pub fn read_eid(&mut self, slot: u8) -> Result<String, SessionError> {
-        let channel = self.open_logical_channel(slot, uim::ISD_R_AID)?;
-        let result = (|| {
-            let mut rapdu = self.send_apdu(slot, channel, uim::GET_EID_APDU)?;
-            if let Some(get_response) = rapdu.get_response_apdu() {
-                rapdu = self.send_apdu(slot, channel, &get_response)?;
-            }
-            Ok(uim::parse_eid(&rapdu)?)
+        let mut session = self.isdr_session(slot)?;
+        let eid = session.read_eid()?;
+        session.close()?;
+        Ok(eid)
+    }
+
+    /// Everything ES10b will say about a chip without changing anything on it.
+    ///
+    /// One channel for the whole read. The four commands are a sequence, not
+    /// four unrelated errands, and opening a channel per command is both four
+    /// times the round trips and four chances to leak one.
+    pub fn read_esim_local_info(&mut self, slot: u8) -> Result<EsimLocalInfo, SessionError> {
+        let mut session = self.isdr_session(slot)?;
+        let outcome = (|| {
+            let eid = session.read_eid()?;
+            let info = session.euicc_info2()?;
+            // A card with nothing pending and a card that refused the query
+            // both produce an empty list, so the refusal is kept rather than
+            // flattened into "no notifications".
+            let (notifications, notifications_error) = match session.list_notifications() {
+                Ok(list) => (list, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
+            let (profiles, profiles_error) = match session.list_profiles() {
+                Ok(list) => (list, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
+            Ok(EsimLocalInfo {
+                eid,
+                info,
+                notifications,
+                notifications_error,
+                profiles,
+                profiles_error,
+            })
         })();
-        let close = self.close_logical_channel(slot, channel);
-        match (result, close) {
-            (Ok(eid), Ok(())) => Ok(eid),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-        }
+        session.close()?;
+        outcome
+    }
+
+    /// Pull one pending notification off the chip, signature and all.
+    ///
+    /// This is the first of the three steps in an ES9+ notification retry.
+    /// The other two — handing it to the SM-DP+ over HTTPS and then removing
+    /// it from the card — need an HTTP client and a write respectively, and
+    /// neither belongs to a read-only slice.
+    pub fn retrieve_esim_notification(
+        &mut self,
+        slot: u8,
+        sequence_number: u64,
+    ) -> Result<PendingNotification, SessionError> {
+        let mut session = self.isdr_session(slot)?;
+        let outcome = session.retrieve_notification(sequence_number);
+        session.close()?;
+        outcome
     }
 
     fn assignment(&mut self, service: ServiceId) -> Result<ClientAssignment, SessionError> {
@@ -397,6 +435,193 @@ impl<T: QmiTransport> QmiClient<T> {
             self.next_service_transaction = 1;
         }
         TransactionId::new(current)
+    }
+}
+
+/// Everything ES10b reports about one eUICC, read in a single channel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EsimLocalInfo {
+    /// 32 digits identifying the chip itself, unchanged by profile switches.
+    pub eid: String,
+    pub info: EuiccInfo2,
+    pub notifications: Vec<NotificationMetadata>,
+    /// Why the notification list is empty, when the card refused rather than
+    /// having nothing pending.
+    pub notifications_error: Option<String>,
+    pub profiles: Vec<Profile>,
+    pub profiles_error: Option<String>,
+}
+
+/// An open ISD-R logical channel.
+///
+/// Every exit path closes it, including the ones a caller does not write: the
+/// `Drop` implementation is the guarantee, and `close` only exists so a caller
+/// that wants to know whether the close failed can find out. Relying on the
+/// caller to remember is what the earlier open-and-close-per-APDU design was
+/// avoiding, at the cost of not being able to run a sequence at all.
+pub struct IsdrSession<'a, T: QmiTransport> {
+    client: &'a mut QmiClient<T>,
+    slot: u8,
+    channel: u8,
+    closed: bool,
+}
+
+impl<T: QmiTransport> IsdrSession<'_, T> {
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+
+    pub fn slot(&self) -> u8 {
+        self.slot
+    }
+
+    /// Send one APDU and keep asking for the rest until the card stops saying
+    /// `61 xx`.
+    ///
+    /// One round was enough for a profile list and is not enough for anything
+    /// in ES10b: `GetEUICCInfo2` needs two exchanges and the pending
+    /// notification list needs sixteen. Stopping after the first returned a
+    /// prefix that still parsed as valid BER-TLV, so the truncation showed up
+    /// as missing fields rather than as an error.
+    pub fn transmit(&mut self, apdu: &[u8]) -> Result<ApduResponse, SessionError> {
+        let mut response = self
+            .client
+            .send_apdu(self.slot, self.channel, apdu)
+            .map_err(|error| SessionError::transport(format!("ES10 command: {error}")))?;
+        let mut collected = std::mem::take(&mut response.data);
+        let mut rounds = 0usize;
+        while let Some(get_response) = response.get_response_apdu() {
+            if rounds >= uim::MAX_GET_RESPONSE_ROUNDS {
+                return Err(SessionError::transport(format!(
+                    "eUICC on slot {} asked for more than {} GET RESPONSE rounds",
+                    self.slot,
+                    uim::MAX_GET_RESPONSE_ROUNDS
+                )));
+            }
+            rounds += 1;
+            response = self
+                .client
+                .send_apdu(self.slot, self.channel, &get_response)
+                .map_err(|error| SessionError::transport(format!("GET RESPONSE: {error}")))?;
+            collected.extend_from_slice(&response.data);
+        }
+        Ok(ApduResponse {
+            data: collected,
+            sw1: response.sw1,
+            sw2: response.sw2,
+        })
+    }
+
+    /// Run one ES10 request, splitting it across `STORE DATA` blocks if it
+    /// does not fit in one, and return the card's answer.
+    pub fn execute(&mut self, payload: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let chain = es10c::store_data_chain(payload)?;
+        let last = chain.len() - 1;
+        let mut answer = Vec::new();
+        for (index, apdu) in chain.iter().enumerate() {
+            let response = self.transmit(apdu)?;
+            if !response.is_success() {
+                return Err(SessionError::Uim(UimError::ApduFailed {
+                    sw1: response.sw1,
+                    sw2: response.sw2,
+                }));
+            }
+            // Only the last block carries the answer. An intermediate block
+            // that returns data is a card doing something unusual rather than
+            // a failure, so it is dropped rather than concatenated: appending
+            // it would corrupt the BER-TLV the caller then tries to parse.
+            if index == last {
+                answer = response.data;
+            }
+        }
+        Ok(answer)
+    }
+
+    /// The EID, 32 digits.
+    pub fn read_eid(&mut self) -> Result<String, SessionError> {
+        // ES10c GetEUICCData first: both bench eUICCs answer `6D00` to the
+        // GlobalPlatform GET DATA form this used to send, so the fallback is
+        // the form that does not work here rather than the other way round.
+        let first = match self.execute(&es10c::get_eid_payload()) {
+            Ok(bytes) => match es10c::parse_eid_response(&bytes) {
+                Ok(eid) => return Ok(eid),
+                Err(error) => SessionError::from(error),
+            },
+            Err(error) => error,
+        };
+        match self.transmit(uim::GET_EID_APDU) {
+            Ok(response) if response.is_success() => Ok(uim::parse_eid(&response)?),
+            _ => Err(first),
+        }
+    }
+
+    /// `GetEUICCInfo2`, decoded in full.
+    pub fn euicc_info2(&mut self) -> Result<EuiccInfo2, SessionError> {
+        let bytes = self.execute(&es10c::euicc_info2_payload())?;
+        Ok(es10c::parse_euicc_info2(&bytes)?)
+    }
+
+    /// `ListNotification` with no filter.
+    pub fn list_notifications(&mut self) -> Result<Vec<NotificationMetadata>, SessionError> {
+        let bytes = self.execute(&es10c::list_notification_payload())?;
+        Ok(es10c::parse_notification_metadata_list(&bytes)?)
+    }
+
+    /// Every profile the chip holds.
+    pub fn list_profiles(&mut self) -> Result<Vec<Profile>, SessionError> {
+        let bytes = self.execute(&es10c::get_profiles_payload())?;
+        Ok(es10c::parse_profiles(&bytes)?)
+    }
+
+    /// Every pending notification, with the signed bytes ES9+ would carry.
+    pub fn retrieve_notifications(&mut self) -> Result<Vec<PendingNotification>, SessionError> {
+        let bytes = self.execute(&es10c::retrieve_notifications_payload())?;
+        Ok(es10c::parse_pending_notifications(&bytes)?)
+    }
+
+    /// One pending notification by sequence number.
+    ///
+    /// Selected here rather than on the card: both bench eUICCs refuse the
+    /// `seqNumber` search form with `BF2B 03 81 01 7F` even for a sequence
+    /// number their own `ListNotification` had just reported, so the whole
+    /// list comes back and the wanted entry is picked out of it.
+    pub fn retrieve_notification(
+        &mut self,
+        sequence_number: u64,
+    ) -> Result<PendingNotification, SessionError> {
+        let pending = self.retrieve_notifications()?;
+        pending
+            .into_iter()
+            .find(|entry| entry.metadata.sequence_number == sequence_number)
+            .ok_or_else(|| {
+                SessionError::transport(format!(
+                    "eUICC has no pending notification with sequence number {sequence_number}"
+                ))
+            })
+    }
+
+    /// Close the channel and say whether that worked.
+    pub fn close(mut self) -> Result<(), SessionError> {
+        self.closed = true;
+        self.client.close_logical_channel(self.slot, self.channel)
+    }
+}
+
+impl<T: QmiTransport> Drop for IsdrSession<'_, T> {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        // A failed close is reported rather than raised: `Drop` has nowhere to
+        // return it, and this path exists precisely for the cases where an
+        // error is already on its way to the caller.
+        if let Err(error) = self.client.close_logical_channel(self.slot, self.channel) {
+            eprintln!(
+                "close ISD-R channel {} on slot {}: {error}",
+                self.channel, self.slot
+            );
+        }
     }
 }
 

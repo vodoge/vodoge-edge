@@ -606,6 +606,26 @@ pub struct ListEsimProfilesCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReadEsimInfoCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetrieveEsimNotificationCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "sequence_number")]
+    pub sequence_number: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigureProxyCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -794,6 +814,16 @@ pub enum Command {
     ListEsimProfiles {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
+    },
+    ReadEsimInfo {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    RetrieveEsimNotification {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "sequence_number")]
+        sequence_number: i64,
     },
     RunAtCommand {
         #[serde(rename = "modem_imei")]

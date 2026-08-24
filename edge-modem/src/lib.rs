@@ -49,7 +49,13 @@ pub use report::{
     collect as collect_report, parse_cops_scan, parse_creg, parse_csq, ModemReport, Registration,
     ScannedOperator, Signal,
 };
-pub use es10c::{Es10cError, Profile};
+pub use es10c::{
+    euicc_info2_payload, get_eid_payload, get_profiles_payload, list_notification_payload,
+    parse_eid_response, parse_euicc_info2, parse_notification_metadata_list,
+    parse_pending_notifications, retrieve_notifications_payload, store_data_chain, Es10cError,
+    EuiccInfo2, NotificationMetadata, PendingNotification, Profile, MAX_STORE_DATA_BLOCKS,
+    MAX_STORE_DATA_BYTES, STORE_DATA_BLOCK_BYTES,
+};
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
 pub use channels::LogicalChannels;
@@ -76,11 +82,14 @@ pub use nas::{
     NasRegistrationState, ServingSystem, GET_CELL_LOCATION_INFO, GET_SERVING_SYSTEM,
 };
 pub use result::{QmiResult, ResultError};
-pub use session::{QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC};
+pub use session::{
+    EsimLocalInfo, IsdrSession, QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC,
+};
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,
     parse_eid, parse_open_logical_channel, parse_send_apdu, ApduResponse, UimError,
-    CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, OPEN_LOGICAL_CHANNEL, SEND_APDU,
+    CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, MAX_GET_RESPONSE_ROUNDS,
+    OPEN_LOGICAL_CHANNEL, SEND_APDU,
 };
 pub use wms::{
     parse_list_messages, parse_raw_read, retain_mobile_terminated, ListedMessage, MessageMode,

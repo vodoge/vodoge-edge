@@ -382,6 +382,23 @@ impl edge_agent::SendPort for RecordingPort {
         self.calls.push(format!("switch_esim_profile {target}"));
         Ok(serde_json::Value::Null)
     }
+
+    fn read_esim_info(
+        &mut self,
+        _imei: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push("read_esim_info".into());
+        Ok(serde_json::json!({"eid": "89086030202200000026000178339240"}))
+    }
+
+    fn retrieve_esim_notification(
+        &mut self,
+        _imei: &str,
+        sequence_number: i64,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!("retrieve_esim_notification {sequence_number}"));
+        Ok(serde_json::json!({"delivered": false}))
+    }
 }
 
 fn deliver(command: Command, port: RecordingPort) -> (CommandResultPayload, Vec<String>) {
@@ -494,6 +511,19 @@ fn every_relayed_command_reaches_the_port() {
                 target_iccid: "89852351225042214201".into(),
             },
             "switch_esim_profile 89852351225042214201",
+        ),
+        (
+            Command::ReadEsimInfo {
+                modem_imei: IMEI.into(),
+            },
+            "read_esim_info",
+        ),
+        (
+            Command::RetrieveEsimNotification {
+                modem_imei: IMEI.into(),
+                sequence_number: 3,
+            },
+            "retrieve_esim_notification 3",
         ),
     ];
 

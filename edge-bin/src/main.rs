@@ -1050,6 +1050,74 @@ mod linux {
             Ok(JsonValue::Null)
         }
 
+        /// Everything ES10b will say about the chip, on one ISD-R channel.
+        ///
+        /// Not routed through the panel's `Actions` trait like the profile
+        /// list is. That trait is the local web panel's vocabulary, and this
+        /// command exists so the same reading can be had from the cloud
+        /// console with nobody on the box.
+        fn read_esim_info(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let info = self.radio.with_client(Some(imei), |client| {
+                client
+                    .read_esim_local_info(ESIM_SLOT)
+                    .map_err(|error| SendError::new("esim_info_failed", error.to_string()))
+            })?;
+            json_details(&EsimInfoBody {
+                imei: imei.to_string(),
+                eid: info.eid,
+                chip: euicc_info_body(&info.info),
+                notifications: info.notifications.iter().map(notification_body).collect(),
+                notifications_error: info.notifications_error,
+                profiles: info
+                    .profiles
+                    .into_iter()
+                    .map(|profile| ProfileBody {
+                        label: profile.label(),
+                        iccid: profile.iccid,
+                        enabled: profile.enabled,
+                        provider: profile.provider,
+                        name: profile.name,
+                        nickname: profile.nickname,
+                        class: profile.class,
+                        isdp_aid: profile.isdp_aid,
+                    })
+                    .collect(),
+                profiles_error: info.profiles_error,
+            })
+        }
+
+        fn retrieve_esim_notification(
+            &mut self,
+            imei: &str,
+            sequence_number: i64,
+        ) -> Result<JsonValue, SendError> {
+            let sequence_number = u64::try_from(sequence_number).map_err(|_| {
+                SendError::new(
+                    "esim_notification_invalid",
+                    format!("sequence number {sequence_number} is negative"),
+                )
+            })?;
+            let pending = self.radio.with_client(Some(imei), |client| {
+                client
+                    .retrieve_esim_notification(ESIM_SLOT, sequence_number)
+                    .map_err(|error| {
+                        SendError::new("esim_notification_failed", error.to_string())
+                    })
+            })?;
+            json_details(&RetrievedNotificationBody {
+                imei: imei.to_string(),
+                sequence_number: pending.metadata.sequence_number,
+                operations: pending.metadata.operations,
+                address: pending.metadata.address,
+                iccid: pending.metadata.iccid,
+                installation_result: pending.installation_result,
+                payload_bytes: pending.payload.len(),
+                payload_hex: hex_string(&pending.payload),
+                delivered: false,
+                delivery_blocked_by: NOTIFICATION_DELIVERY_BLOCKER,
+            })
+        }
+
         fn configure_proxy(
             &mut self,
             instances: &JsonValue,
@@ -1169,6 +1237,119 @@ mod linux {
             .map_err(|error| SendError::new("details_encode_failed", error.to_string()))
     }
 
+
+    /// `read_esim_info` as the console receives it.
+    #[derive(serde::Serialize)]
+    struct EsimInfoBody {
+        imei: String,
+        /// 32 digits identifying the chip. Unchanged by profile switches, which
+        /// is what makes it the right key for everything else here.
+        eid: String,
+        chip: EuiccInfoBody,
+        notifications: Vec<NotificationBody>,
+        /// Set when the card refused the query rather than having nothing
+        /// pending. The two look identical from an empty list.
+        notifications_error: Option<String>,
+        profiles: Vec<ProfileBody>,
+        profiles_error: Option<String>,
+    }
+
+    /// `GetEUICCInfo2`, every field of it.
+    #[derive(serde::Serialize)]
+    struct EuiccInfoBody {
+        profile_version: Option<String>,
+        sgp22_version: Option<String>,
+        firmware_version: Option<String>,
+        installed_applications: Option<u64>,
+        /// What is left to install a profile into, in bytes.
+        free_non_volatile_memory: Option<u64>,
+        free_volatile_memory: Option<u64>,
+        uicc_capabilities: Vec<String>,
+        ts102241_version: Option<String>,
+        global_platform_version: Option<String>,
+        rsp_capabilities: Vec<String>,
+        /// The GSMA CI keys this chip will verify an SM-DP+ against. A profile
+        /// signed by a CI that is not in this list cannot be downloaded here.
+        ci_key_ids_for_verification: Vec<String>,
+        ci_key_ids_for_signing: Vec<String>,
+        category: Option<u64>,
+        forbidden_profile_policy_rules: Vec<String>,
+        pp_version: Option<String>,
+        sas_accreditation_number: Option<String>,
+        /// How many of the sixteen fields the card populated, so a truncated read
+        /// is visible as a number rather than as fields quietly missing.
+        decoded_fields: usize,
+    }
+
+    /// One entry of `ListNotification`.
+    #[derive(serde::Serialize)]
+    struct NotificationBody {
+        sequence_number: u64,
+        operations: Vec<String>,
+        address: String,
+        iccid: Option<String>,
+    }
+
+    /// `retrieve_esim_notification` as the console receives it.
+    #[derive(serde::Serialize)]
+    struct RetrievedNotificationBody {
+        imei: String,
+        sequence_number: u64,
+        operations: Vec<String>,
+        address: String,
+        iccid: Option<String>,
+        installation_result: bool,
+        payload_bytes: usize,
+        /// The signed notification itself, which is what ES9+ `handleNotification`
+        /// has to carry. Kept verbatim: anything re-encoded no longer matches the
+        /// eUICC's signature over it.
+        payload_hex: String,
+        /// Whether the SM-DP+ was told. It was not.
+        delivered: bool,
+        /// Why not, in one line, so nobody reads a successful fetch as a
+        /// successful retry.
+        delivery_blocked_by: &'static str,
+    }
+
+    /// What still stands between a retrieved notification and a delivered one.
+    const NOTIFICATION_DELIVERY_BLOCKER: &str =
+        "ES9+ handleNotification needs an HTTPS client and the GSMA CI trust chain, \
+         which the edge does not have yet";
+
+    fn euicc_info_body(info: &edge_modem::EuiccInfo2) -> EuiccInfoBody {
+        EuiccInfoBody {
+            profile_version: info.profile_version.clone(),
+            sgp22_version: info.svn.clone(),
+            firmware_version: info.firmware_version.clone(),
+            installed_applications: info.installed_applications,
+            free_non_volatile_memory: info.free_non_volatile_memory,
+            free_volatile_memory: info.free_volatile_memory,
+            uicc_capabilities: info.uicc_capabilities.clone(),
+            ts102241_version: info.ts102241_version.clone(),
+            global_platform_version: info.global_platform_version.clone(),
+            rsp_capabilities: info.rsp_capabilities.clone(),
+            ci_key_ids_for_verification: info.ci_key_ids_for_verification.clone(),
+            ci_key_ids_for_signing: info.ci_key_ids_for_signing.clone(),
+            category: info.category,
+            forbidden_profile_policy_rules: info.forbidden_profile_policy_rules.clone(),
+            pp_version: info.pp_version.clone(),
+            sas_accreditation_number: info.sas_accreditation_number.clone(),
+            decoded_fields: info.populated_fields(),
+        }
+    }
+
+    fn notification_body(metadata: &edge_modem::NotificationMetadata) -> NotificationBody {
+        NotificationBody {
+            sequence_number: metadata.sequence_number,
+            operations: metadata.operations.clone(),
+            address: metadata.address.clone(),
+            iccid: metadata.iccid.clone(),
+        }
+    }
+
+    fn hex_string(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
     impl Actions for RadioPort {
         fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
             let mut port = RadioPort {

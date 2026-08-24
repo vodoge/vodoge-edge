@@ -716,6 +716,8 @@
         { "$ref": "#/$defs/RestartModemCommand" },
         { "$ref": "#/$defs/SwitchEsimProfileCommand" },
       { "$ref": "#/$defs/ListEsimProfilesCommand" },
+      { "$ref": "#/$defs/ReadEsimInfoCommand" },
+      { "$ref": "#/$defs/RetrieveEsimNotificationCommand" },
       { "$ref": "#/$defs/RunAtCommandCommand" },
       { "$ref": "#/$defs/SendUssdCommand" },
       { "$ref": "#/$defs/SetRadioCommand" },
@@ -881,6 +883,25 @@
       "properties": {
         "kind": { "const": "ListEsimProfiles" },
         "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "ReadEsimInfoCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ReadEsimInfo" },
+        "modem_imei": { "$ref": "#/$defs/Imei" }
+      }
+    },
+    "RetrieveEsimNotificationCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "sequence_number"],
+      "properties": {
+        "kind": { "const": "RetrieveEsimNotification" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "sequence_number": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
       }
     },
     "ConfigureProxyCommand": {

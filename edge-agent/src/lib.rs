@@ -171,6 +171,27 @@ pub trait SendPort {
         Err(unsupported("switch_esim_profile"))
     }
 
+    /// What the eUICC says about itself: EID, chip information, and the
+    /// notifications it has not managed to hand to an SM-DP+.
+    ///
+    /// Read-only. Nothing here changes anything on the chip.
+    fn read_esim_info(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("read_esim_info"))
+    }
+
+    /// Fetch one pending notification off the eUICC by sequence number.
+    ///
+    /// The first of the three steps in a notification retry. The other two —
+    /// posting it to the SM-DP+ and then removing it from the card — need an
+    /// HTTP client and a write, and this reads.
+    fn retrieve_esim_notification(
+        &mut self,
+        _imei: &str,
+        _sequence_number: i64,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("retrieve_esim_notification"))
+    }
+
     // The proxy actions. These are device-level rather than modem-level: a
     // configuration names the modems it wants, so applying it is one operation
     // over the whole set.
@@ -799,6 +820,27 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.switch_esim_profile(modem_imei, target_iccid);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ReadEsimInfo { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.read_esim_info(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::RetrieveEsimNotification {
+                modem_imei,
+                sequence_number,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self
+                    .port
+                    .retrieve_esim_notification(modem_imei, *sequence_number);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
