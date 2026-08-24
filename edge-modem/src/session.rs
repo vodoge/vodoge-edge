@@ -1300,10 +1300,19 @@ impl<T: QmiTransport> IsdrSession<'_, T> {
         ) {
             Ok(authentication) => authentication,
             Err(error) => {
-                // Nothing was claimed if the server refused, so there is no
-                // session to give back — and a cancel for a transaction the
-                // server has already dropped is answered with an error that
-                // hides the real one.
+                // The card is holding an RSP session that will now never be
+                // finished, so it is closed here even though the server has
+                // nothing to give back: a refused matching id is a thing an
+                // operator retypes and tries again, and the retry has to find
+                // the chip in the state it started in. Best effort, and the
+                // ES9+ half is deliberately skipped — the server dropped the
+                // transaction when it refused, and a cancel for a transaction
+                // it has never heard of answers with an error that would
+                // replace the one worth reading.
+                let _ = self.cancel_session(
+                    &transaction_bytes,
+                    es10c::CancelSessionReason::UndefinedReason,
+                );
                 return Err(SessionError::from(error));
             }
         };
