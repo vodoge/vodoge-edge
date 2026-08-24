@@ -277,47 +277,166 @@ mod linux {
             client
                 .sync()
                 .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
-            // Who actually answered on that node.
-            //
-            // `path_for` returns a remembered `/dev/cdc-wdm*`, and on this
-            // bench those names are recycled: the modules arrive over USB/IP,
-            // one of them re-enumerates several times an hour, and the index
-            // it comes back on is whichever is free. Between two polls the
-            // node a command was aimed at can belong to a different SIM, and
-            // the command with the worst consequence for getting that wrong
-            // is the one that sends a message from it. Costs one DMS read on
-            // operator-initiated commands only -- the poll loop opens its own
-            // client and does not come through here.
-            if let Some(expected) = imei.map(str::trim).filter(|value| !value.is_empty()) {
-                let answered = client
-                    .get_serial_numbers()
-                    .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?
-                    .imei;
-                match answered.as_deref() {
-                    Some(actual) if actual == expected => {}
-                    Some(actual) => {
-                        return Err(SendError::new(
-                            "modem_moved",
-                            format!(
-                                "{} is imei {actual} right now, not the imei {expected} this \
-                                 command names; refusing to run it on the wrong module",
-                                path.display()
-                            ),
-                        ))
-                    }
-                    None => {
-                        return Err(SendError::new(
-                            "modem_moved",
-                            format!(
-                                "{} would not say which module it is, so it cannot be \
-                                 confirmed as imei {expected}",
-                                path.display()
-                            ),
-                        ))
-                    }
-                }
-            }
+            confirm_imei(&mut client, imei, &path)?;
             work(&mut client)
+        }
+
+        /// Both control paths to one module, under a single arbiter lease.
+        ///
+        /// A radio restart has to read `AT+CFUN?` around a QMI mode change,
+        /// and those two live on different USB interfaces of the same stick.
+        /// The lease is taken once and held across the whole sequence on
+        /// purpose: if another command slipped in between the mode change and
+        /// the read-back, the read-back would be describing somebody else's
+        /// work, and a read-back that can describe somebody else's work is
+        /// not a check. The ports are still only ever used one at a time —
+        /// what wedges a Quectel stack is issuing AT and QMI concurrently,
+        /// not alternating between them.
+        fn with_module_control<T>(
+            &self,
+            imei: Option<&str>,
+            work: impl FnOnce(&mut ModuleControl) -> Result<T, SendError>,
+        ) -> Result<T, SendError> {
+            let _lock = self.arbiter.acquire(edge_modem::ModemPriority::Normal);
+            let qmi_path = self.path_for(imei)?;
+            let at_path = match edge_modem::at_port_for_qmi(&qmi_path) {
+                Some(path) => path,
+                None => at_port_by_imei(imei)?,
+            };
+            let _busy = self.hold(&qmi_path);
+            let device = CdcWdmDevice::open(&qmi_path)
+                .map_err(|error| SendError::new("modem_open_failed", error.to_string()))?;
+            let mut client = QmiClient::new(device);
+            client
+                .sync()
+                .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
+            confirm_imei(&mut client, imei, &qmi_path)?;
+            let mut control = ModuleControl {
+                client,
+                at_path,
+                at: None,
+            };
+            work(&mut control)
+        }
+    }
+
+    /// Check that the module answering on `path` is the one named.
+    ///
+    /// `path_for` returns a remembered `/dev/cdc-wdm*`, and on this bench
+    /// those names are recycled: the modules arrive over USB/IP, one of them
+    /// re-enumerates several times an hour, and the index it comes back on is
+    /// whichever is free. Between two polls the node a command was aimed at
+    /// can belong to a different SIM, and the command with the worst
+    /// consequence for getting that wrong is the one that sends a message from
+    /// it. Costs one DMS read on operator-initiated commands only -- the poll
+    /// loop opens its own client and does not come through here.
+    fn confirm_imei(
+        client: &mut QmiClient<CdcWdmDevice>,
+        imei: Option<&str>,
+        path: &Path,
+    ) -> Result<(), SendError> {
+        let Some(expected) = imei.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
+        let answered = client
+            .get_serial_numbers()
+            .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?
+            .imei;
+        match answered.as_deref() {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(SendError::new(
+                "modem_moved",
+                format!(
+                    "{} is imei {actual} right now, not the imei {expected} this command \
+                     names; refusing to run it on the wrong module",
+                    path.display()
+                ),
+            )),
+            None => Err(SendError::new(
+                "modem_moved",
+                format!(
+                    "{} would not say which module it is, so it cannot be confirmed as \
+                     imei {expected}",
+                    path.display()
+                ),
+            )),
+        }
+    }
+
+    /// How long `AT+CFUN=<n>` is given to answer.
+    ///
+    /// Longer than the port default: a functionality change re-initialises the
+    /// card, and the bench has measured about fifteen seconds from the command
+    /// to `+CPIN: READY`. The `OK` comes back sooner than that, but not always
+    /// within the ordinary ten.
+    const CFUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// One module reached through both of its control interfaces.
+    ///
+    /// The AT port is opened lazily. Most of what runs here is QMI, and
+    /// opening a serial port that is never used is not free: on these sticks
+    /// it is the operation that puts a controlling terminal on a daemon if
+    /// anyone ever gets the flags wrong.
+    struct ModuleControl {
+        client: QmiClient<CdcWdmDevice>,
+        at_path: PathBuf,
+        at: Option<edge_modem::AtPort>,
+    }
+
+    impl ModuleControl {
+        fn at_port(&mut self) -> Result<&mut edge_modem::AtPort, String> {
+            if self.at.is_none() {
+                self.at = Some(
+                    edge_modem::AtPort::open(&self.at_path)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            Ok(self.at.as_mut().expect("just opened"))
+        }
+    }
+
+    impl edge_modem::ModuleRadio for ModuleControl {
+        fn operating_mode(&mut self) -> Result<OperatingMode, String> {
+            self.client
+                .get_operating_mode()
+                .map_err(|error| error.to_string())
+        }
+
+        fn set_operating_mode(&mut self, mode: OperatingMode) -> Result<(), String> {
+            self.client
+                .set_operating_mode(mode)
+                .map_err(|error| error.to_string())
+        }
+
+        fn read_functionality(&mut self) -> Result<Option<u8>, String> {
+            let exchange = self
+                .at_port()?
+                .command("AT+CFUN?")
+                .map_err(|error| error.to_string())?;
+            // A `+CME ERROR` here is not a reading. The caller treats `Err` as
+            // "the state cannot be established" and refuses to move the radio,
+            // which is the right answer to a module that will not say where it
+            // is -- the bench has seen `AT+CFUN?` answer `+CME ERROR: 4`.
+            if !exchange.succeeded() {
+                return Err(format!("AT+CFUN? answered {}", exchange.terminator));
+            }
+            Ok(edge_modem::parse_cfun(&exchange.lines))
+        }
+
+        fn write_functionality(&mut self, value: u8) -> Result<bool, String> {
+            // One parameter, always. The reset form `AT+CFUN=1,1` cannot be
+            // expressed through this signature, and that is deliberate: see
+            // the contradiction note in `edge_modem::restart_radio`.
+            let command = format!("AT+CFUN={value}");
+            let exchange = self
+                .at_port()?
+                .command_with_timeout(&command, CFUN_TIMEOUT)
+                .map_err(|error| error.to_string())?;
+            Ok(exchange.succeeded())
+        }
+
+        fn pause(&mut self, duration: Duration) {
+            std::thread::sleep(duration);
         }
     }
 
@@ -871,13 +990,30 @@ mod linux {
             }))
         }
 
+        /// Take the module's radio down and bring it back.
+        ///
+        /// This used to be `set_operating_mode(Offline)` followed by
+        /// `set_operating_mode(Online)`, and on 2026-08-25 the second half was
+        /// refused with QMI error 60 and left a module at `+CFUN: 7` with no
+        /// way back that anyone could reach. The sequence, the reasons for
+        /// every rung of it, and the one recovery it deliberately refuses to
+        /// perform now live in `edge_modem::restart_radio`; this end owns the
+        /// ports and the log line and nothing else.
         fn restart_modem(&mut self, imei: &str) -> Result<(), SendError> {
-            self.radio.with_client(Some(imei), |client| {
-                client
-                    .set_operating_mode(OperatingMode::Offline)
-                    .and_then(|_| client.set_operating_mode(OperatingMode::Online))
-                    .map_err(|error| SendError::new("restart_failed", error.to_string()))
-            })
+            let report = self
+                .radio
+                .with_module_control(Some(imei), |control| {
+                    edge_modem::restart_radio(control).map_err(|error| {
+                        // Logged here as well as returned: a command result
+                        // carries one line, and the report says which rungs
+                        // were tried, which is the part the next operator
+                        // needs.
+                        log_error(format!("restart {imei}: {error}"));
+                        SendError::new(error.code(), error.to_string())
+                    })
+                })?;
+            log_line(format!("restart {imei}: {report}"));
+            Ok(())
         }
 
         // The relay. Each of these routes a cloud command into the very same

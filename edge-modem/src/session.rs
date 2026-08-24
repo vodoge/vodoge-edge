@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use crate::{
     dms, es10c, es9p, nas, uim, unique_tlv, wms, ActivationCode, AllocationError, ApduResponse,
@@ -1462,4 +1462,464 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         [high] => high << 4,
         _ => 0,
     }).collect()
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Restarting a module's radio without stranding it
+// ───────────────────────────────────────────────────────────────────────────
+//
+// # What happened on 2026-08-25
+//
+// The Restart button ran `set_operating_mode(Offline)` and then
+// `set_operating_mode(Online)`. On the bench the first request was accepted
+// and the second came back `QMI request rejected with result 1 error 60`.
+// The module stopped there, and it could not be got out again:
+//
+// * `AT+CFUN?` answered `+CFUN: 7` — Quectel's offline mode — while
+//   `AT+CPIN?` still answered `READY`, so the AT port and the card were fine
+//   and only the radio was down;
+// * further QMI mode changes were refused with `error 60` in **both**
+//   directions;
+// * `AT+CFUN=0`, `AT+CFUN=1` and `AT+CFUN=4` all answered `+CME ERROR: 4`.
+//
+// The one thing that worked was `AT+CFUN=1,1`. Nobody can reach this hardware
+// to pull a stick, so a button that can land a module there is a button that
+// can take a module away for good.
+//
+// # What this code does about it, and what it deliberately does not do
+//
+// 1. **`OperatingMode::Offline` is never requested.** It was measured to be a
+//    one-way door on this firmware, and nothing the Restart button is for
+//    needs it. `LowPower` is the mode the radio toggle and the address
+//    rotation already use many times a day, in both directions, on these same
+//    three sticks.
+// 2. **`+CFUN?` is read before and after, and the two readings decide the
+//    result** — not the return codes of the mode requests. A restart that
+//    reports success while the module sits at `+CFUN: 4` is the failure this
+//    project keeps rediscovering, most recently as a profile switch that
+//    answered `{"status":"ok"}` and changed nothing on the card.
+// 3. **A refusal is followed by a recovery ladder** of cheap, non-resetting
+//    rungs, and if the module is still not back the call **fails, loudly, and
+//    says where the module was left**.
+// 4. **A module found already at `+CFUN: 7` is not touched at all**, because
+//    from that state every QMI mode request was measured to be refused.
+//
+// # The contradiction, written down so nobody has to derive it again
+//
+// `AT+CFUN=1,1` is at once **the only measured cure for this wedge** and the
+// **forbidden form** named in `edge-panel`'s `set_radio` documentation
+// ("this goes through QMI rather than `AT+CFUN`, whose reset form wedges a
+// module often enough that it is not worth exposing on a button") and in the
+// note on the panel's raw AT endpoint, which is LAN-only precisely so that
+// `AT+CFUN=1,1` cannot be fired from the cloud.
+//
+// Both statements are true, and they are about different situations:
+//
+// * `set_radio` refuses the reset form as the **ordinary** way to do something
+//   a plain QMI `LowPower` round trip already does cleanly. Trading a working
+//   cheap mechanism for a full re-enumeration buys nothing and risks a stick
+//   that does not come back — over USB/IP, with nobody able to replug it.
+// * Here the module is **already unusable**, and every cheap mechanism has
+//   been measured to fail from this exact state. The trade is no longer
+//   "cheap and safe versus expensive and risky".
+//
+// So why is it still not automatic here? Because a stranded module is not a
+// dead one. At `+CFUN: 7` the AT port answers, the card is `READY`, and the
+// eUICC can still be read and driven — the radio is what is lost. A reset that
+// fails to re-enumerate loses all of that as well, and this bench has exactly
+// **one** observation of `AT+CFUN=1,1` clearing this state cleanly (about
+// forty seconds, without the module leaving the USB bus). One sample is enough
+// to name the cure in an error message. It is not enough to fire it,
+// unprompted, at hardware nobody can reach. The escalation is left to a human
+// at the LAN-only `/api/at` endpoint, which is where destructive AT already
+// lives and where the blast radius is already bounded to the site.
+//
+// `OperatingMode::Resetting` (4) was considered as a middle path and rejected
+// for the same reason: it re-enumerates too, and it has never been tried on
+// these modules at all — zero samples is worse than one.
+
+/// `+CFUN` values as an EC20 reports them.
+///
+/// 27.007 defines 0, 1 and 4. 7 is Quectel's own offline mode, and it is what
+/// the module shows after QMI has been asked for `OperatingMode::Offline`.
+pub const CFUN_MINIMUM: u8 = 0;
+/// Full functionality — the only value a finished restart may leave behind.
+pub const CFUN_FULL: u8 = 1;
+/// Radio off, card still initialised.
+pub const CFUN_DISABLE_RF: u8 = 4;
+/// The stranded value. Getting in is easy; every documented way out fails.
+pub const CFUN_OFFLINE: u8 = 7;
+
+/// Said in every error where the module is, or is left, stranded.
+///
+/// A constant rather than prose at each site, so the one dangerous thing an
+/// operator may be about to type is described the same way every time —
+/// including the part about why the software will not type it for them.
+pub const CFUN_RESET_NOTE: &str = "the only measured way out of +CFUN: 7 is AT+CFUN=1,1 over \
+     the LAN-only /api/at endpoint; this agent will not issue it by itself, because a stranded \
+     module still has a working AT port, a READY card and a reachable eUICC, and a reset that \
+     fails to re-enumerate over USB/IP loses those too";
+
+/// How long the module is given to act on a mode change before a read-back is
+/// believed.
+///
+/// `AT+CFUN=1` answers `OK` before the radio is actually up, and a QMI mode
+/// change is applied asynchronously by the same firmware. Reading `+CFUN?` the
+/// instant a request returns therefore measures the request, not the module.
+const SETTLE_STEP: Duration = Duration::from_millis(1_500);
+
+/// How many times the read-back is retried before the module is called stuck.
+///
+/// Twelve seconds, against a bench measurement of about fifteen for a full
+/// `AT+CFUN=0` / `AT+CFUN=1` cycle to reach `+CPIN: READY` — the `+CFUN?`
+/// value flips well before registration does.
+const SETTLE_ATTEMPTS: usize = 8;
+
+/// The two control paths a radio restart needs on one module.
+///
+/// QMI and AT reach the same firmware over different USB interfaces of the
+/// same stick, and a restart has to interleave them: the mode change is a QMI
+/// request and the only trustworthy read-back is an AT one. Both sit behind
+/// this trait so that the ladder above them can be exercised without hardware
+/// — which matters more than usual here, because the failure being defended
+/// against is one nobody is willing to reproduce on the bench.
+pub trait ModuleRadio {
+    /// `QMI_DMS_GET_OPERATING_MODE`.
+    fn operating_mode(&mut self) -> Result<OperatingMode, String>;
+    /// `QMI_DMS_SET_OPERATING_MODE`.
+    fn set_operating_mode(&mut self, mode: OperatingMode) -> Result<(), String>;
+    /// `AT+CFUN?`. `Ok(None)` means the module answered without a `+CFUN:`
+    /// line; `Err` means the port itself could not be used.
+    fn read_functionality(&mut self) -> Result<Option<u8>, String>;
+    /// `AT+CFUN=<value>`. `Ok(false)` means the module answered with an error
+    /// result code, which is still an answer; `Err` is for losing the port.
+    fn write_functionality(&mut self, value: u8) -> Result<bool, String>;
+    /// Wait for the module to act on what it was just told.
+    ///
+    /// A hook rather than a `thread::sleep` inside the ladder, so the ladder
+    /// runs at full speed under test and patiently on hardware, without either
+    /// side having to know about the other.
+    fn pause(&mut self, duration: Duration);
+}
+
+/// What a restart did, and where it left the module.
+///
+/// Carried on success as well as on failure: "it worked" is not a useful
+/// receipt for an operation whose whole problem was reporting a success it had
+/// not earned.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RestartReport {
+    pub cfun_before: Option<u8>,
+    pub cfun_after: Option<u8>,
+    pub mode_after: Option<OperatingMode>,
+    /// Every rung that was attempted, in order.
+    pub steps: Vec<String>,
+}
+
+impl fmt::Display for RestartReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "before {}, after {}, QMI {}; tried: {}",
+            describe_cfun(self.cfun_before),
+            describe_cfun(self.cfun_after),
+            match self.mode_after {
+                Some(mode) => format!("{mode:?}"),
+                None => "unreadable".to_string(),
+            },
+            if self.steps.is_empty() {
+                "nothing".to_string()
+            } else {
+                self.steps.join(" | ")
+            }
+        )
+    }
+}
+
+/// Why a restart did not finish cleanly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RestartError {
+    /// `AT+CFUN?` could not be read, so nothing was done to the radio.
+    Unverifiable { reason: String },
+    /// A control port stopped answering. `step` says what was in flight,
+    /// because "we never started" and "we are half way" are different states
+    /// for the next operator to inherit.
+    Port {
+        step: String,
+        reason: String,
+        report: RestartReport,
+    },
+    /// The module was already at `+CFUN: 7` when the restart was asked for.
+    /// Nothing was sent to it.
+    AlreadyStranded(RestartReport),
+    /// The module went down and would not come back, and every non-resetting
+    /// rung has been tried.
+    Stranded(RestartReport),
+    /// The module answered, but not where it was asked to be — including the
+    /// case where QMI and `+CFUN?` disagree about where that is.
+    NotRestored(RestartReport),
+}
+
+impl fmt::Display for RestartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unverifiable { reason } => write!(
+                formatter,
+                "refusing to restart: AT+CFUN? could not be read ({reason}), so there would be \
+                 no way to tell whether the radio came back"
+            ),
+            Self::Port {
+                step,
+                reason,
+                report,
+            } => write!(formatter, "restart lost the module at {step}: {reason}; {report}"),
+            Self::AlreadyStranded(report) => write!(
+                formatter,
+                "this module is already stranded offline and a restart cannot help it: every QMI \
+                 mode change from here was measured to be refused with error 60 ({report}); \
+                 {CFUN_RESET_NOTE}"
+            ),
+            Self::Stranded(report) => write!(
+                formatter,
+                "the module did not come back online ({report}); {CFUN_RESET_NOTE}"
+            ),
+            Self::NotRestored(report) => write!(
+                formatter,
+                "restart did not leave the module online ({report}); the radio is down but not \
+                 stranded, so bringing it up with the radio control or asking for another \
+                 restart is the next thing to try"
+            ),
+        }
+    }
+}
+
+impl Error for RestartError {}
+
+impl RestartError {
+    /// The report, where there is one. For a caller that wants to log what was
+    /// tried even though the call failed.
+    pub fn report(&self) -> Option<&RestartReport> {
+        match self {
+            Self::Unverifiable { .. } => None,
+            Self::Port { report, .. }
+            | Self::AlreadyStranded(report)
+            | Self::Stranded(report)
+            | Self::NotRestored(report) => Some(report),
+        }
+    }
+
+    /// A short, stable code for the command result, so the console can tell
+    /// these apart without parsing prose.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unverifiable { .. } => "restart_unverifiable",
+            Self::Port { .. } => "restart_port_lost",
+            Self::AlreadyStranded(_) => "modem_already_stranded",
+            Self::Stranded(_) => "modem_stranded_offline",
+            Self::NotRestored(_) => "restart_not_restored",
+        }
+    }
+}
+
+/// Take one module's radio down and bring it back, or say why it is not back.
+///
+/// The contract is the point: this returns `Ok` only when the module has been
+/// read, by two independent means, to be online again. Everything else is an
+/// error naming the state the module is actually in.
+pub fn restart_radio<R: ModuleRadio>(radio: &mut R) -> Result<RestartReport, RestartError> {
+    let mut report = RestartReport::default();
+
+    // Read first. A restart that cannot be checked is not offered at all: the
+    // whole reason this function exists is a mode change whose failure was
+    // invisible until somebody went looking with `AT+CFUN?`.
+    let before = radio
+        .read_functionality()
+        .map_err(|reason| RestartError::Unverifiable { reason })?;
+    report.cfun_before = before;
+    report.steps.push(format!("before {}", describe_cfun(before)));
+
+    if before == Some(CFUN_OFFLINE) {
+        // Send nothing. From here both directions of the QMI mode change were
+        // measured to answer error 60, so a request now would add nothing but
+        // a second failure to explain.
+        report.cfun_after = before;
+        report.steps.push("already offline, QMI left alone".to_string());
+        return Err(RestartError::AlreadyStranded(report));
+    }
+
+    // Down. `LowPower`, never `Offline` — see the note at the top of this
+    // section for what `Offline` did to a module nobody can go and touch.
+    if let Err(reason) = radio.set_operating_mode(OperatingMode::LowPower) {
+        report.steps.push(format!("QMI low power refused: {reason}"));
+        report.cfun_after = radio.read_functionality().ok().flatten();
+        return Err(RestartError::Port {
+            step: "low_power".to_string(),
+            reason,
+            report,
+        });
+    }
+    report.steps.push("QMI low power accepted".to_string());
+
+    // Up.
+    let refused = radio.set_operating_mode(OperatingMode::Online).err();
+    match &refused {
+        None => report.steps.push("QMI online accepted".to_string()),
+        Some(reason) => report.steps.push(format!("QMI online refused: {reason}")),
+    }
+
+    // Believe the module, not the request. An accepted request that did not
+    // take gets the same ladder a refused one gets; the only difference is
+    // that there is no point waiting on a module that has already said no.
+    if !(refused.is_none() && wait_for_full(radio, &mut report)) {
+        climb_back(radio, &mut report);
+    }
+
+    let after = match radio.read_functionality() {
+        Ok(value) => value,
+        Err(reason) => {
+            return Err(RestartError::Port {
+                step: "read_back".to_string(),
+                reason,
+                report,
+            })
+        }
+    };
+    report.cfun_after = after;
+    match radio.operating_mode() {
+        Ok(mode) => report.mode_after = Some(mode),
+        Err(reason) => report.steps.push(format!("QMI mode unreadable: {reason}")),
+    }
+    report.steps.push(format!("after {}", describe_cfun(after)));
+
+    if after == Some(CFUN_OFFLINE) {
+        return Err(RestartError::Stranded(report));
+    }
+    if after != Some(CFUN_FULL) {
+        return Err(RestartError::NotRestored(report));
+    }
+    // Two readings, and both have to agree. `+CFUN: 1` while QMI still reports
+    // anything else is the exact shape of a success that is not one, and this
+    // section exists because that shape was reported as `ok` once already.
+    match report.mode_after {
+        Some(OperatingMode::Online) => Ok(report),
+        _ => Err(RestartError::NotRestored(report)),
+    }
+}
+
+/// Everything that can be tried to bring a module back **without resetting
+/// it**. Deliberately stops one rung short of the thing that is known to work;
+/// see the contradiction note at the top of this section.
+fn climb_back<R: ModuleRadio>(radio: &mut R, report: &mut RestartReport) {
+    // Rung 1: ask QMI again. A mode change refused while the firmware was
+    // still acting on the previous one is the cheapest explanation there is,
+    // and the retry costs a single request.
+    radio.pause(SETTLE_STEP);
+    match radio.set_operating_mode(OperatingMode::Online) {
+        Ok(()) => {
+            report.steps.push("QMI online accepted on retry".to_string());
+            if wait_for_full(radio, report) {
+                return;
+            }
+        }
+        Err(reason) => report
+            .steps
+            .push(format!("QMI online refused again: {reason}")),
+    }
+
+    // Rung 2: `AT+CFUN=1`. The plain form, which does not reset the module and
+    // does not take it off the USB bus. Measured to answer `+CME ERROR: 4` on
+    // a module already at `+CFUN: 7`, so it is a candidate and not a cure —
+    // but it is free, and the state this ladder usually runs from is low power
+    // rather than offline.
+    match radio.write_functionality(CFUN_FULL) {
+        Ok(true) => {
+            report.steps.push("AT+CFUN=1 accepted".to_string());
+            if wait_for_full(radio, report) {
+                return;
+            }
+        }
+        Ok(false) => report.steps.push("AT+CFUN=1 rejected".to_string()),
+        Err(reason) => {
+            report.steps.push(format!("AT+CFUN=1 unusable: {reason}"));
+            return;
+        }
+    }
+
+    // Rung 3: `AT+CFUN=0` then `AT+CFUN=1`. On this bench that pair cleared a
+    // SIM fault in about fifteen seconds without the module leaving the USB
+    // bus. It has never been tried against `+CFUN: 7`, so it is listed here as
+    // the last cheap thing rather than as an answer. It is only reached when
+    // the single-step form was answered and refused, which means the port is
+    // alive and the firmware is taking commands.
+    match radio.write_functionality(CFUN_MINIMUM) {
+        Ok(true) => report.steps.push("AT+CFUN=0 accepted".to_string()),
+        Ok(false) => {
+            report.steps.push("AT+CFUN=0 rejected".to_string());
+            return;
+        }
+        Err(reason) => {
+            report.steps.push(format!("AT+CFUN=0 unusable: {reason}"));
+            return;
+        }
+    }
+    radio.pause(SETTLE_STEP);
+    match radio.write_functionality(CFUN_FULL) {
+        Ok(true) => {
+            report
+                .steps
+                .push("AT+CFUN=1 accepted after AT+CFUN=0".to_string());
+            wait_for_full(radio, report);
+        }
+        Ok(false) => report
+            .steps
+            .push("AT+CFUN=1 rejected after AT+CFUN=0".to_string()),
+        Err(reason) => report
+            .steps
+            .push(format!("AT+CFUN=1 unusable after AT+CFUN=0: {reason}")),
+    }
+}
+
+/// Poll `AT+CFUN?` until it reads full functionality, or give up.
+///
+/// Returns `false` for an unreadable port as well as for a module that stayed
+/// down: both mean the caller may not treat the radio as back.
+fn wait_for_full<R: ModuleRadio>(radio: &mut R, report: &mut RestartReport) -> bool {
+    for attempt in 0..SETTLE_ATTEMPTS {
+        match radio.read_functionality() {
+            Ok(Some(CFUN_FULL)) => return true,
+            Ok(_) => {}
+            Err(reason) => {
+                report.steps.push(format!("AT+CFUN? unreadable: {reason}"));
+                return false;
+            }
+        }
+        if attempt + 1 < SETTLE_ATTEMPTS {
+            radio.pause(SETTLE_STEP);
+        }
+    }
+    false
+}
+
+fn describe_cfun(value: Option<u8>) -> String {
+    match value {
+        Some(CFUN_MINIMUM) => "+CFUN: 0 (minimum)".to_string(),
+        Some(CFUN_FULL) => "+CFUN: 1 (full)".to_string(),
+        Some(CFUN_DISABLE_RF) => "+CFUN: 4 (radio off)".to_string(),
+        Some(CFUN_OFFLINE) => "+CFUN: 7 (offline, stranded)".to_string(),
+        Some(other) => format!("+CFUN: {other}"),
+        None => "no +CFUN line".to_string(),
+    }
+}
+
+/// Read a `+CFUN:` value out of the lines of an `AT+CFUN?` exchange.
+///
+/// Tolerant of the second parameter some firmware appends and of leading
+/// whitespace, because the answer is only ever compared against a small set of
+/// known values.
+pub fn parse_cfun(lines: &[String]) -> Option<u8> {
+    lines.iter().find_map(|line| {
+        let rest = line.trim().strip_prefix("+CFUN:")?;
+        let first = rest.split(',').next()?.trim();
+        first.parse::<u8>().ok()
+    })
 }

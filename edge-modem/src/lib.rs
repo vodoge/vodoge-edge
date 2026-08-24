@@ -112,9 +112,10 @@ pub use nas::{
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{
-    DownloadOutcome, DownloadRequest, EsimAuthenticationInputs, EsimLocalInfo, EuiccSnapshot,
-    HttpStep, IsdrSession, QmiClient, QmiTransport, SegmentTransfer, SessionError, SyncRequest,
-    CTL_SYNC,
+    parse_cfun, restart_radio, DownloadOutcome, DownloadRequest, EsimAuthenticationInputs,
+    EsimLocalInfo, EuiccSnapshot, HttpStep, IsdrSession, ModuleRadio, QmiClient, QmiTransport,
+    RestartError, RestartReport, SegmentTransfer, SessionError, SyncRequest, CFUN_DISABLE_RF,
+    CFUN_FULL, CFUN_MINIMUM, CFUN_OFFLINE, CFUN_RESET_NOTE, CTL_SYNC,
 };
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,
