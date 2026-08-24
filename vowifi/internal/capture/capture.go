@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 )
 
 // Errors reported by this package.
@@ -52,7 +54,7 @@ const (
 	protocolUDP     uint8  = 17
 	sessionSuffix          = ".session.json"
 	sessionVersion         = 1
-	secretsWarnText        = "CONTAINS THE EPHEMERAL DH PRIVATE SCALAR AND NONCE. Lab debugging artifact only: anyone holding this file plus the pcap can derive the IKE SA keys. Do not distribute."
+	secretsWarnText        = "CONTAINS THE EPHEMERAL DH PRIVATE SCALAR AND NONCE, AND, WHEN AN IKE_AUTH LADDER WAS RECORDED, THE USIM'S RES/CK/IK FOR THE RECORDED RAND/AUTN. Lab debugging artifact only: anyone holding this file plus the pcap can derive the IKE SA keys and replay the EAP-AKA exchange. Do not distribute."
 )
 
 // Direction says who sent a datagram.
@@ -90,6 +92,53 @@ func (s Seed) Valid() bool {
 	return s.InitiatorSPI != 0 && len(s.NonceI) > 0 && s.DHGroup != 0 && len(s.DHPrivate) > 0
 }
 
+// AKA failure classes recorded alongside a vector.
+const (
+	AKAFailureSync  = "sync"
+	AKAFailureAuth  = "auth"
+	AKAFailureOther = "other"
+)
+
+// AKAVector is one USIM answer, recorded so an IKE_AUTH ladder can be replayed
+// without a card.
+//
+// A failed answer is as worth recording as a successful one: the AT_AUTS and
+// Authentication-Reject paths only exist because the card said no, and a replay
+// that silently turned them into successes would erase the very behaviour being
+// debugged.
+type AKAVector struct {
+	RAND    []byte `json:"rand"`
+	AUTN    []byte `json:"autn"`
+	RES     []byte `json:"res,omitempty"`
+	CK      []byte `json:"ck,omitempty"`
+	IK      []byte `json:"ik,omitempty"`
+	AUTS    []byte `json:"auts,omitempty"`
+	Failure string `json:"failure,omitempty"`
+}
+
+// AuthSeed is everything beyond the IKE_SA_INIT seed that an IKE_AUTH ladder
+// needs in order to replay byte for byte.
+//
+// IKE_SA_INIT only needed the SPI, the nonce and the DH scalar. IKE_AUTH adds
+// three more sources of fresh randomness - the child SPI, one CBC IV per
+// protected message, and the card's answers - and a replay that regenerated any
+// of them would produce different ciphertext and stop matching the recording.
+type AuthSeed struct {
+	ChildSPI        []byte      `json:"child_spi,omitempty"`
+	IVs             [][]byte    `json:"ivs,omitempty"`
+	EAPIdentity     string      `json:"eap_identity,omitempty"`
+	InitiatorIDType uint8       `json:"initiator_id_type,omitempty"`
+	InitiatorID     []byte      `json:"initiator_id,omitempty"`
+	ResponderIDType uint8       `json:"responder_id_type,omitempty"`
+	ResponderID     []byte      `json:"responder_id,omitempty"`
+	AKA             []AKAVector `json:"aka,omitempty"`
+}
+
+// Valid reports whether the auth seed can drive a byte-exact replay.
+func (s *AuthSeed) Valid() bool {
+	return s != nil && len(s.ChildSPI) == 4 && len(s.IVs) > 0
+}
+
 // Session is the sidecar metadata stored next to the pcap.
 type Session struct {
 	Version    int       `json:"version"`
@@ -99,6 +148,7 @@ type Session struct {
 	Note       string    `json:"note,omitempty"`
 	Warning    string    `json:"warning,omitempty"`
 	Seed       *Seed     `json:"seed,omitempty"`
+	AuthSeed   *AuthSeed `json:"auth_seed,omitempty"`
 }
 
 // WriterOptions configures a recording.
@@ -121,13 +171,14 @@ type WriterOptions struct {
 
 // Writer streams datagrams into a pcap file.
 type Writer struct {
-	mu      sync.Mutex
-	file    *os.File
-	opts    WriterOptions
-	session Session
-	seed    *Seed
-	closed  bool
-	count   int
+	mu       sync.Mutex
+	file     *os.File
+	opts     WriterOptions
+	session  Session
+	seed     *Seed
+	authSeed *AuthSeed
+	closed   bool
+	count    int
 }
 
 // NewWriter creates the pcap and prepares the sidecar.
@@ -180,6 +231,39 @@ func (w *Writer) SetSeed(seed Seed) {
 	copied.NonceI = append([]byte(nil), seed.NonceI...)
 	copied.DHPrivate = append([]byte(nil), seed.DHPrivate...)
 	w.seed = &copied
+}
+
+// SetAuthSeed stores the IKE_AUTH replay seed. Like SetSeed it is only
+// persisted under RecordSecrets.
+func (w *Writer) SetAuthSeed(seed AuthSeed) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	copied := AuthSeed{
+		ChildSPI:        append([]byte(nil), seed.ChildSPI...),
+		EAPIdentity:     seed.EAPIdentity,
+		InitiatorIDType: seed.InitiatorIDType,
+		InitiatorID:     append([]byte(nil), seed.InitiatorID...),
+		ResponderIDType: seed.ResponderIDType,
+		ResponderID:     append([]byte(nil), seed.ResponderID...),
+	}
+	for _, iv := range seed.IVs {
+		copied.IVs = append(copied.IVs, append([]byte(nil), iv...))
+	}
+	for _, v := range seed.AKA {
+		copied.AKA = append(copied.AKA, AKAVector{
+			RAND:    append([]byte(nil), v.RAND...),
+			AUTN:    append([]byte(nil), v.AUTN...),
+			RES:     append([]byte(nil), v.RES...),
+			CK:      append([]byte(nil), v.CK...),
+			IK:      append([]byte(nil), v.IK...),
+			AUTS:    append([]byte(nil), v.AUTS...),
+			Failure: v.Failure,
+		})
+	}
+	w.authSeed = &copied
 }
 
 // SetLocalAddr records the local endpoint once the kernel has picked it.
@@ -259,10 +343,16 @@ func (w *Writer) Close() error {
 	}
 	w.closed = true
 	session := w.session
-	if w.seed != nil {
+	if w.seed != nil || w.authSeed != nil {
 		if w.opts.RecordSecrets {
-			seed := *w.seed
-			session.Seed = &seed
+			if w.seed != nil {
+				seed := *w.seed
+				session.Seed = &seed
+			}
+			if w.authSeed != nil {
+				authSeed := *w.authSeed
+				session.AuthSeed = &authSeed
+			}
 			session.Warning = secretsWarnText
 			if w.opts.Warnf != nil {
 				w.opts.Warnf("capture %s: %s", w.opts.Path+sessionSuffix, secretsWarnText)
@@ -357,6 +447,88 @@ func Open(path string) (*Capture, error) {
 			Dst:     dst,
 			Payload: payload,
 		})
+	}
+	return out, nil
+}
+
+// AuthRecord is one AUTH payload lifted out of a recording.
+//
+// Body is the raw payload body exactly as it travelled: one Auth Method octet,
+// three RESERVED octets, then the authentication data (RFC 7296 section 3.8).
+// It is deliberately not decoded here. The encoding of that four-octet header,
+// and the Auth Method value in particular, is the single most likely thing for
+// this stack to have wrong, and a decoder in this package would be a second copy
+// of the same guess - so a test comparing the two would agree with itself while
+// both were wrong. Callers decode with ike.ParseAuthPayload; tests assert the
+// raw octets.
+type AuthRecord struct {
+	// Record indexes Capture.Records.
+	Record int
+	// Dir says who sent it.
+	Dir Direction
+	// MessageID is the IKE header message id.
+	MessageID uint32
+	// Encrypted reports that the payload came out of an SK payload rather than
+	// travelling in clear.
+	Encrypted bool
+	// Body is the AUTH payload body.
+	Body []byte
+}
+
+// AuthPayloads extracts every AUTH payload from a recording.
+//
+// This is the export path the first live ePDG contact will need. When that
+// exchange fails, the question is always "what exactly did we put in AUTH, and
+// what did they put in theirs" - and both are inside SK, so a Wireshark session
+// without keys shows nothing. Passing the IKE keys derived by replaying
+// IKE_SA_INIT turns the pcap back into the four octets that matter.
+//
+// A zero-valued keys argument still works: SK payloads are skipped and only
+// payloads that travelled in clear are returned.
+func (c *Capture) AuthPayloads(keys ikev2.IKEKeys) ([]AuthRecord, error) {
+	if c == nil {
+		return nil, nil
+	}
+	canDecrypt := keys.Profile.RequiredLength() > 0
+	var out []AuthRecord
+	for i, rec := range c.Records {
+		if rec.Kind != KindIKE {
+			continue
+		}
+		raw := rec.Payload
+		if len(raw) >= 4 && raw[0] == 0 && raw[1] == 0 && raw[2] == 0 && raw[3] == 0 {
+			raw = raw[4:]
+		}
+		msg, err := ikev2.ParseMessage(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: record %d is not an IKEv2 message: %w", ErrMalformedCapture, i, err)
+		}
+		encrypted := len(msg.Payloads) == 1 && msg.Payloads[0].Type == ikev2.PayloadSK
+		payloads := msg.Payloads
+		if encrypted {
+			if !canDecrypt {
+				continue
+			}
+			// Direction picks the key pair: SK_ei/SK_ai protect what the
+			// initiator sent, SK_er/SK_ar what the responder sent.
+			_, inner, err := ikev2.UnprotectMessage(raw, keys, rec.Dir == DirTx)
+			if err != nil {
+				return nil, fmt.Errorf("%w: record %d would not decrypt: %w", ErrMalformedCapture, i, err)
+			}
+			payloads = inner
+		}
+		for _, p := range payloads {
+			if p.Type != ikev2.PayloadAUTH {
+				continue
+			}
+			out = append(out, AuthRecord{
+				Record:    i,
+				Dir:       rec.Dir,
+				MessageID: msg.Header.MessageID,
+				Encrypted: encrypted,
+				Body:      append([]byte(nil), p.Body...),
+			})
+		}
 	}
 	return out, nil
 }

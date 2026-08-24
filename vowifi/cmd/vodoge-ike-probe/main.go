@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +52,7 @@ func run() error {
 		recordSecrets = flag.Bool("record-secrets", false, "store the DH scalar in the sidecar so the capture can be replayed byte-exactly; the file then reveals the IKE SA keys")
 		replayPath    = flag.String("replay", "", "replay a previously recorded pcap instead of touching the network")
 		strictReplay  = flag.Bool("strict-replay", true, "in replay mode, require our request bytes to match the recording exactly")
+		exportAuth    = flag.String("export-auth", "", "in replay mode, write every AUTH payload body to this directory as .auth.bin files")
 		maxCandidates = flag.Int("max-candidates", 4, "how many resolved addresses to try")
 	)
 	flag.Parse()
@@ -64,7 +66,7 @@ func run() error {
 	defer stop()
 
 	if *replayPath != "" {
-		return runReplay(ctx, *replayPath, *strictReplay)
+		return runReplay(ctx, *replayPath, *strictReplay, *exportAuth)
 	}
 	if strings.TrimSpace(*target) == "" {
 		return fmt.Errorf("-target is required")
@@ -209,7 +211,7 @@ func probeOne(ctx context.Context, p probeParams) error {
 // DefaultInitialWait is the first retransmission delay used by the probe.
 const DefaultInitialWait = 2 * time.Second
 
-func runReplay(ctx context.Context, path string, strict bool) error {
+func runReplay(ctx context.Context, path string, strict bool, exportAuthDir string) error {
 	transport, seed, err := capture.OpenReplay(path, capture.ReplayOptions{
 		UseNonESPMarker:      true,
 		RequireExactRequests: strict,
@@ -251,7 +253,95 @@ func runReplay(ctx context.Context, path string, strict bool) error {
 	fmt.Printf("  SPIi/SPIr    %016x / %016x\n", result.InitiatorSPI, result.ResponderSPI)
 	fmt.Printf("  selected     %s\n", detail.Selection)
 	fmt.Printf("  SKEYSEED     %d octets\n", len(result.SKEYSEED))
+
+	if err := replayAuthLadder(ctx, c, transport, result); err != nil {
+		return err
+	}
 	fmt.Printf("  unconsumed   %d datagram(s)\n", transport.Remaining())
+	return exportAuthPayloads(c, result.Keys, exportAuthDir)
+}
+
+// replayAuthLadder replays the IKE_AUTH ladder when the sidecar carries one.
+//
+// The extra seed material is not optional. IKE_SA_INIT needed a pinned SPI,
+// nonce and DH scalar; IKE_AUTH additionally consumes a fresh child SPI, one CBC
+// IV per protected message and the card's answers, and every one of those
+// changes the ciphertext. A run that regenerated any of them would still finish,
+// which is precisely the failure worth refusing: it would look like a successful
+// replay while proving nothing about the recorded bytes.
+func replayAuthLadder(ctx context.Context, c *capture.Capture, transport *capture.ReplayTransport, init ikev2.InitResult) error {
+	seed := c.Session.AuthSeed
+	if !seed.Valid() {
+		fmt.Printf("  IKE_AUTH     not recorded (no auth seed in the sidecar)\n")
+		return nil
+	}
+	runner := ike.NewAuthRunner(ikev2.Identity{Type: seed.ResponderIDType, Data: seed.ResponderID})
+	runner.ChildSPI = seed.ChildSPI
+	runner.PinnedIVs = seed.IVs
+	auth, err := runner.Run(ctx, ikev2.FullAuthConfig{
+		Transport:   transport,
+		Init:        init,
+		Keys:        init.Keys,
+		SIM:         ike.NewRecordedAKAProvider(seed.AKA),
+		InitiatorID: ikev2.Identity{Type: seed.InitiatorIDType, Data: seed.InitiatorID},
+		EAPIdentity: seed.EAPIdentity,
+	})
+	detail, _ := runner.LastDetail()
+	if err != nil {
+		fmt.Printf("  IKE_AUTH     replay failed after %d exchange(s): %v\n", len(detail.Rounds), err)
+		return err
+	}
+	fmt.Printf("  IKE_AUTH     %d exchange(s) reproduced byte for byte\n", len(detail.Rounds))
+	fmt.Printf("  IDr sent     %v; EAP_ONLY_AUTHENTICATION sent %v\n", detail.SentIDr, detail.SentEAPOnlyNotify)
+	fmt.Printf("  EAP-Success  message %d; CHILD_SA message %d\n",
+		detail.EAPSuccessMessageID, detail.ChildSAMessageID)
+	fmt.Printf("  peer AUTH    verified=%v method=%d\n", detail.PeerAuthVerified, detail.PeerAuthMethod)
+	if auth.ChildSA != nil {
+		fmt.Printf("  CHILD_SA     local SPI %x remote SPI %x\n", auth.ChildSA.LocalSPI, auth.ChildSA.RemoteSPI)
+	}
+	return nil
+}
+
+// exportAuthPayloads is the tool T041d will reach for first.
+//
+// When the first real ePDG rejects us, the question is "what exactly was in the
+// AUTH payload, ours and theirs". Both live inside SK, so a pcap opened without
+// keys shows nothing. The keys come back from replaying IKE_SA_INIT, so the
+// recording plus its sidecar is enough - no live carrier, no hardware.
+func exportAuthPayloads(c *capture.Capture, keys ikev2.IKEKeys, dir string) error {
+	records, err := c.AuthPayloads(keys)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Printf("  AUTH         none in this recording\n")
+		return nil
+	}
+	for _, rec := range records {
+		value, parseErr := ike.ParseAuthPayload(rec.Body)
+		reserved := ike.AuthPayloadReserved(rec.Body)
+		if parseErr != nil {
+			fmt.Printf("  AUTH %-2s msg %d  UNPARSEABLE (%d octets): %v\n",
+				rec.Dir, rec.MessageID, len(rec.Body), parseErr)
+			continue
+		}
+		fmt.Printf("  AUTH %-2s msg %d  method=%d reserved=%x data=%d octets encrypted=%v\n",
+			rec.Dir, rec.MessageID, value.Method, reserved, len(value.Data), rec.Encrypted)
+		fmt.Printf("               %x\n", value.Data)
+		if dir == "" {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		name := filepath.Join(dir, fmt.Sprintf("msg%d-%s.auth.bin", rec.MessageID, rec.Dir))
+		// The whole body, header included: the four-octet header is the part
+		// most likely to be wrong and stripping it here would hide it.
+		if err := os.WriteFile(name, rec.Body, 0o600); err != nil {
+			return err
+		}
+		fmt.Printf("               wrote %s (%d octets, header included)\n", name, len(rec.Body))
+	}
 	return nil
 }
 

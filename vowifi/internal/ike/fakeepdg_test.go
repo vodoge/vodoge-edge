@@ -1,7 +1,11 @@
 package ike
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -9,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boa-z/vowifi-go/engine/sim"
+	"github.com/boa-z/vowifi-go/engine/swu/eapaka"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 )
 
@@ -39,6 +45,10 @@ type fakeEPDG struct {
 	authLadder      bool
 	unsolicitedJunk bool
 
+	// epdg, when non-nil, replaces the plaintext authLadder with a real
+	// encrypted IKE_AUTH responder built below.
+	epdg *epdgAuth
+
 	// observed state
 	requests        []ikev2.Message
 	rawRequests     [][]byte
@@ -50,6 +60,17 @@ type fakeEPDG struct {
 	closed          bool
 	wg              sync.WaitGroup
 	lastInitiatorIP *net.UDPAddr
+
+	// IKE SA state, derived once IKE_SA_INIT completes. Everything the
+	// encrypted IKE_AUTH ladder needs lives here: without SK_ei/SK_ai the fake
+	// cannot decrypt us, and without the verbatim IKE_SA_INIT messages and the
+	// nonces it cannot check an AUTH payload.
+	ikeKeys         ikev2.IKEKeys
+	haveIKEKeys     bool
+	nonceI          []byte
+	nonceR          []byte
+	initRequestRaw  []byte
+	initResponseRaw []byte
 }
 
 // authStage names what an IKE_AUTH response carried.
@@ -164,9 +185,9 @@ func (f *fakeEPDG) handle(raw []byte) ([]byte, error) {
 
 	switch msg.Header.ExchangeType {
 	case ikev2.ExchangeIKE_SA_INIT:
-		return f.handleInit(msg)
+		return f.handleInit(msg, raw)
 	case ikev2.ExchangeIKE_AUTH:
-		return f.handleAuth(msg)
+		return f.handleAuth(msg, raw)
 	default:
 		return nil, fmt.Errorf("unexpected exchange type %d", msg.Header.ExchangeType)
 	}
@@ -186,7 +207,7 @@ func (f *fakeEPDG) respond(req ikev2.Message, payloads []ikev2.Payload) ([]byte,
 	return resp.MarshalBinary()
 }
 
-func (f *fakeEPDG) handleInit(msg ikev2.Message) ([]byte, error) {
+func (f *fakeEPDG) handleInit(msg ikev2.Message, raw []byte) ([]byte, error) {
 	var (
 		sa     ikev2.SecurityAssociation
 		ke     ikev2.KeyExchange
@@ -285,7 +306,8 @@ func (f *fakeEPDG) handleInit(msg ikev2.Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := peer.ComputeSharedSecret(ke.KeyData); err != nil {
+	shared, err := peer.ComputeSharedSecret(ke.KeyData)
+	if err != nil {
 		return nil, fmt.Errorf("initiator KE rejected: %w", err)
 	}
 
@@ -338,7 +360,49 @@ func (f *fakeEPDG) handleInit(msg ikev2.Message) ([]byte, error) {
 		payloads = append(payloads, src, dst)
 	}
 	payloads = append(payloads, ikev2.MOBIKESupportedNotify())
-	return f.respond(msg, payloads)
+	respBytes, err := f.respond(msg, payloads)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.deriveIKEKeys(msg, selected, shared, nonceI, nonceR, raw, respBytes); err != nil {
+		return nil, err
+	}
+	return respBytes, nil
+}
+
+// deriveIKEKeys is the responder half of RFC 7296 section 2.14, done with the
+// mirror's own primitives.
+//
+// It runs on the successful IKE_SA_INIT only - a COOKIE round or an
+// INVALID_KE_PAYLOAD round returns earlier - so the stored messages are the ones
+// RFC 7296 section 2.15 actually signs.
+func (f *fakeEPDG) deriveIKEKeys(req ikev2.Message, selected ikev2.SecurityAssociation, shared, nonceI, nonceR, reqRaw, respRaw []byte) error {
+	profile, err := ikev2.KeyMaterialProfileFromSA(selected)
+	if err != nil {
+		return err
+	}
+	skeyseed, err := ikev2.SKEYSEED(profile.PRF, nonceI, nonceR, shared)
+	if err != nil {
+		return err
+	}
+	material, err := ikev2.DeriveIKESAKeyMaterial(profile.PRF, skeyseed, nonceI, nonceR,
+		req.Header.InitiatorSPI, f.responderSPI, profile.RequiredLength())
+	if err != nil {
+		return err
+	}
+	keys, err := ikev2.SplitIKEKeys(profile, material)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ikeKeys = keys
+	f.haveIKEKeys = true
+	f.nonceI = append([]byte(nil), nonceI...)
+	f.nonceR = append([]byte(nil), nonceR...)
+	f.initRequestRaw = append([]byte(nil), reqRaw...)
+	f.initResponseRaw = append([]byte(nil), respRaw...)
+	return nil
 }
 
 // handleAuth models the IKE_AUTH ladder at the message-sequencing level only.
@@ -349,10 +413,14 @@ func (f *fakeEPDG) handleInit(msg ikev2.Message) ([]byte, error) {
 // payload is EAP-Success, and then a *separate* exchange carrying AUTH plus the
 // CHILD_SA. Any code that assumes the last two share a message fails against
 // this fixture.
-func (f *fakeEPDG) handleAuth(msg ikev2.Message) ([]byte, error) {
+func (f *fakeEPDG) handleAuth(msg ikev2.Message, raw []byte) ([]byte, error) {
 	f.mu.Lock()
 	ladder := f.authLadder
+	encrypted := f.epdg != nil
 	f.mu.Unlock()
+	if encrypted {
+		return f.handleEncryptedAuth(msg, raw)
+	}
 	if !ladder {
 		return nil, nil
 	}
@@ -452,4 +520,589 @@ func dialFake(t *testing.T, f *fakeEPDG, cfg SocketConfig) *Socket {
 	}
 	t.Cleanup(func() { _ = s.Close(nil) })
 	return s
+}
+
+// ---------------------------------------------------------------------------
+// Encrypted IKE_AUTH responder (T041b)
+// ---------------------------------------------------------------------------
+
+// testUSIMKey is the secret shared by the stand-in card and the stand-in AuC.
+var testUSIMKey = []byte("vodoge-t041b-usim-key-not-a-real-K")
+
+// usimDerive is the stand-in for Milenage.
+//
+// It is not Milenage and does not claim to be. Writing a Milenage vector from
+// memory is exactly the anti-pattern this project keeps getting burnt by, so
+// instead the card and the operator's AuC share one deterministic function whose
+// only property that matters is that both sides compute the same RES/CK/IK from
+// the same RAND/AUTN - which is precisely the property a real K provides.
+//
+// Everything downstream of it is real: eapaka.DeriveKeys performs the RFC 4187
+// section 7 derivation, AT_MAC is a real HMAC over the real packet bytes, and
+// the IKEv2 AUTH is computed by two independent pieces of code (production via
+// ike.SharedKeyAuth, fixture via epdgSharedKeyAuth below) that only agree if the
+// RFC 7296 section 2.15 composition is right.
+func usimDerive(k []byte, label string, rand16, autn16 []byte) []byte {
+	mac := hmac.New(sha256.New, k)
+	_, _ = mac.Write([]byte(label))
+	_, _ = mac.Write(rand16)
+	_, _ = mac.Write(autn16)
+	return mac.Sum(nil)
+}
+
+func usimVector(k, rand16, autn16 []byte) sim.AKAResult {
+	return sim.AKAResult{
+		RES: usimDerive(k, "res", rand16, autn16)[:8],
+		CK:  usimDerive(k, "ck", rand16, autn16)[:16],
+		IK:  usimDerive(k, "ik", rand16, autn16)[:16],
+	}
+}
+
+// testAKAProvider is the injected sim.AKAProvider. T041b must not touch
+// hardware; the real card bridge is T041c and needs the modem window.
+type testAKAProvider struct {
+	mu sync.Mutex
+
+	k []byte
+	// syncFailOn and authFailOn are 1-based call indexes that should fail.
+	syncFailOn map[int]bool
+	authFailOn map[int]bool
+	// auts is the 14-octet resynchronisation token handed back on a sync
+	// failure, the way a real card returns one.
+	auts []byte
+	// delay stalls the call, to exercise the deadline seam.
+	delay time.Duration
+
+	calls int
+	seen  [][2][]byte
+}
+
+func newTestAKAProvider() *testAKAProvider {
+	auts := make([]byte, eapaka.AUTSLength)
+	for i := range auts {
+		auts[i] = byte(0xa0 + i)
+	}
+	return &testAKAProvider{
+		k:          testUSIMKey,
+		syncFailOn: map[int]bool{},
+		authFailOn: map[int]bool{},
+		auts:       auts,
+	}
+}
+
+func (p *testAKAProvider) CalculateAKA(rand16, autn16 []byte) (sim.AKAResult, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	delay := p.delay
+	syncFail := p.syncFailOn[call]
+	authFail := p.authFailOn[call]
+	auts := append([]byte(nil), p.auts...)
+	p.seen = append(p.seen, [2][]byte{append([]byte(nil), rand16...), append([]byte(nil), autn16...)})
+	p.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	switch {
+	case syncFail:
+		// AUTS travels on the error, not in the result, so the eapaka
+		// syncFailureAUTS carrier path gets exercised too.
+		return sim.AKAResult{}, sim.NewSyncFailureError(auts)
+	case authFail:
+		return sim.AKAResult{}, sim.NewMACFailureError()
+	default:
+		return usimVector(p.k, rand16, autn16), nil
+	}
+}
+
+func (p *testAKAProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// epdgAuth is the state of one encrypted IKE_AUTH conversation.
+type epdgAuth struct {
+	// --- behaviour knobs ---
+	k                        []byte
+	responderID              ikev2.Identity
+	skipIdentityRound        bool
+	requireIDr               bool
+	requireEAPOnly           bool
+	authMethod               uint8
+	espSPI                   []byte
+	maxChallenges            int
+	corruptOwnAuth           bool
+	omitOwnAuth              bool
+	certAuthInFirstResponse  bool
+	eapSuccessCarriesChildSA bool
+
+	// --- observed ---
+	initialPayloadTypes []uint8
+	observedIDi         []byte
+	observedIDr         []byte
+	sawEAPOnlyNotify    bool
+	sawChildSAOffer     bool
+	sawTSi              bool
+	sawTSr              bool
+	sawCP               bool
+	eapIdentity         string
+	eapResponses        []uint8
+	challenges          int
+	currentRAND         []byte
+	currentAUTN         []byte
+	eapKeys             eapaka.Keys
+	sentIDrBody         []byte
+	clientAuth          []byte
+	clientAuthMethod    uint8
+	clientAuthVerified  bool
+	syncFailures        int
+	observedAUTS        []byte
+	authRejects         int
+	clientErrors        int
+	identifier          uint8
+}
+
+func newEPDGAuth() *epdgAuth {
+	return &epdgAuth{
+		k:              testUSIMKey,
+		responderID:    IdentityFQDN("epdg.epc.mnc260.mcc310.pub.3gppnetwork.org"),
+		requireIDr:     true,
+		requireEAPOnly: true,
+		authMethod:     AuthMethodSharedKeyMIC,
+		espSPI:         []byte{0xde, 0xad, 0xbe, 0xef},
+		maxChallenges:  3,
+		identifier:     40,
+	}
+}
+
+// enableEPDGAuth switches the fixture from the T041a plaintext ladder to a real
+// encrypted responder.
+func (f *fakeEPDG) enableEPDGAuth(a *epdgAuth) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.epdg = a
+}
+
+func (f *fakeEPDG) auth() *epdgAuth {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.epdg
+}
+
+// handleEncryptedAuth is the whole IKE_AUTH ladder, encrypted.
+//
+// Every request is decrypted with the mirror's own UnprotectMessage. That is the
+// upgrade over T041a: its ladder travelled in clear and could only pin message
+// sequencing. Here a request that is not really protected fails at
+// "expected single SK payload", and the AUTH payload is computed over key
+// material that only exists because both sides ran the same key derivation.
+func (f *fakeEPDG) handleEncryptedAuth(msg ikev2.Message, raw []byte) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a := f.epdg
+	if !f.haveIKEKeys {
+		return nil, fmt.Errorf("IKE_AUTH message %d arrived before IKE_SA_INIT completed", msg.Header.MessageID)
+	}
+	_, inner, err := ikev2.UnprotectMessage(raw, f.ikeKeys, true)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting IKE_AUTH message %d: %w", msg.Header.MessageID, err)
+	}
+
+	var (
+		eapRaw   []byte
+		authBody []byte
+	)
+	for _, p := range inner {
+		switch p.Type {
+		case ikev2.PayloadIDi:
+			a.observedIDi = append([]byte(nil), p.Body...)
+		case ikev2.PayloadIDr:
+			a.observedIDr = append([]byte(nil), p.Body...)
+		case ikev2.PayloadEAP:
+			eapRaw = append([]byte(nil), p.Body...)
+		case ikev2.PayloadAUTH:
+			authBody = append([]byte(nil), p.Body...)
+		case ikev2.PayloadSA:
+			a.sawChildSAOffer = true
+		case ikev2.PayloadTSi:
+			a.sawTSi = true
+		case ikev2.PayloadTSr:
+			a.sawTSr = true
+		case ikev2.PayloadCP:
+			a.sawCP = true
+		case ikev2.PayloadNotify:
+			notify, err := ikev2.ParseNotify(p.Body)
+			if err != nil {
+				return nil, err
+			}
+			if notify.NotifyType == NotifyEAPOnlyAuthentication {
+				a.sawEAPOnlyNotify = true
+			}
+		}
+	}
+
+	switch {
+	case authBody != nil:
+		return f.epdgFinalRound(msg, a, authBody)
+	case eapRaw != nil:
+		return f.epdgEAPRound(msg, a, eapRaw)
+	default:
+		return f.epdgFirstRound(msg, a, inner)
+	}
+}
+
+func (f *fakeEPDG) epdgFirstRound(msg ikev2.Message, a *epdgAuth, inner []ikev2.Payload) ([]byte, error) {
+	for _, p := range inner {
+		a.initialPayloadTypes = append(a.initialPayloadTypes, p.Type)
+	}
+	if a.requireIDr && len(a.observedIDr) == 0 {
+		return nil, fmt.Errorf("first IKE_AUTH request has no IDr; that is the shape "+
+			"BuildIKEAuthInitialPayloads produces (auth.go:840-888) and it is what this card replaces. types=%v",
+			a.initialPayloadTypes)
+	}
+	if a.requireEAPOnly && !a.sawEAPOnlyNotify {
+		return nil, fmt.Errorf("first IKE_AUTH request has no EAP_ONLY_AUTHENTICATION notify (%d); "+
+			"without it an ePDG expects certificate authentication. types=%v",
+			NotifyEAPOnlyAuthentication, a.initialPayloadTypes)
+	}
+	if !a.sawChildSAOffer || !a.sawTSi || !a.sawTSr {
+		return nil, fmt.Errorf("first IKE_AUTH request is missing SA/TSi/TSr: types=%v", a.initialPayloadTypes)
+	}
+
+	idr, err := ikev2.IdentityPayload(ikev2.PayloadIDr, a.responderID)
+	if err != nil {
+		return nil, err
+	}
+	a.sentIDrBody = append([]byte(nil), idr.Body...)
+	payloads := []ikev2.Payload{idr}
+
+	if a.certAuthInFirstResponse {
+		// A responder that ignored RFC 5998 and is proving itself with a
+		// certificate. The data is deliberately not verifiable.
+		payloads = append(payloads, ikev2.Payload{
+			Type: ikev2.PayloadAUTH,
+			Body: append([]byte{1, 0, 0, 0}, bytes.Repeat([]byte{0x5a}, 32)...),
+		})
+	}
+
+	var eap eapaka.Packet
+	if a.skipIdentityRound {
+		eap, err = a.buildChallenge()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		a.identifier++
+		eap = eapaka.Packet{
+			Code:       eapaka.CodeRequest,
+			Identifier: a.identifier,
+			Type:       eapaka.TypeAKA,
+			Subtype:    eapaka.SubtypeIdentity,
+			Attributes: []eapaka.Attribute{eapaka.PermanentIDReqAttribute()},
+		}
+	}
+	eapBytes, err := eap.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	payloads = append(payloads, ikev2.EAPPayload(eapBytes))
+	f.logStage(msg.Header.MessageID, authStage{
+		EAPRequest:  true,
+		CarriesAuth: a.certAuthInFirstResponse,
+	})
+	return f.protectLocked(msg, payloads)
+}
+
+func (f *fakeEPDG) epdgEAPRound(msg ikev2.Message, a *epdgAuth, eapRaw []byte) ([]byte, error) {
+	packet, err := eapaka.ParsePacket(eapRaw)
+	if err != nil {
+		return nil, err
+	}
+	if packet.Code != eapaka.CodeResponse {
+		return nil, fmt.Errorf("EAP code %d is not a response", packet.Code)
+	}
+	a.eapResponses = append(a.eapResponses, packet.Subtype)
+
+	switch packet.Subtype {
+	case eapaka.SubtypeIdentity:
+		attr, ok := eapaka.FindAttribute(packet.Attributes, eapaka.AttributeIdentity)
+		if !ok {
+			return nil, fmt.Errorf("EAP-Response/AKA-Identity has no AT_IDENTITY")
+		}
+		identity, err := attr.IdentityValue()
+		if err != nil {
+			return nil, err
+		}
+		a.eapIdentity = identity
+		challenge, err := a.buildChallenge()
+		if err != nil {
+			return nil, err
+		}
+		return f.epdgSendEAP(msg, challenge, authStage{EAPRequest: true})
+
+	case eapaka.SubtypeChallenge:
+		if err := a.verifyChallengeResponse(packet, eapRaw); err != nil {
+			return nil, err
+		}
+		success := eapaka.Packet{Code: eapaka.CodeSuccess, Identifier: packet.Identifier}
+		stage := authStage{EAPSuccess: true}
+		if a.eapSuccessCarriesChildSA {
+			// The assumption T041a's fixture exists to break, made real so the
+			// runner can be shown rejecting it.
+			eapBytes, err := success.MarshalBinary()
+			if err != nil {
+				return nil, err
+			}
+			child, err := a.childPayloads()
+			if err != nil {
+				return nil, err
+			}
+			stage.CarriesChild = true
+			f.logStage(msg.Header.MessageID, stage)
+			return f.protectLocked(msg, append([]ikev2.Payload{ikev2.EAPPayload(eapBytes)}, child...))
+		}
+		return f.epdgSendEAP(msg, success, stage)
+
+	case eapaka.SubtypeSynchronizationFailure:
+		attr, ok := eapaka.FindAttribute(packet.Attributes, eapaka.AttributeAUTS)
+		if !ok {
+			return nil, fmt.Errorf("EAP-Response/AKA-Synchronization-Failure has no AT_AUTS")
+		}
+		auts, err := attr.AUTSValue()
+		if err != nil {
+			return nil, err
+		}
+		a.syncFailures++
+		a.observedAUTS = append([]byte(nil), auts...)
+		if a.challenges >= a.maxChallenges {
+			return f.epdgSendEAP(msg, eapaka.Packet{Code: eapaka.CodeFailure, Identifier: packet.Identifier},
+				authStage{})
+		}
+		// A real HSS resynchronises SQN from AUTS and issues a fresh challenge.
+		challenge, err := a.buildChallenge()
+		if err != nil {
+			return nil, err
+		}
+		return f.epdgSendEAP(msg, challenge, authStage{EAPRequest: true})
+
+	case eapaka.SubtypeAuthenticationReject:
+		a.authRejects++
+		return f.epdgSendEAP(msg, eapaka.Packet{Code: eapaka.CodeFailure, Identifier: packet.Identifier},
+			authStage{})
+
+	case eapaka.SubtypeClientError:
+		a.clientErrors++
+		return f.epdgSendEAP(msg, eapaka.Packet{Code: eapaka.CodeFailure, Identifier: packet.Identifier},
+			authStage{})
+
+	default:
+		return nil, fmt.Errorf("unexpected EAP-Response subtype %d", packet.Subtype)
+	}
+}
+
+func (f *fakeEPDG) epdgSendEAP(msg ikev2.Message, packet eapaka.Packet, stage authStage) ([]byte, error) {
+	raw, err := packet.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	f.logStage(msg.Header.MessageID, stage)
+	return f.protectLocked(msg, []ikev2.Payload{ikev2.EAPPayload(raw)})
+}
+
+func (f *fakeEPDG) epdgFinalRound(msg ikev2.Message, a *epdgAuth, authBody []byte) ([]byte, error) {
+	if len(authBody) <= 4 {
+		return nil, fmt.Errorf("AUTH payload body is %d octets", len(authBody))
+	}
+	a.clientAuthMethod = authBody[0]
+	a.clientAuth = append([]byte(nil), authBody[4:]...)
+	if reserved := authBody[1:4]; !bytes.Equal(reserved, []byte{0, 0, 0}) {
+		return nil, fmt.Errorf("AUTH payload RESERVED octets are %v, RFC 7296 3.8 says senders zero them", reserved)
+	}
+	if len(a.eapKeys.MSK) == 0 {
+		return nil, fmt.Errorf("AUTH arrived before the EAP method produced an MSK")
+	}
+
+	prf := f.ikeKeys.Profile.PRF
+	macedIDi := epdgHMAC(prf, f.ikeKeys.SKPi, a.observedIDi)
+	signed := concatBytes(f.initRequestRaw, f.nonceR, macedIDi)
+	expected := epdgSharedKeyAuth(prf, a.eapKeys.MSK, signed)
+	if !hmac.Equal(expected, a.clientAuth) {
+		return nil, fmt.Errorf("initiator AUTH does not verify: got %d octets, expected %d",
+			len(a.clientAuth), len(expected))
+	}
+	a.clientAuthVerified = true
+
+	payloads := []ikev2.Payload{}
+	if !a.omitOwnAuth {
+		macedIDr := epdgHMAC(prf, f.ikeKeys.SKPr, a.sentIDrBody)
+		ourSigned := concatBytes(f.initResponseRaw, f.nonceI, macedIDr)
+		ourAuth := epdgSharedKeyAuth(prf, a.eapKeys.MSK, ourSigned)
+		if a.corruptOwnAuth {
+			ourAuth[0] ^= 0x01
+		}
+		body := append([]byte{a.authMethod, 0, 0, 0}, ourAuth...)
+		payloads = append(payloads, ikev2.Payload{Type: ikev2.PayloadAUTH, Body: body})
+	}
+	child, err := a.childPayloads()
+	if err != nil {
+		return nil, err
+	}
+	payloads = append(payloads, child...)
+	f.logStage(msg.Header.MessageID, authStage{
+		CarriesAuth:  !a.omitOwnAuth,
+		CarriesChild: true,
+	})
+	return f.protectLocked(msg, payloads)
+}
+
+func (a *epdgAuth) childPayloads() ([]ikev2.Payload, error) {
+	sa, err := ikev2.SecurityAssociationPayload(ikev2.DefaultESPProposal(a.espSPI))
+	if err != nil {
+		return nil, err
+	}
+	tsi, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSi, ikev2.IPv4AnyTrafficSelectors())
+	if err != nil {
+		return nil, err
+	}
+	tsr, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSr, ikev2.IPv4AnyTrafficSelectors())
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := ikev2.ConfigurationPayload(ikev2.Configuration{
+		Type: ikev2.CFGReply,
+		Attributes: []ikev2.ConfigurationAttribute{
+			{Type: ikev2.ConfigInternalIPv4Address, Value: []byte{10, 64, 0, 7}},
+			{Type: ikev2.ConfigInternalIPv4DNS, Value: []byte{10, 64, 0, 1}},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []ikev2.Payload{cfg, sa, tsi, tsr}, nil
+}
+
+// buildChallenge issues an EAP-Request/AKA-Challenge with a real AT_MAC.
+func (a *epdgAuth) buildChallenge() (eapaka.Packet, error) {
+	randValue := make([]byte, eapaka.RANDLength)
+	autn := make([]byte, eapaka.AUTNLength)
+	if _, err := rand.Read(randValue); err != nil {
+		return eapaka.Packet{}, err
+	}
+	if _, err := rand.Read(autn); err != nil {
+		return eapaka.Packet{}, err
+	}
+	a.challenges++
+	a.currentRAND = randValue
+	a.currentAUTN = autn
+	a.identifier++
+
+	identity := a.eapIdentity
+	if identity == "" {
+		return eapaka.Packet{}, fmt.Errorf("no EAP identity known, cannot derive K_aut for AT_MAC")
+	}
+	keys, err := eapaka.DeriveKeys(identity, usimVector(a.k, randValue, autn))
+	if err != nil {
+		return eapaka.Packet{}, err
+	}
+	packet := eapaka.Packet{
+		Code:       eapaka.CodeRequest,
+		Identifier: a.identifier,
+		Type:       eapaka.TypeAKA,
+		Subtype:    eapaka.SubtypeChallenge,
+		Attributes: []eapaka.Attribute{
+			eapaka.RANDAttribute(randValue),
+			eapaka.AUTNAttribute(autn),
+			eapaka.MACAttribute(nil),
+		},
+	}
+	raw, err := packet.MarshalBinary()
+	if err != nil {
+		return eapaka.Packet{}, err
+	}
+	mac, err := eapaka.CalculateMAC(keys.KAut, raw, nil)
+	if err != nil {
+		return eapaka.Packet{}, err
+	}
+	packet.Attributes[len(packet.Attributes)-1] = eapaka.MACAttribute(mac)
+	return packet, nil
+}
+
+// verifyChallengeResponse checks AT_RES against what the AuC expects and AT_MAC
+// against K_aut, then keeps the MSK for the AUTH round.
+func (a *epdgAuth) verifyChallengeResponse(packet eapaka.Packet, raw []byte) error {
+	if a.eapIdentity == "" {
+		return fmt.Errorf("challenge response arrived with no identity on record")
+	}
+	vector := usimVector(a.k, a.currentRAND, a.currentAUTN)
+	keys, err := eapaka.DeriveKeys(a.eapIdentity, vector)
+	if err != nil {
+		return err
+	}
+	if err := eapaka.VerifyMAC(keys.KAut, raw, nil); err != nil {
+		return fmt.Errorf("AT_MAC on the challenge response: %w", err)
+	}
+	attr, ok := eapaka.FindAttribute(packet.Attributes, eapaka.AttributeRES)
+	if !ok {
+		return fmt.Errorf("EAP-Response/AKA-Challenge has no AT_RES")
+	}
+	res, bits, err := attr.RESValue()
+	if err != nil {
+		return err
+	}
+	if int(bits) != len(vector.RES)*8 {
+		return fmt.Errorf("AT_RES claims %d bits over %d octets", bits, len(res))
+	}
+	if !hmac.Equal(res, vector.RES) {
+		return fmt.Errorf("AT_RES does not match the expected RES")
+	}
+	a.eapKeys = keys
+	return nil
+}
+
+func (f *fakeEPDG) logStage(messageID uint32, stage authStage) {
+	stage.MessageID = messageID
+	f.authMessageLog = append(f.authMessageLog, stage)
+}
+
+// protectLocked encrypts one response. The caller holds f.mu.
+func (f *fakeEPDG) protectLocked(req ikev2.Message, payloads []ikev2.Payload) ([]byte, error) {
+	header := ikev2.Header{
+		InitiatorSPI: req.Header.InitiatorSPI,
+		ResponderSPI: f.responderSPI,
+		ExchangeType: ikev2.ExchangeIKE_AUTH,
+		Flags:        ikev2.FlagResponse,
+		MessageID:    req.Header.MessageID,
+	}
+	_, raw, err := ikev2.ProtectMessage(header, f.ikeKeys, false, payloads, nil)
+	return raw, err
+}
+
+// epdgHMAC and epdgSharedKeyAuth are the fixture's own implementation of
+// RFC 7296 section 2.15.
+//
+// They deliberately do not call ikev2.PRF or ike.SharedKeyAuth. There is only
+// one HMAC in the standard library so the primitive is necessarily shared, but
+// the composition - which is where a wrong AUTH actually comes from: the order
+// of the three concatenated pieces, the key-pad step, whether the ID payload
+// header is included - is written out separately here. The two only agree if
+// that composition is right on both sides. auth_payloads_test.go goes one step
+// further and re-derives HMAC itself from RFC 2104.
+func epdgHMAC(h crypto.Hash, key, data []byte) []byte {
+	mac := hmac.New(h.New, key)
+	_, _ = mac.Write(data)
+	return mac.Sum(nil)
+}
+
+func epdgSharedKeyAuth(h crypto.Hash, secret, signedOctets []byte) []byte {
+	return epdgHMAC(h, epdgHMAC(h, secret, []byte("Key Pad for IKEv2")), signedOctets)
+}
+
+func concatBytes(parts ...[]byte) []byte {
+	var out []byte
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
 }
