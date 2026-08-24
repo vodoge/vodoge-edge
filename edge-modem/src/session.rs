@@ -558,32 +558,26 @@ impl<T: QmiTransport> IsdrSession<'_, T> {
     /// prefix that still parsed as valid BER-TLV, so the truncation showed up
     /// as missing fields rather than as an error.
     pub fn transmit(&mut self, apdu: &[u8]) -> Result<ApduResponse, SessionError> {
-        let mut response = self
+        let first = self
             .client
             .send_apdu(self.slot, self.channel, apdu)
             .map_err(|error| SessionError::transport(format!("ES10 command: {error}")))?;
-        let mut collected = std::mem::take(&mut response.data);
-        let mut rounds = 0usize;
-        while let Some(get_response) = response.get_response_apdu() {
-            if rounds >= uim::MAX_GET_RESPONSE_ROUNDS {
-                return Err(SessionError::transport(format!(
-                    "eUICC on slot {} asked for more than {} GET RESPONSE rounds",
-                    self.slot,
-                    uim::MAX_GET_RESPONSE_ROUNDS
-                )));
-            }
-            rounds += 1;
-            response = self
-                .client
-                .send_apdu(self.slot, self.channel, &get_response)
-                .map_err(|error| SessionError::transport(format!("GET RESPONSE: {error}")))?;
-            collected.extend_from_slice(&response.data);
-        }
-        Ok(ApduResponse {
-            data: collected,
-            sw1: response.sw1,
-            sw2: response.sw2,
-        })
+        let slot = self.slot;
+        let channel = self.channel;
+        let client = &mut *self.client;
+        uim::drain_get_response(
+            first,
+            |get_response| {
+                client
+                    .send_apdu(slot, channel, get_response)
+                    .map_err(|error| SessionError::transport(format!("GET RESPONSE: {error}")))
+            },
+            |rounds| {
+                SessionError::transport(format!(
+                    "eUICC on slot {slot} asked for more than {rounds} GET RESPONSE rounds"
+                ))
+            },
+        )
     }
 
     /// Run one ES10 request, splitting it across `STORE DATA` blocks if it

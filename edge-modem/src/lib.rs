@@ -4,6 +4,7 @@
 //! QMI-over-MBIM adapter owns byte I/O, while this crate owns the binary
 //! invariants needed before a frame can be sent or accepted.
 
+mod aka;
 mod at;
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
@@ -34,10 +35,21 @@ use std::{
     fmt,
 };
 
-pub use at::{
-    at_control_ports, at_port_for_qmi, first_bare_digits, usb_device_of_at, AtError, AtExchange,
-    AtPort, AT_CONTROL_INTERFACE,
+pub use aka::{
+    authenticate_apdu, classify_authenticate, csim_command, decode_hex, hex_upper,
+    parse_csim_answer, selected_aid, usim_authenticate, verify_usim_selected, AkaError, AkaOutcome,
+    BasicChannel, CsimChannel, AKA_TIMEOUT, AUTN_BYTES, AUTS_BYTES, CK_BYTES, IK_BYTES, KC_BYTES,
+    RAND_BYTES, RES_MAX_BYTES, RES_MIN_BYTES, STATUS_FCP_APDU, SW_INCORRECT_MAC,
+    USIM_ADF_AID_PREFIX,
 };
+pub use at::{
+    at_control_ports, at_port_for_qmi, first_bare_digits, handle_lease_request, lease_socket_path,
+    usb_device_of_at, ArbiterWaiting, AtError, AtExchange, AtLease, AtPort, LeaseFailure,
+    ModemArbiter, ModemLease, ModemPriority, AT_CONTROL_INTERFACE, DEFAULT_LEASE_SOCKET,
+    DEFAULT_LEASE_TIMEOUT, LEASE_SOCKET_ENV, MAX_LEASE_CLIENTS, MAX_LEASE_TIMEOUT,
+};
+#[cfg(unix)]
+pub use at::{bind_lease_socket, serve_connection, serve_lease};
 pub use usb::{
     recover_usb_device, reset_for_qmi, usb_device_of_qmi, usb_devnum, usb_identity, UsbError,
     UsbIdentity, UsbRecovery, UsbReset,
@@ -97,7 +109,8 @@ pub use session::{
 };
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,
-    parse_eid, parse_open_logical_channel, parse_send_apdu, ApduResponse, UimError,
+    drain_get_response, parse_eid, parse_open_logical_channel, parse_send_apdu, ApduResponse,
+    UimError,
     CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, MAX_GET_RESPONSE_ROUNDS,
     OPEN_LOGICAL_CHANNEL, SEND_APDU,
 };

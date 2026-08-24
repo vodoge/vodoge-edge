@@ -135,7 +135,11 @@ mod linux {
 
     #[derive(Clone)]
     struct Radio {
-        lock: Arc<Mutex<()>>,
+        /// Serialises every conversation with a module, with AKA jumping the
+        /// queue. See `edge_modem::ModemArbiter`: the tunnel process now asks
+        /// for the same port on a timed protocol path, so "first waiter wins"
+        /// stopped being good enough.
+        arbiter: Arc<edge_modem::ModemArbiter>,
         by_imei: Arc<Mutex<BTreeMap<String, PathBuf>>>,
         /// Device currently held by an operator-initiated command.
         ///
@@ -160,7 +164,7 @@ mod linux {
         fn new() -> (Self, Receiver<()>) {
             let (rescan, requests) = sync_channel(1);
             let radio = Self {
-                lock: Arc::new(Mutex::new(())),
+                arbiter: Arc::new(edge_modem::ModemArbiter::new()),
                 by_imei: Arc::new(Mutex::new(BTreeMap::new())),
                 busy: Arc::new(Mutex::new(None)),
                 rescan,
@@ -221,7 +225,23 @@ mod linux {
             imei: Option<&str>,
             work: impl FnOnce(&mut edge_modem::AtPort) -> Result<T, SendError>,
         ) -> Result<T, SendError> {
-            let _lock = self.lock.lock().expect("radio");
+            self.with_at_port_at(imei, edge_modem::ModemPriority::Normal, work)
+        }
+
+        /// The same, for a caller that says how urgent it is.
+        ///
+        /// Only USIM authentication asks for anything but `Normal`, and it
+        /// does so because its deadline belongs to a remote peer rather than
+        /// to us: an ePDG or an IMS core drops the exchange while our request
+        /// is still queued behind a band scan, and the failure surfaces
+        /// nowhere near the queue that caused it.
+        fn with_at_port_at<T>(
+            &self,
+            imei: Option<&str>,
+            priority: edge_modem::ModemPriority,
+            work: impl FnOnce(&mut edge_modem::AtPort) -> Result<T, SendError>,
+        ) -> Result<T, SendError> {
+            let _lock = self.arbiter.acquire(priority);
             let qmi_path = self.path_for(imei).ok();
             let at_path = match qmi_path
                 .as_deref()
@@ -244,7 +264,11 @@ mod linux {
             imei: Option<&str>,
             work: impl FnOnce(&mut QmiClient<CdcWdmDevice>) -> Result<T, SendError>,
         ) -> Result<T, SendError> {
-            let _lock = self.lock.lock().expect("radio");
+            // Normal priority, and that includes eUICC logical-channel work:
+            // an AKA challenge must never land in the middle of an ES10
+            // sequence, so the two are mutually exclusive here rather than
+            // merely ordered.
+            let _lock = self.arbiter.acquire(edge_modem::ModemPriority::Normal);
             let path = self.path_for(imei)?;
             let _busy = self.hold(&path);
             let device = CdcWdmDevice::open(&path)
@@ -294,6 +318,69 @@ mod linux {
                 }
             }
             work(&mut client)
+        }
+    }
+
+    /// Renting the module out to the tunnel process.
+    ///
+    /// The VoWiFi stack has to be a separate Go process on this machine — it
+    /// opens `/dev/net/tun`, shells out to `ip`, and its IKE and ESP packets
+    /// have to leave through the same NAT binding — but only this daemon may
+    /// own the serial ports, because it is also the thing running eUICC
+    /// sessions on them. So the port is lent, one command at a time, through
+    /// a socket that the arbiter above serialises.
+    ///
+    /// A rejection from the module is a successful lease call: `+CME ERROR`
+    /// is the module's answer and the caller has to see it. Only losing the
+    /// port is an error here.
+    impl edge_modem::AtLease for Radio {
+        fn execute(
+            &self,
+            imei: Option<&str>,
+            command: &str,
+            timeout: Duration,
+            priority: edge_modem::ModemPriority,
+        ) -> Result<edge_modem::AtExchange, edge_modem::LeaseFailure> {
+            self.with_at_port_at(imei, priority, |port| {
+                port.command_with_timeout(command, timeout)
+                    .map_err(|error| SendError::new("at_failed", error.to_string()))
+            })
+            .map_err(lease_failure)
+        }
+
+        fn authenticate(
+            &self,
+            imei: Option<&str>,
+            rand16: &[u8],
+            autn16: &[u8],
+        ) -> Result<edge_modem::AkaOutcome, edge_modem::LeaseFailure> {
+            self.with_at_port_at(imei, edge_modem::ModemPriority::Aka, |port| {
+                let mut channel = edge_modem::CsimChannel::new(port);
+                edge_modem::usim_authenticate(&mut channel, rand16, autn16)
+                    .map_err(|error| SendError::new(error.code(), error.to_string()))
+            })
+            .map_err(lease_failure)
+        }
+    }
+
+    fn lease_failure(error: SendError) -> edge_modem::LeaseFailure {
+        edge_modem::LeaseFailure::new(error.reason_code, error.message)
+    }
+
+    /// Start the AT lease, or say why it could not start.
+    ///
+    /// Not fatal. The lease exists for the tunnel process, and a daemon that
+    /// refuses to run the fleet because a socket path is unusable would be
+    /// trading the working half of the machine for the new half.
+    fn start_at_lease(radio: &Radio) {
+        let path = edge_modem::lease_socket_path();
+        match edge_modem::bind_lease_socket(&path) {
+            Ok(listener) => {
+                log_line(format!("at lease listening on {}", path.display()));
+                let lease = Arc::new(radio.clone());
+                std::thread::spawn(move || edge_modem::serve_lease(listener, lease));
+            }
+            Err(error) => log_error(format!("at lease not started: {error}")),
         }
     }
 
@@ -598,7 +685,7 @@ mod linux {
             // Held across the whole thing so a poll cannot open the character
             // device while the module is de-authorised, and so the census is
             // taken with nothing else on these ports.
-            let _lock = self.radio.lock.lock().expect("radio");
+            let _lock = self.radio.arbiter.acquire(edge_modem::ModemPriority::Normal);
             let census = usb_census();
             let remembered = match imei.map(str::trim).filter(|value| !value.is_empty()) {
                 Some(imei) => self
@@ -1895,6 +1982,7 @@ mod linux {
             DurableOutbox::open(&outbox_path, 100_000).map_err(|e| e.to_string())?,
         ));
         let (radio, rescans) = Radio::new();
+        start_at_lease(&radio);
         let proxies = Arc::new(ProxyRuntime::new(radio.clone())?);
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
@@ -2310,7 +2398,7 @@ mod linux {
     /// an identifier for one would put a row in the fleet that matches no
     /// hardware.
     fn probe_at_only(at_path: &Path, radio: &Radio) -> Option<ModemSnapshot> {
-        let _busy = radio.lock.lock().expect("radio");
+        let _busy = radio.arbiter.acquire(edge_modem::ModemPriority::Normal);
         let mut port =
             edge_modem::AtPort::open_with_timeout(at_path, AT_PROBE_TIMEOUT.max(Duration::from_secs(2)))
                 .ok()?;
@@ -2567,7 +2655,7 @@ mod linux {
         outbox: &Arc<Mutex<DurableOutbox>>,
         radio: &Radio,
     ) -> Result<ModemSnapshot, String> {
-        let _busy = radio.lock.lock().expect("radio");
+        let _busy = radio.arbiter.acquire(edge_modem::ModemPriority::Normal);
         let device = CdcWdmDevice::open(path).map_err(|e| e.to_string())?;
         let mut client = QmiClient::new(device);
         client.sync().map_err(|e| e.to_string())?;

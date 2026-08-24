@@ -84,6 +84,40 @@ impl ApduResponse {
     }
 }
 
+/// Keep asking a card for the rest of an answer until it stops saying `61 xx`.
+///
+/// Lifted out of `IsdrSession::transmit` when a second caller appeared: the
+/// USIM AKA primitive runs on the basic channel over `AT+CSIM` rather than
+/// over QMI, so it cannot borrow the session, but it must not re-derive this
+/// loop either. Two copies of "how many rounds are too many" is how one of
+/// them silently keeps the old answer of "one".
+///
+/// `send` carries whatever transport the caller has; `too_many` builds that
+/// caller's own error for the bound, so neither side has to widen its error
+/// type to accommodate the other.
+pub fn drain_get_response<E>(
+    first: ApduResponse,
+    mut send: impl FnMut(&[u8]) -> Result<ApduResponse, E>,
+    too_many: impl FnOnce(usize) -> E,
+) -> Result<ApduResponse, E> {
+    let mut response = first;
+    let mut collected = std::mem::take(&mut response.data);
+    let mut rounds = 0usize;
+    while let Some(get_response) = response.get_response_apdu() {
+        if rounds >= MAX_GET_RESPONSE_ROUNDS {
+            return Err(too_many(MAX_GET_RESPONSE_ROUNDS));
+        }
+        rounds += 1;
+        response = send(&get_response)?;
+        collected.extend_from_slice(&response.data);
+    }
+    Ok(ApduResponse {
+        data: collected,
+        sw1: response.sw1,
+        sw2: response.sw2,
+    })
+}
+
 pub fn open_logical_channel_request(
     assignment: ClientAssignment,
     transaction: TransactionId,

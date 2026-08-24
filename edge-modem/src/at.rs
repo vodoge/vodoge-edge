@@ -555,3 +555,624 @@ mod tests {
         assert_eq!(first_bare_digits(&lines), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Modem arbitration and the local AT lease
+// ---------------------------------------------------------------------------
+//
+// The AT port is a single serial line and the module answers one command at a
+// time. That was already true, and one mutex around every AT and QMI exchange
+// was already enough — while the only thing asking was this daemon.
+//
+// It stops being enough once the tunnel stack is a second process. Its AKA
+// challenges are not background work: each one sits inside a timed, blocking
+// exchange with somebody else's server (IKE_AUTH once, the IMS REGISTER 401
+// challenge once, E911 entitlement up to five rounds, EAP re-authentication
+// once). A plain mutex would let a band scan or an ES10 sequence hold the
+// module past the peer's patience, and the tunnel would then fail for a
+// reason nothing in the logs connects to a queue. So the arbiter is
+// priority-aware: an AKA request goes ahead of anything merely waiting.
+//
+// The lease itself is a Unix socket and nothing else, on purpose. It runs
+// arbitrary AT commands, which is complete control of the module — the SIM,
+// the radio, the firmware. A loopback TCP port would still be reachable by
+// every process and container on the host, and by anything that can persuade
+// this host to forward to it; a socket file is reachable by whoever the
+// filesystem says, and it is created 0600.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+
+use crate::aka::{decode_hex, hex_upper, AkaError, AkaOutcome, AUTN_BYTES, RAND_BYTES};
+
+/// Who is asking for the module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModemPriority {
+    /// Console commands, the poll loop, eUICC profile management.
+    Normal,
+    /// A USIM authentication on a timed protocol path. Overtakes anything
+    /// that is only queued; it cannot interrupt work already running, because
+    /// half an ES10 sequence is worse than a late challenge.
+    Aka,
+}
+
+impl ModemPriority {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Aka => "aka",
+        }
+    }
+}
+
+#[derive(Default)]
+struct ArbiterState {
+    held: bool,
+    waiting_normal: usize,
+    waiting_aka: usize,
+}
+
+/// Serialises every conversation with one module, with AKA jumping the queue.
+///
+/// Deliberately not a `Mutex<()>`: the point is that the waiters are not
+/// equal, and an arbitrary wake order is exactly what this replaces.
+#[derive(Default)]
+pub struct ModemArbiter {
+    state: Mutex<ArbiterState>,
+    changed: Condvar,
+}
+
+/// How many callers are queued, for tests and for a status page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArbiterWaiting {
+    pub normal: usize,
+    pub aka: usize,
+    pub held: bool,
+}
+
+impl ModemArbiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Blocks until the module is ours.
+    ///
+    /// An AKA caller waits only for the current holder. A normal caller also
+    /// waits for every queued AKA caller, which is the whole mechanism. AKA
+    /// work is bounded — one APDU pair per challenge, a handful of challenges
+    /// per session — so this cannot starve the console in practice, and what
+    /// it replaces is a timed protocol exchange losing to the follow-up work
+    /// of a three-minute band scan.
+    pub fn acquire(&self, priority: ModemPriority) -> ModemLease<'_> {
+        let mut state = self.state.lock().expect("modem arbiter");
+        match priority {
+            ModemPriority::Aka => {
+                state.waiting_aka += 1;
+                while state.held {
+                    state = self.changed.wait(state).expect("modem arbiter");
+                }
+                state.waiting_aka -= 1;
+            }
+            ModemPriority::Normal => {
+                state.waiting_normal += 1;
+                while state.held || state.waiting_aka > 0 {
+                    state = self.changed.wait(state).expect("modem arbiter");
+                }
+                state.waiting_normal -= 1;
+            }
+        }
+        state.held = true;
+        drop(state);
+        ModemLease { arbiter: self }
+    }
+
+    pub fn waiting(&self) -> ArbiterWaiting {
+        let state = self.state.lock().expect("modem arbiter");
+        ArbiterWaiting {
+            normal: state.waiting_normal,
+            aka: state.waiting_aka,
+            held: state.held,
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("modem arbiter");
+        state.held = false;
+        drop(state);
+        self.changed.notify_all();
+    }
+}
+
+/// Holds the module until dropped, including on a panic path.
+pub struct ModemLease<'a> {
+    arbiter: &'a ModemArbiter,
+}
+
+impl Drop for ModemLease<'_> {
+    fn drop(&mut self) {
+        self.arbiter.release();
+    }
+}
+
+/// A refusal the lease reports to its client.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeaseFailure {
+    pub code: String,
+    pub message: String,
+}
+
+impl LeaseFailure {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<AkaError> for LeaseFailure {
+    fn from(error: AkaError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
+/// What the daemon lets a local process do with a module.
+///
+/// Two operations rather than one. `execute` is the general lease the Go
+/// tunnel process needs; `authenticate` exists as well because an AKA
+/// challenge is the one thing that must be able to overtake the queue, and
+/// because the status-word classification belongs on this side of the
+/// boundary — the caller learns "the card rejected this", not `9862`.
+pub trait AtLease: Send + Sync {
+    fn execute(
+        &self,
+        imei: Option<&str>,
+        command: &str,
+        timeout: Duration,
+        priority: ModemPriority,
+    ) -> Result<AtExchange, LeaseFailure>;
+
+    fn authenticate(
+        &self,
+        imei: Option<&str>,
+        rand16: &[u8],
+        autn16: &[u8],
+    ) -> Result<AkaOutcome, LeaseFailure>;
+}
+
+/// Longest command budget a client may ask for.
+///
+/// A band scan legitimately runs past a minute, so the ceiling is generous;
+/// it exists so that one request cannot pin the module forever.
+pub const MAX_LEASE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Used when a request does not say.
+pub const DEFAULT_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Concurrent clients. The arbiter serialises them anyway; this only stops a
+/// misbehaving peer from spawning threads without bound.
+pub const MAX_LEASE_CLIENTS: usize = 8;
+
+/// Handle one request line and produce the response line.
+///
+/// Split out from the socket so the protocol is testable without one, which
+/// also means a change to the wire format cannot be verified only against
+/// itself.
+pub fn handle_lease_request(lease: &dyn AtLease, line: &str) -> String {
+    let request: serde_json::Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(error) => return failure_json("bad_request", &format!("not JSON: {error}")),
+    };
+    let imei = request
+        .get("imei")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match request.get("op").and_then(|value| value.as_str()) {
+        Some("execute_at") => {
+            let Some(command) = request.get("command").and_then(|value| value.as_str()) else {
+                return failure_json("bad_request", "execute_at needs a command");
+            };
+            let timeout = match request.get("timeout_ms") {
+                None => DEFAULT_LEASE_TIMEOUT,
+                Some(value) => match value.as_u64() {
+                    Some(millis) if millis > 0 => {
+                        Duration::from_millis(millis).min(MAX_LEASE_TIMEOUT)
+                    }
+                    _ => {
+                        return failure_json("bad_request", "timeout_ms must be a positive integer")
+                    }
+                },
+            };
+            let priority = match request.get("priority").and_then(|value| value.as_str()) {
+                None | Some("normal") => ModemPriority::Normal,
+                Some("aka") => ModemPriority::Aka,
+                Some(other) => {
+                    return failure_json("bad_request", &format!("unknown priority {other:?}"))
+                }
+            };
+            match lease.execute(imei, command, timeout, priority) {
+                Ok(exchange) => serde_json::json!({
+                    "ok": true,
+                    "op": "execute_at",
+                    "succeeded": exchange.succeeded(),
+                    "response": exchange.transcript(),
+                    "lines": exchange.lines,
+                    "terminator": exchange.terminator,
+                    "elapsed_ms": exchange.elapsed.as_millis() as u64,
+                })
+                .to_string(),
+                Err(failure) => failure_json(&failure.code, &failure.message),
+            }
+        }
+        Some("authenticate") => {
+            let rand = match hex_field(&request, "rand", RAND_BYTES) {
+                Ok(bytes) => bytes,
+                Err(message) => return failure_json("bad_request", &message),
+            };
+            let autn = match hex_field(&request, "autn", AUTN_BYTES) {
+                Ok(bytes) => bytes,
+                Err(message) => return failure_json("bad_request", &message),
+            };
+            match lease.authenticate(imei, &rand, &autn) {
+                Ok(outcome) => outcome_json(&outcome),
+                Err(failure) => failure_json(&failure.code, &failure.message),
+            }
+        }
+        Some(other) => failure_json("bad_request", &format!("unknown op {other:?}")),
+        None => failure_json("bad_request", "missing op"),
+    }
+}
+
+fn hex_field(request: &serde_json::Value, name: &str, expected: usize) -> Result<Vec<u8>, String> {
+    let text = request
+        .get(name)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("authenticate needs {name} as a hex string"))?;
+    let bytes = decode_hex(text).ok_or_else(|| format!("{name} is not hex"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "{name} must be {expected} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn outcome_json(outcome: &AkaOutcome) -> String {
+    let mut body = serde_json::json!({
+        "ok": true,
+        "op": "authenticate",
+        "outcome": outcome.label(),
+    });
+    let map = body.as_object_mut().expect("object");
+    match outcome {
+        AkaOutcome::Success { res, ck, ik, kc } => {
+            map.insert("res".into(), hex_upper(res).into());
+            map.insert("ck".into(), hex_upper(ck).into());
+            map.insert("ik".into(), hex_upper(ik).into());
+            if let Some(kc) = kc {
+                map.insert("kc".into(), hex_upper(kc).into());
+            }
+        }
+        AkaOutcome::SyncFailure { auts } => {
+            map.insert("auts".into(), hex_upper(auts).into());
+        }
+        AkaOutcome::AuthenticationFailure { sw1, sw2, detail } => {
+            map.insert("sw".into(), format!("{sw1:02X}{sw2:02X}").into());
+            map.insert("detail".into(), (*detail).into());
+        }
+    }
+    body.to_string()
+}
+
+fn failure_json(code: &str, message: &str) -> String {
+    serde_json::json!({ "ok": false, "error": code, "message": message }).to_string()
+}
+
+/// Default socket path. Under `/run` because the socket is per-boot state and
+/// a stale one left in a data directory is a confusing thing to find.
+pub const DEFAULT_LEASE_SOCKET: &str = "/run/vodoge-edge/at-lease.sock";
+/// Environment variable that overrides it.
+pub const LEASE_SOCKET_ENV: &str = "VODOGE_AT_LEASE_SOCKET";
+
+/// Where the lease socket should live for this process.
+pub fn lease_socket_path() -> PathBuf {
+    std::env::var_os(LEASE_SOCKET_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LEASE_SOCKET))
+}
+
+#[cfg(unix)]
+mod unix_lease {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    /// Bind the lease socket, replacing a stale one from a previous run.
+    ///
+    /// Permissions are set before anything can connect, and a leftover path is
+    /// only removed when it is actually a socket — deleting whatever happens
+    /// to be at a configured path would be a fine way to lose a file somebody
+    /// meant to keep.
+    pub fn bind_lease_socket(path: &Path) -> Result<UnixListener, AtError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| AtError::Open {
+                path: parent.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+        }
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                let _ = std::fs::remove_file(path);
+            }
+            Ok(_) => {
+                return Err(AtError::Open {
+                    path: path.to_path_buf(),
+                    reason: "exists and is not a socket".into(),
+                })
+            }
+            Err(_) => {}
+        }
+        let listener = UnixListener::bind(path).map_err(|error| AtError::Open {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+            AtError::Open {
+                path: path.to_path_buf(),
+                reason: format!("chmod 0600: {error}"),
+            }
+        })?;
+        Ok(listener)
+    }
+
+    /// Serve the lease until the listener fails.
+    ///
+    /// One thread per connection because the Go side keeps a connection open
+    /// across a whole tunnel session, and an AKA challenge must not wait
+    /// behind another client's band scan at the socket layer — the arbiter
+    /// decides that ordering, not the accept loop.
+    pub fn serve_lease<L: AtLease + 'static>(listener: UnixListener, lease: Arc<L>) {
+        let clients = Arc::new(AtomicUsize::new(0));
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            if clients.load(Ordering::SeqCst) >= MAX_LEASE_CLIENTS {
+                let mut stream = stream;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    failure_json("too_many_clients", "AT lease is at its connection limit")
+                );
+                continue;
+            }
+            clients.fetch_add(1, Ordering::SeqCst);
+            let lease = Arc::clone(&lease);
+            let clients = Arc::clone(&clients);
+            std::thread::spawn(move || {
+                serve_connection(stream, lease.as_ref());
+                clients.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    }
+
+    /// One request per line, one response per line, until the peer hangs up.
+    pub fn serve_connection(stream: UnixStream, lease: &dyn AtLease) {
+        let Ok(mut writer) = stream.try_clone() else {
+            return;
+        };
+        let reader = BufReader::new(stream);
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let response = handle_lease_request(lease, &line);
+            if writeln!(writer, "{response}").is_err() || writer.flush().is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix_lease::{bind_lease_socket, serve_connection, serve_lease};
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    struct RecordingLease {
+        answers: Mutex<Vec<String>>,
+    }
+
+    impl AtLease for RecordingLease {
+        fn execute(
+            &self,
+            _imei: Option<&str>,
+            command: &str,
+            timeout: Duration,
+            priority: ModemPriority,
+        ) -> Result<AtExchange, LeaseFailure> {
+            self.answers.lock().expect("answers").push(format!(
+                "{command}|{}|{}",
+                timeout.as_millis(),
+                priority.label()
+            ));
+            Ok(AtExchange {
+                command: command.to_string(),
+                lines: vec!["EC20CEHCLGR06A08M1G".into()],
+                terminator: "OK".into(),
+                elapsed: Duration::from_millis(7),
+            })
+        }
+
+        fn authenticate(
+            &self,
+            _imei: Option<&str>,
+            _rand16: &[u8],
+            _autn16: &[u8],
+        ) -> Result<AkaOutcome, LeaseFailure> {
+            Ok(AkaOutcome::AuthenticationFailure {
+                sw1: 0x98,
+                sw2: 0x62,
+                detail: "card rejected the challenge: incorrect MAC (SW 9862)",
+            })
+        }
+    }
+
+    fn lease() -> RecordingLease {
+        RecordingLease {
+            answers: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn execute_at_returns_the_transcript() {
+        let lease = lease();
+        let response = handle_lease_request(
+            &lease,
+            "{\"op\":\"execute_at\",\"command\":\"ATI\",\"timeout_ms\":2000}",
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).expect("json");
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(
+            value["response"],
+            serde_json::json!("EC20CEHCLGR06A08M1G\nOK")
+        );
+        assert_eq!(
+            lease.answers.lock().expect("answers").as_slice(),
+            ["ATI|2000|normal".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_lease_client_may_ask_for_aka_priority() {
+        let lease = lease();
+        handle_lease_request(
+            &lease,
+            "{\"op\":\"execute_at\",\"command\":\"AT+CSIM=10,\\\"00F2000000\\\"\",\"priority\":\"aka\"}",
+        );
+        let recorded = lease.answers.lock().expect("answers")[0].clone();
+        assert!(recorded.ends_with("|10000|aka"), "{recorded}");
+        assert!(recorded.starts_with("AT+CSIM=10,\"00F2000000\""), "{recorded}");
+    }
+
+    #[test]
+    fn authenticate_reports_a_named_rejection() {
+        let response = handle_lease_request(
+            &lease(),
+            &format!(
+                "{{\"op\":\"authenticate\",\"rand\":\"{}\",\"autn\":\"{}\"}}",
+                "11".repeat(16),
+                "22".repeat(16)
+            ),
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).expect("json");
+        assert_eq!(
+            value["outcome"],
+            serde_json::json!("authentication_failure")
+        );
+        assert_eq!(value["sw"], serde_json::json!("9862"));
+    }
+
+    #[test]
+    fn a_short_rand_is_refused_before_the_module_is_touched() {
+        let lease = lease();
+        let response = handle_lease_request(
+            &lease,
+            "{\"op\":\"authenticate\",\"rand\":\"1122\",\"autn\":\"33\"}",
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).expect("json");
+        assert_eq!(value["ok"], serde_json::json!(false));
+        assert_eq!(value["error"], serde_json::json!("bad_request"));
+        assert!(lease.answers.lock().expect("answers").is_empty());
+    }
+
+    #[test]
+    fn aka_overtakes_a_queued_normal_caller() {
+        let arbiter = Arc::new(ModemArbiter::new());
+        let (order, arrivals) = channel::<&'static str>();
+
+        let held = arbiter.acquire(ModemPriority::Normal);
+
+        let normal = {
+            let arbiter = Arc::clone(&arbiter);
+            let order = order.clone();
+            std::thread::spawn(move || {
+                let _lease = arbiter.acquire(ModemPriority::Normal);
+                order.send("normal").expect("send");
+            })
+        };
+        wait_until(&arbiter, |waiting| waiting.normal == 1);
+
+        let aka = {
+            let arbiter = Arc::clone(&arbiter);
+            std::thread::spawn(move || {
+                let _lease = arbiter.acquire(ModemPriority::Aka);
+                order.send("aka").expect("send");
+            })
+        };
+        wait_until(&arbiter, |waiting| waiting.aka == 1);
+
+        drop(held);
+        aka.join().expect("aka thread");
+        normal.join().expect("normal thread");
+
+        assert_eq!(arrivals.recv().expect("first"), "aka");
+        assert_eq!(arrivals.recv().expect("second"), "normal");
+    }
+
+    #[test]
+    fn the_arbiter_serialises_holders() {
+        let arbiter = Arc::new(ModemArbiter::new());
+        let overlaps = Arc::new(AtomicUsize::new(0));
+        let inside = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for index in 0..8 {
+            let arbiter = Arc::clone(&arbiter);
+            let overlaps = Arc::clone(&overlaps);
+            let inside = Arc::clone(&inside);
+            let priority = if index % 2 == 0 {
+                ModemPriority::Normal
+            } else {
+                ModemPriority::Aka
+            };
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let _lease = arbiter.acquire(priority);
+                    if inside.fetch_add(1, Ordering::SeqCst) != 0 {
+                        overlaps.fetch_add(1, Ordering::SeqCst);
+                    }
+                    inside.fetch_sub(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("worker");
+        }
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            arbiter.waiting(),
+            ArbiterWaiting {
+                normal: 0,
+                aka: 0,
+                held: false
+            }
+        );
+    }
+
+    fn wait_until(arbiter: &ModemArbiter, ready: impl Fn(ArbiterWaiting) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if ready(arbiter.waiting()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!(
+            "arbiter never reached the expected state: {:?}",
+            arbiter.waiting()
+        );
+    }
+}
