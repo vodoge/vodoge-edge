@@ -699,3 +699,27 @@ fn a_downloaded_profile_reports_that_it_was_not_enabled() {
     assert_eq!(details["details"]["installed"], true);
     assert_eq!(details["details"]["enabled"], false);
 }
+
+/// A menu selection has to reach the port still labelled `continue`.
+///
+/// This is the top of the chain the edge half of multi-level USSD hangs from:
+/// the console sends `stage: "continue"`, and the port uses that one word to
+/// decide whether the request may release the session it is answering. If the
+/// relay ever flattened an explicit stage back to the default the way an
+/// absent one is flattened, the module would be sent `AT+CUSD=2` and then a
+/// fresh, chargeable request for a USSD code named `2`, and nothing further
+/// down could tell that had happened.
+#[test]
+fn an_explicit_ussd_stage_reaches_the_port_unflattened() {
+    for stage in ["start", "continue", "cancel"] {
+        let (_, calls) = deliver(
+            Command::SendUssd {
+                modem_imei: IMEI.into(),
+                code: "2".into(),
+                stage: Some(stage.into()),
+            },
+            RecordingPort::default(),
+        );
+        assert_eq!(calls, vec![format!("send_ussd 2 {stage}")]);
+    }
+}

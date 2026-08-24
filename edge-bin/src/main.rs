@@ -1080,11 +1080,22 @@ mod linux {
                     Actions::ussd_cancel(self, Some(imei.to_string())).map_err(action_failed)?;
                     Ok(JsonValue::Null)
                 }
-                // A continue is the same request on an open session: the
-                // module distinguishes them by whether one is already running,
-                // not by a different command.
-                _ => {
-                    let result = Actions::ussd(self, Some(imei.to_string()), code.to_string())
+                // A continue is the same command on a session that is already
+                // open: `AT+CUSD=1,"2",15` is how a menu selection is sent,
+                // because the module tells a selection from a fresh request by
+                // whether a session is already running, not by a different
+                // command. That is exactly why the session has to survive the
+                // call, and why only this stage asks for `KeepSession` --
+                // releasing the session first would turn the operator's "2"
+                // into a brand new, chargeable request for a USSD code named
+                // `2`, and the reply to that is not menu item two.
+                stage => {
+                    let result = self
+                        .ussd_staged(
+                            Some(imei.to_string()),
+                            code.to_string(),
+                            preempt_for_stage(stage),
+                        )
                         .map_err(action_failed)?;
                     json_details(&result)
                 }
@@ -2141,6 +2152,282 @@ mod linux {
     fn hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02X}")).collect()
     }
+
+    /// Whether a USSD request may release the session that is already open.
+    ///
+    /// `AT+CUSD=2` does not cancel "our" request; it releases whatever USSD
+    /// session the module is holding. That one fact is the whole difference
+    /// between starting a menu and answering one.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum UssdPreempt {
+        /// Send `AT+CUSD=2` before the request. A first request wants a known
+        /// state, and on that path there is usually no session to release.
+        CancelFirst,
+        /// Leave any open session alone. A menu selection is an answer *on*
+        /// that session, so releasing it is the one thing it must not do.
+        KeepSession,
+    }
+
+    /// Which preemption a relayed `send_ussd` stage asks for.
+    ///
+    /// Only `continue` keeps the session. Anything else -- `start`, and any
+    /// stage a newer console might send that this build has never heard of --
+    /// opens from a known state, because that is the safe reading of a value
+    /// we cannot interpret. `cancel` never arrives here: it is a release and
+    /// nothing else, and it is routed straight to `Actions::ussd_cancel`.
+    fn preempt_for_stage(stage: &str) -> UssdPreempt {
+        match stage {
+            "continue" => UssdPreempt::KeepSession,
+            _ => UssdPreempt::CancelFirst,
+        }
+    }
+
+    /// The slice of an AT control port a USSD exchange uses.
+    ///
+    /// It exists so the exchange can be driven by a recording double. The bug
+    /// it was extracted for -- a `continue` that opened with `AT+CUSD=2` and
+    /// so hung up on the very session it was answering -- is a property of the
+    /// *sequence* of commands, and until this trait existed nothing could see
+    /// that sequence without a real `/dev/ttyUSB*` and a network that answers.
+    /// This bench has the first and has never once had the second.
+    trait UssdAtPort {
+        fn command(&mut self, command: &str) -> Result<edge_modem::AtExchange, edge_modem::AtError>;
+        fn wait_for_any_urc(
+            &mut self,
+            prefixes: &[&str],
+            timeout: Duration,
+        ) -> Result<Option<String>, edge_modem::AtError>;
+    }
+
+    impl UssdAtPort for edge_modem::AtPort {
+        fn command(&mut self, command: &str) -> Result<edge_modem::AtExchange, edge_modem::AtError> {
+            edge_modem::AtPort::command(self, command)
+        }
+
+        fn wait_for_any_urc(
+            &mut self,
+            prefixes: &[&str],
+            timeout: Duration,
+        ) -> Result<Option<String>, edge_modem::AtError> {
+            edge_modem::AtPort::wait_for_any_urc(self, prefixes, timeout)
+        }
+    }
+
+    /// One USSD request on an already-open port, and the network's answer.
+    fn run_ussd_exchange<P: UssdAtPort>(
+        port: &mut P,
+        code: &str,
+        preempt: UssdPreempt,
+    ) -> Result<UssdResult, SendError> {
+        let started = Instant::now();
+        if preempt == UssdPreempt::CancelFirst {
+            // Start from a known state. A session left open by an earlier
+            // attempt changes how the module answers the next request, and the
+            // result is a reply that parses into nothing recognisable. The
+            // cancel is best-effort *for a first request*, where there is
+            // usually no session to release -- and that qualifier is the whole
+            // point, because on a continue the opposite holds: there is always
+            // a session then, and releasing it is never harmless. Only the
+            // caller knows which of the two this is, which is why the choice
+            // arrives as an argument instead of being decided here.
+            let _ = port.command(edge_modem::ussd_cancel());
+        }
+        let exchange = port
+            .command(&edge_modem::ussd_request(code))
+            .map_err(|error| SendError::new("ussd_failed", error.to_string()))?;
+        if !exchange.succeeded() {
+            return Err(SendError::new("ussd_rejected", exchange.terminator.clone()));
+        }
+        // Some networks report inside the command response instead of
+        // afterwards, so check what already arrived before waiting for a
+        // separate report.
+        let inline = exchange
+            .lines
+            .iter()
+            .find_map(|line| edge_modem::parse_ussd_reply(line));
+        let reply = match inline {
+            Some(reply) => Some(reply),
+            None => {
+                // The module may answer with a report or reject the session
+                // outright; waiting only for the former turns a one-second
+                // refusal into a full timeout.
+                let line = port
+                    .wait_for_any_urc(&["+CUSD:", "+CME ERROR:", "+CMS ERROR:"], USSD_TIMEOUT)
+                    .map_err(|error| SendError::new("ussd_wait_failed", error.to_string()))?;
+                match line {
+                    Some(line) if line.starts_with("+CUSD:") => {
+                        let parsed = edge_modem::parse_ussd_reply(&line);
+                        // A report the parser cannot place is more useful shown
+                        // raw than summarised into a shape it does not fit.
+                        match parsed {
+                            Some(reply) => Some(reply),
+                            None => {
+                                return Err(SendError::new("ussd_unparsed", line));
+                            }
+                        }
+                    }
+                    Some(line) => {
+                        return Err(SendError::new("ussd_rejected", line));
+                    }
+                    None => None,
+                }
+            }
+        };
+        let reply = reply
+            .ok_or_else(|| SendError::new("ussd_no_reply", "network did not answer in time"))?;
+        Ok(UssdResult {
+            code: code.to_string(),
+            stage: reply.stage.as_str().to_string(),
+            expects_reply: reply.stage.expects_reply(),
+            text: reply.text,
+            dcs: reply.dcs,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    impl RadioPort {
+        /// Run one USSD request, saying whether it may release a session that
+        /// is already open.
+        ///
+        /// Separate from `Actions::ussd` on purpose. `Actions` belongs to
+        /// `edge-panel`, whose USSD form has no notion of a stage, and the two
+        /// callers really do differ: the panel always starts, while the cloud
+        /// relay carries the console's stage and sometimes continues.
+        fn ussd_staged(
+            &self,
+            imei: Option<String>,
+            code: String,
+            preempt: UssdPreempt,
+        ) -> Result<UssdResult, PanelError> {
+            self.radio
+                .with_at_port(imei.as_deref(), |port| {
+                    run_ussd_exchange(port, &code, preempt)
+                })
+                .map_err(|error| PanelError::Action(error.to_string()))
+        }
+    }
+
+    #[cfg(test)]
+    mod ussd_tests {
+        use super::*;
+        use std::collections::VecDeque;
+
+        /// The one command that releases a USSD session. Spelled out here as a
+        /// literal rather than taken from `edge_modem` so the assertions below
+        /// are checking the wire, not agreeing with the helper that writes it.
+        const RELEASE: &str = "AT+CUSD=2";
+
+        /// An AT port that answers from a script and remembers, in order,
+        /// every command it was handed.
+        struct RecordingPort {
+            issued: Vec<String>,
+            reports: VecDeque<String>,
+        }
+
+        impl RecordingPort {
+            fn answering(reports: &[&str]) -> Self {
+                Self {
+                    issued: Vec::new(),
+                    reports: reports.iter().map(|line| line.to_string()).collect(),
+                }
+            }
+        }
+
+        impl UssdAtPort for RecordingPort {
+            fn command(
+                &mut self,
+                command: &str,
+            ) -> Result<edge_modem::AtExchange, edge_modem::AtError> {
+                self.issued.push(command.to_string());
+                Ok(edge_modem::AtExchange {
+                    command: command.to_string(),
+                    lines: Vec::new(),
+                    terminator: "OK".to_string(),
+                    elapsed: Duration::from_millis(1),
+                })
+            }
+
+            fn wait_for_any_urc(
+                &mut self,
+                prefixes: &[&str],
+                _timeout: Duration,
+            ) -> Result<Option<String>, edge_modem::AtError> {
+                while let Some(line) = self.reports.pop_front() {
+                    if prefixes.iter().any(|prefix| line.starts_with(prefix)) {
+                        return Ok(Some(line));
+                    }
+                }
+                Ok(None)
+            }
+        }
+
+        #[test]
+        fn releasing_a_session_is_still_at_cusd_2() {
+            assert_eq!(edge_modem::ussd_cancel(), RELEASE);
+        }
+
+        /// A first request opens from a known state, and that is still right:
+        /// a session left behind by an abandoned attempt changes how the
+        /// module answers the next one.
+        #[test]
+        fn a_start_still_releases_whatever_was_left_open() {
+            let mut port = RecordingPort::answering(&["+CUSD: 1,\"1 Balance 2 Plan\",15"]);
+            let result = run_ussd_exchange(&mut port, "*100#", UssdPreempt::CancelFirst)
+                .expect("the module answered");
+            assert_eq!(
+                port.issued,
+                vec![RELEASE.to_string(), "AT+CUSD=1,\"*100#\",15".to_string()],
+            );
+            assert!(result.expects_reply);
+        }
+
+        /// The bug this exists for. `AT+CUSD=2` releases the session, so
+        /// sending it before a menu selection hangs up on the menu, and the
+        /// selection then leaves as a fresh request for a USSD code named `2`
+        /// -- a chargeable one, and not the item the operator picked.
+        #[test]
+        fn a_continue_does_not_release_the_session_it_is_answering() {
+            let mut port = RecordingPort::answering(&["+CUSD: 0,\"Balance 12.30\",15"]);
+            let result = run_ussd_exchange(&mut port, "2", UssdPreempt::KeepSession)
+                .expect("the module answered");
+            assert_eq!(port.issued, vec!["AT+CUSD=1,\"2\",15".to_string()]);
+            assert!(
+                !port.issued.iter().any(|command| command == RELEASE),
+                "a continue must not release the session: {:?}",
+                port.issued,
+            );
+            assert_eq!(result.text, "Balance 12.30");
+            assert!(!result.expects_reply);
+        }
+
+        /// A menu that leads to another menu is the case multi-level USSD is
+        /// named after: the second selection has to find the session still up.
+        #[test]
+        fn a_continue_onto_another_menu_still_expects_a_reply() {
+            let mut port = RecordingPort::answering(&["+CUSD: 1,\"1 Data 2 Voice\",15"]);
+            let result = run_ussd_exchange(&mut port, "2", UssdPreempt::KeepSession)
+                .expect("the module answered");
+            assert_eq!(port.issued, vec!["AT+CUSD=1,\"2\",15".to_string()]);
+            assert_eq!(result.stage, "needs_reply");
+            assert!(result.expects_reply);
+        }
+
+        /// Only `continue` keeps the session. A stage this build has never
+        /// heard of opens from a known state instead, because that is the safe
+        /// reading of a value it cannot interpret.
+        #[test]
+        fn only_continue_keeps_the_session() {
+            assert_eq!(preempt_for_stage("continue"), UssdPreempt::KeepSession);
+            for stage in ["start", "", "resume", "CONTINUE"] {
+                assert_eq!(
+                    preempt_for_stage(stage),
+                    UssdPreempt::CancelFirst,
+                    "stage {stage:?} must open from a known state",
+                );
+            }
+        }
+    }
+
     impl Actions for RadioPort {
         fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
             let mut port = RadioPort {
@@ -2187,78 +2474,10 @@ mod linux {
         }
 
         fn ussd(&self, imei: Option<String>, code: String) -> Result<UssdResult, PanelError> {
-            self.radio
-                .with_at_port(imei.as_deref(), |port| {
-                    let started = Instant::now();
-                    // Start from a known state. A session left open by an
-                    // earlier attempt changes how the module answers the next
-                    // request, and the result is a reply that parses into
-                    // nothing recognisable. The cancel is best-effort: there is
-                    // usually no session to cancel.
-                    let _ = port.command(edge_modem::ussd_cancel());
-                    let exchange = port
-                        .command(&edge_modem::ussd_request(&code))
-                        .map_err(|error| SendError::new("ussd_failed", error.to_string()))?;
-                    if !exchange.succeeded() {
-                        return Err(SendError::new("ussd_rejected", exchange.terminator.clone()));
-                    }
-                    // Some networks report inside the command response instead
-                    // of afterwards, so check what already arrived before
-                    // waiting for a separate report.
-                    let inline = exchange
-                        .lines
-                        .iter()
-                        .find_map(|line| edge_modem::parse_ussd_reply(line));
-                    let reply = match inline {
-                        Some(reply) => Some(reply),
-                        None => {
-                            // The module may answer with a report or reject the
-                            // session outright; waiting only for the former
-                            // turns a one-second refusal into a full timeout.
-                            let line = port
-                                .wait_for_any_urc(
-                                    &["+CUSD:", "+CME ERROR:", "+CMS ERROR:"],
-                                    USSD_TIMEOUT,
-                                )
-                                .map_err(|error| {
-                                    SendError::new("ussd_wait_failed", error.to_string())
-                                })?;
-                            match line {
-                                Some(line) if line.starts_with("+CUSD:") => {
-                                    let parsed = edge_modem::parse_ussd_reply(&line);
-                                    // A report the parser cannot place is more
-                                    // useful shown raw than summarised as
-                                    // "other" with mangled text.
-                                    match parsed {
-                                        Some(reply) => Some(reply),
-                                        // A report the parser cannot place is
-                                        // more useful shown raw than summarised
-                                        // into a shape it does not fit.
-                                        None => {
-                                            return Err(SendError::new("ussd_unparsed", line));
-                                        }
-                                    }
-                                }
-                                Some(line) => {
-                                    return Err(SendError::new("ussd_rejected", line));
-                                }
-                                None => None,
-                            }
-                        }
-                    };
-                    let reply = reply.ok_or_else(|| {
-                        SendError::new("ussd_no_reply", "network did not answer in time")
-                    })?;
-                    Ok(UssdResult {
-                        code: code.clone(),
-                        stage: reply.stage.as_str().to_string(),
-                        expects_reply: reply.stage.expects_reply(),
-                        text: reply.text,
-                        dcs: reply.dcs,
-                        elapsed_ms: started.elapsed().as_millis() as u64,
-                    })
-                })
-                .map_err(|error| PanelError::Action(error.to_string()))
+            // The panel's USSD form carries no stage, so every request it makes
+            // is a first one and opens from a known state. The cloud relay does
+            // carry a stage and calls `ussd_staged` directly.
+            self.ussd_staged(imei, code, UssdPreempt::CancelFirst)
         }
 
         fn ussd_cancel(&self, imei: Option<String>) -> Result<(), PanelError> {
