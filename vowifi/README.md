@@ -3,8 +3,11 @@
 IKEv2 / ESP transport and IKE_SA_INIT for the VoWiFi tunnel, injected into the
 read-only `vowifi-go` mirror rather than forked from it.
 
-This is T041a. It is the transport plus `IKE_SA_INIT`. IKE_AUTH, the EAP-AKA
-bridge, the live ePDG probe and the ESP data plane are T041b through T041e.
+This is T041a plus T041b: the transport, `IKE_SA_INIT`, and the whole `IKE_AUTH`
+loop with RFC 5998 EAP-only authentication. The real USIM bridge (T041c), the
+live ePDG contact (T041d) and the ESP data plane plus IKE fragmentation (T041e)
+are still to come; the AKA provider here is an injected test implementation and
+nothing in this module has ever touched hardware or a carrier.
 
 ## Why a separate module, and why no fork
 
@@ -30,9 +33,9 @@ The full seam inventory, with the evidence behind each claim, is in
 
 | Package | Contents |
 | --- | --- |
-| `internal/ike` | the single UDP socket, the DH groups, the proposal builder, the `IKE_SA_INIT` runner |
-| `internal/capture` | pcap recording and offline replay of raw IKE/ESP datagrams |
-| `cmd/vodoge-ike-probe` | one-shot probe against an ePDG, with capture and replay modes |
+| `internal/ike` | the single UDP socket, the DH groups, the proposal builder, the `IKE_SA_INIT` runner, the `IKE_AUTH` runner and the EAP-AKA driver |
+| `internal/capture` | pcap recording, offline replay of raw IKE/ESP datagrams, and AUTH payload extraction |
+| `cmd/vodoge-ike-probe` | one-shot probe against an ePDG, with capture, replay and AUTH export modes |
 
 ### One socket, pinned to 4500
 
@@ -136,6 +139,210 @@ socket. `RequireExactRequests` makes the replay assert the outgoing bytes agains
 the recording, which is the difference between "the replay produced something
 plausible" and "the replay reproduced the recording".
 
+### IKE_AUTH: our own loop, and why
+
+This is T041b. `ike.AuthRunner` replaces `ikev2.RunIKE_AUTH_Full` wholesale
+rather than wrapping it, for two reasons that cannot be worked around from
+outside the mirror.
+
+`RunIKE_AUTH_EAPIdentity` builds its first request with
+`BuildIKEAuthInitialPayloads` (`auth.go:182` calling `auth.go:840-888`), which
+returns `{IDi, CP, SA, TSi, TSr}`. There is no **IDr**, and
+`EAP_ONLY_AUTHENTICATION` does not appear anywhere under `engine/` - a grep of
+the whole mirror returns nothing. RFC 5998 EAP-only authentication needs both:
+without the notify, an ePDG follows plain RFC 7296 section 2.16 and expects to
+prove its identity with a certificate, which this stack cannot validate.
+
+`RunIKE_AUTH_Full` also treats EAP-Success arriving without a CHILD_SA in the
+same message as an error (`auth.go:326`). That is what a *correct* ladder looks
+like. RFC 7296 section 2.16 and RFC 5998 section 2 both put EAP-Success in its
+own exchange and `AUTH` plus `SAr2/TSi/TSr` in the next one.
+
+The payloads we send, in wire order:
+
+```
+HDR, SK { IDi, IDr, CP, SA, TSi, TSr, N(EAP_ONLY_AUTHENTICATION) }
+```
+
+RFC 7296 section 2.5 lets a notify sit anywhere, so the position is a
+compatibility choice, not a correctness one; it follows the RFC 5998 section 2
+example while keeping the mirror's CP placement. A missing IDr is an error
+(`ErrMissingResponderID`), not a quieter request - the same decision T041a made
+about `NAT_DETECTION`, for the same reason.
+
+The ladder:
+
+```
+-> IDi, IDr, CP, SA, TSi, TSr, N(EAP_ONLY_AUTHENTICATION)
+<- IDr, EAP-Request/AKA-Identity
+-> EAP-Response/AKA-Identity
+<- EAP-Request/AKA-Challenge
+-> EAP-Response/AKA-Challenge
+<- EAP-Success                       (message N,   alone)
+-> AUTH
+<- AUTH, CP, SAr2, TSi, TSr          (message N+1, never N)
+```
+
+`AuthRunner` refuses a response that puts EAP-Success and the CHILD_SA in one
+message (`ErrEAPSuccessWithChildSA`): taking a CHILD_SA from a peer whose AUTH
+we have not seen would defeat the point of verifying it.
+
+### The AUTH payload, and the byte most likely to be wrong
+
+```
+InitiatorSignedOctets = RealMessage1 | NonceRData | prf(SK_pi, RestOfInitIDPayload)
+ResponderSignedOctets = RealMessage2 | NonceIData | prf(SK_pr, RestOfRespIDPayload)
+AUTH                  = prf(prf(MSK, "Key Pad for IKEv2"), <SignedOctets>)
+```
+
+`RealMessage1/2` are the IKE_SA_INIT request and response verbatim, header
+included, which is why `AuthRunner` refuses an `InitResult` that dropped them
+instead of signing something else. `RestOf...IDPayload` is the ID payload
+*body* - one ID Type octet, three RESERVED, then the data - and never the
+generic payload header. A received IDr is MACed over the octets that arrived,
+not over a re-encoding of the parsed value.
+
+The payload on the wire is RFC 7296 section 3.8: one **Auth Method** octet,
+three RESERVED octets, then the data.
+
+**Auth Method = 2 (Shared Key Message Integrity Code).** This is reasoned, not
+measured. RFC 7296 section 2.16 says that when the EAP method produces a shared
+key, both peers compute AUTH "using the syntax for shared secrets specified in
+Section 2.15", with the MSK as the shared secret; section 2.15 defines method 2
+as exactly that syntax, and RFC 5998 section 3 inherits it. **There is no
+captured evidence from a real ePDG anywhere in this repository**, so:
+
+- it is one named constant, `ike.AuthMethodSharedKeyMIC`;
+- `AuthRunner.AuthMethod` and `AuthRunner.ExpectedPeerAuthMethod` override it;
+- a responder using a different method is a named error, `ErrPeerAuthMethod`,
+  not a silent acceptance;
+- every AUTH payload can be exported out of a pcap on its own (below), so the
+  first live contact is diagnosed from the recording rather than from a second
+  live attempt.
+
+`N(EAP_ONLY_AUTHENTICATION) = 16417` is in the same category: it is the RFC 5998
+section 5 IANA allocation, nothing here has seen it come back from a live node,
+and it is one constant so that one line changes if T041d disagrees.
+
+### The peer AUTH is actually verified
+
+`AuthRunner` recomputes `ResponderSignedOctets` from the IDr the responder sent
+and compares in constant time. Failure is `ErrPeerAuthFailed`; an absent AUTH is
+`ErrPeerAuthMissing`. A responder that produces an AUTH *before* EAP finishes
+has ignored `EAP_ONLY_AUTHENTICATION` and is presenting a certificate, so it is
+`ErrResponderIgnoredEAPOnly` rather than an unverifiable payload we quietly
+accept. Each of those has an opt-out flag, and each opt-out is off by default.
+
+The test for this is not "our verifier likes our own output": the fake ePDG
+flips one bit of an otherwise valid AUTH, and the test additionally asserts that
+the responder still accepted *ours*, so the forgery is isolated to one side.
+
+### EAP-AKA failure paths
+
+`eapaka.BuildChallengeResponseFromProvider` (`crypto.go:204`) already converts
+`sim.ErrSyncFailure` into an `AT_AUTS` EAP-Response/AKA-Synchronization-Failure
+and `sim.ErrAuthFailure` into an EAP-Response/AKA-Authentication-Reject, both
+already MAC-correct. All this package has to do is classify the card error
+correctly and put the packet on the wire instead of aborting.
+
+Both are exercised end to end, and the assertion is on the responder's side: the
+fake ePDG decrypts the packet and reads the AUTS out of it, then resynchronises
+and challenges again. A synchronisation failure is retried
+(`MaxResyncAttempts`, default 1) because that is what resynchronisation is for;
+an Authentication-Reject stops with `ErrAKAAuthFailure`, because we have just
+decided this is not our network.
+
+### The AKA deadline seam, which exists before the card does
+
+`sim.AKAProvider` is one method with no context:
+
+```go
+CalculateAKA(rand16, autn16 []byte) (sim.AKAResult, error)   // engine/sim/sim.go:116-118
+```
+
+There is no deadline and no cancellation. T041b injects a test provider, but
+T041c will inject a bridge to the real card, and behind that bridge the Rust
+arbiter is bounded at **300 seconds or not at all** until T058 lands. An ePDG
+has abandoned the IKE_AUTH exchange long before then, so waiting cannot succeed;
+it can only hide the fault. Leaving the seam to T041c would mean discovering
+then that there is nowhere to put it.
+
+`ike.WithAKADeadline(ctx, provider, timeout)` is that place.
+`AuthRunner.AKATimeout` applies it automatically (`DefaultAKATimeout`, 20s;
+negative disables it). The honest limitation, stated rather than hidden: **the
+abandoned call keeps running.** Its goroutine cannot be cancelled because the
+interface offers no way to ask. It writes to a buffered channel and exits on its
+own, and it works on private copies of RAND/AUTN so it cannot scribble on a
+buffer the caller moved past - but it still occupies the card. A real bridge
+needs its own serialisation on top, and that is T041c's problem; this wrapper
+only guarantees that the IKE side stops waiting.
+
+A timeout must not be mistaken for a card refusal:
+`ErrAKADeadlineExceeded` is neither `sim.ErrSyncFailure` nor
+`sim.ErrAuthFailure`, so eapaka does not manufacture an AT_AUTS out of a stall.
+There is a test for exactly that.
+
+### The fake ePDG is encrypted now
+
+T041a's IKE_AUTH fixture travelled in clear and could only pin message
+sequencing. That is not enough for T041b: the AUTH payload is keyed by material
+that exists only if both sides ran the same key derivation, so a plaintext
+fixture cannot check it at all.
+
+The fixture now derives the IKE SA keys the responder way, decrypts every
+request with the mirror's own `UnprotectMessage` (`sk.go:126`) and encrypts every
+response with `ProtectMessage` (`sk.go:16`). A request that was not really
+protected fails at "expected single SK payload".
+
+Two things are deliberately *not* shared between the two sides:
+
+- The RFC 7296 section 2.15 composition. The fixture writes it out itself
+  instead of calling `ike.SharedKeyAuth`. There is only one HMAC in the standard
+  library so the primitive is necessarily common, but the part that is actually
+  error-prone - the order of the three concatenated pieces, the key-pad step,
+  whether the ID payload header is included - is written twice and only agrees
+  if it is right. `auth_payloads_test.go` goes further and re-derives HMAC from
+  RFC 2104 using only `crypto/sha256`, which is this card's version of T041a
+  cross-checking `crypto/ecdh` against `crypto/elliptic`.
+- The EAP identity. The responder derives keys from the `AT_IDENTITY` string it
+  received, not from a configured constant, so the two only agree if the
+  identity really made it across.
+
+What *is* shared is the stand-in USIM secret, which is exactly what a real K is:
+one value held by both the card and the operator's AuC. `usimDerive` is an
+openly labelled deterministic function and **not Milenage**. Inventing a
+Milenage vector from memory is the anti-pattern this project keeps paying for,
+so nothing here claims to be one.
+
+### Exporting AUTH payloads out of a recording
+
+Both AUTH payloads live inside SK, so a pcap opened without keys shows nothing.
+The keys come back from replaying IKE_SA_INIT out of the same recording, so a
+pcap plus its sidecar is enough - no live carrier, no hardware:
+
+```sh
+./vodoge-ike-probe -replay /tmp/ike-auth.pcap -export-auth /tmp/auth
+```
+
+```
+  IKE_AUTH     4 exchange(s) reproduced byte for byte
+  IDr sent     true; EAP_ONLY_AUTHENTICATION sent true
+  EAP-Success  message 3; CHILD_SA message 4
+  peer AUTH    verified=true method=2
+  AUTH tx msg 4  method=2 reserved=000000 data=32 octets encrypted=true
+```
+
+The written `.auth.bin` files contain the **whole body, header included**.
+Stripping the four-octet header would hide the byte most likely to be wrong.
+
+Replaying IKE_AUTH needs more seed than IKE_SA_INIT did. On top of the SPI,
+nonce and DH scalar, the ladder consumes a fresh child SPI, one CBC IV per
+protected message, and the card's answers - and every one of those changes the
+ciphertext. `capture.AuthSeed` carries all of them plus both identities, so the
+recording is self-describing. Without it a "replay" would merely be a re-run
+that happened to reach the same conclusion, which is the weaker claim this
+repository has been burnt by before.
+
 ## Building and running
 
 The edge VM has no Go toolchain. Cross-compile on a workstation and copy, the
@@ -161,8 +368,10 @@ says so instead of dialling a bogus address. Pass an address resolved out of ban
 (T038 used DoH) when that happens.
 
 `IKE_SA_INIT` carries no identity, so a successful probe proves reachability and
-algorithm selection and nothing more. Whether the carrier accepts this SIM is an
-IKE_AUTH question and belongs to T041b/d, under goal oracle criterion 2b.
+algorithm selection and nothing more. The probe deliberately does not run a live
+`IKE_AUTH`: that needs a real USIM, which is T041c, and a real ePDG, which is
+T041d. It does replay a recorded `IKE_AUTH` ladder, and it can export the AUTH
+payloads out of one.
 
 ## Tests
 
@@ -171,11 +380,24 @@ cd vowifi && GOWORK=off go test ./...
 ```
 
 Everything runs on loopback against a fake ePDG; no hardware, no US line, no
-carrier. `TestFakeEPDGSeparatesEAPSuccessFromChildSA` is the first fixture in
-this repository that refuses the "EAP-Success and the CHILD_SA arrive in one
-message" assumption - it drives an IKE_AUTH ladder over the real socket and fails
-if the two ever share a message id. Its payloads are unencrypted because SK
-handling is T041b; what it pins is the sequencing.
+carrier. Nothing in this module has ever spoken to a real operator, so no test
+here is evidence for goal oracle criterion 2b.
+
+`TestFakeEPDGSeparatesEAPSuccessFromChildSA` (T041a) refuses the "EAP-Success and
+the CHILD_SA arrive in one message" assumption by driving a plaintext ladder over
+the real socket. `TestAuthRunnerWalksTheWholeLadder` and
+`TestAuthRunnerRejectsEAPSuccessSharingTheChildSA` (T041b) do the stronger
+version: the fixture is encrypted, and the second one makes the fake do the wrong
+thing on purpose so the refusal is the runner's, not the fixture's.
+
+`-race` is not available in this environment: the Windows Go toolchain has no C
+compiler, and the WSL Go is 1.24 against a go1.26.3 module. Following T041a, the
+substitute is `GOWORK=off go test ./... -count=5`, reported as what it is - a
+repeat run, not a race detector.
 
 `scripts/verify-vendor-mirror.sh` proves the mirror is untouched, and CI runs it
-with `VODOGE_VERIFY_STRICT_EOL=1`.
+with `VODOGE_VERIFY_STRICT_EOL=1`. On a Windows workstation the strict mode
+always reports drift, because `core.autocrlf=true` leaves the mirror CRLF on
+disk; the check separates that into `EOL-ONLY` and says so. To reproduce the CI
+result, materialise the mirror the way `.github/workflows/ci.yml` does, with
+`git -c core.autocrlf=false ... checkout-index -a -f` into a clean tree.
