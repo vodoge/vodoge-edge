@@ -72,6 +72,13 @@ const (
 	// OutcomeChallengeAnswered means the card computed a RES for the carrier's
 	// RAND/AUTN, but the ladder did not finish afterwards.
 	OutcomeChallengeAnswered LiveOutcome = "challenge-answered"
+	// OutcomeAddressRejected is the class T072 discovered and had no name for:
+	// authentication completed, EAP-Success came back, and then the ePDG
+	// refused the CFG_REQUEST with INTERNAL_ADDRESS_FAILURE. It is a strictly
+	// later failure than OutcomeChallengeAnswered and it points at a different
+	// file, so it gets its own label rather than being folded into "the ladder
+	// did not finish".
+	OutcomeAddressRejected LiveOutcome = "internal-address-rejected"
 	// OutcomeEstablished means the CHILD_SA came up.
 	OutcomeEstablished LiveOutcome = "tunnel-established"
 	// OutcomeLocalFault means we broke before the network could answer.
@@ -105,6 +112,18 @@ type LiveConfig struct {
 	// DNS returned for the card-derived FQDN qualifies; a name somebody typed
 	// does not.
 	ResponderID ikev2.Identity
+	// ConfigVariant selects the CFG_REQUEST shape and the traffic selectors
+	// that belong with it. Empty means DefaultConfigVariant.
+	//
+	// This is the axis T081 exists to search. T072's run sent
+	// ConfigVariantMirror and was answered INTERNAL_ADDRESS_FAILURE; every
+	// other value here is an attempt to find out which part of that request the
+	// ePDG objected to, and each attempt costs one SQN step on the bench card.
+	ConfigVariant ConfigVariant
+	// ConfigType overrides the CP payload type. Zero means CFG_REQUEST, which
+	// is what a UE sends; CFG_SET is reachable only so that axis can be
+	// measured and written down.
+	ConfigType uint8
 	// DisableEAPOnly drops N(EAP_ONLY_AUTHENTICATION). RFC 5998 says a
 	// responder that does not support it should ignore it, but "should" is not
 	// "does" and this is one of the three decisions T041b made on paper. Still
@@ -140,9 +159,28 @@ type LiveResult struct {
 	Auth          ikev2.FullAuthResult
 	AuthDetail    AuthDetail
 
+	// ConfigVariantUsed is the CFG_REQUEST shape that was actually sent. It is
+	// on the result rather than only on the config because a receipt has to
+	// name the variant next to the outcome it produced.
+	ConfigVariantUsed ConfigVariant
+
 	Keepalives uint64
 	Outcome    LiveOutcome
 	Err        error
+}
+
+// Config is the CFG_REPLY the ePDG sent, decoded.
+func (r LiveResult) Config() ConfigReply { return r.AuthDetail.PeerConfiguration }
+
+// TunnelIsUp reports criterion 4's first half: a CHILD_SA exists and the ePDG
+// gave us an address to source packets from.
+//
+// A CHILD_SA on its own is not enough. Without an internal address there is
+// nothing to put in the source field of the first IMS packet, so reporting a
+// tunnel at that point would be the "implemented" versus "works on the bench"
+// mistake this goal's charter opens with.
+func (r LiveResult) TunnelIsUp() bool {
+	return r.Auth.ChildSA != nil && r.AuthDetail.PeerConfiguration.HaveInternalAddress()
 }
 
 // Challenges returns the RAND/AUTN/RES the card was actually asked about.
@@ -174,10 +212,22 @@ func (r LiveResult) CardAnsweredChallenge() bool {
 // because on this card a failure is the deliverable just as much as a success
 // is, and a caller that only got an error would have nothing to write down.
 func RunLiveTunnel(ctx context.Context, cfg LiveConfig) (LiveResult, error) {
+	variant := cfg.ConfigVariant
+	if variant == "" {
+		variant = DefaultConfigVariant
+	}
 	out := LiveResult{
-		FQDN:    cfg.Subscription.EPDGFQDN(),
-		IMPI:    cfg.Subscription.IMPI(),
-		Outcome: OutcomeLocalFault,
+		FQDN:              cfg.Subscription.EPDGFQDN(),
+		IMPI:              cfg.Subscription.IMPI(),
+		ConfigVariantUsed: variant,
+		Outcome:           OutcomeLocalFault,
+	}
+	// Refused here rather than three payloads later, so a typo costs nothing.
+	// Past this point the next thing that happens is an SQN step on a card the
+	// user cannot physically reach.
+	if _, err := variant.ConfigurationOfType(cfg.ConfigType); err != nil {
+		out.Err = err
+		return out, err
 	}
 	if cfg.Socket == nil {
 		out.Err = fmt.Errorf("%w: no socket", ErrInvalidAuthConfig)
@@ -227,6 +277,8 @@ func RunLiveTunnel(ctx context.Context, cfg LiveConfig) (LiveResult, error) {
 	authRunner := NewAuthRunner(cfg.ResponderID)
 	authRunner.InitiatorID = cfg.Subscription.InitiatorIdentity()
 	authRunner.DisableEAPOnlyAuthentication = cfg.DisableEAPOnly
+	authRunner.ConfigVariant = variant
+	authRunner.ConfigType = cfg.ConfigType
 	authRunner.Capture = cfg.Capture
 	out.ResponderIDUsed = string(cfg.ResponderID.Data)
 	if cfg.ResponderID.Type == 0 || len(cfg.ResponderID.Data) == 0 {
@@ -261,6 +313,9 @@ func RunLiveTunnel(ctx context.Context, cfg LiveConfig) (LiveResult, error) {
 	out.Outcome = OutcomeChallengeAnswered
 	if authResult.ChildSA != nil {
 		out.Outcome = OutcomeEstablished
+		for _, line := range out.AuthDetail.PeerConfiguration.Describe() {
+			logf("CFG_REPLY   %s", line)
+		}
 	}
 	return out, nil
 }
@@ -331,6 +386,15 @@ func classifyInitFailure(err error) LiveOutcome {
 // error changes the fact that it did, and reporting the transport error instead
 // would bury the finding this whole card exists to produce.
 func classifyAuthFailure(out LiveResult, err error) LiveOutcome {
+	// Checked ahead of the card, and that ordering is the whole point of the
+	// label. INTERNAL_ADDRESS_FAILURE can only arrive after the card answered
+	// and the carrier accepted the answer, so it is strictly more progress than
+	// OutcomeChallengeAnswered - and it names a different file to go and fix.
+	// Reporting "challenge answered" for it, which is what this function did
+	// before T081, hid the only failure class that is nobody's fault but ours.
+	if errors.Is(err, ErrInternalAddressFailure) {
+		return OutcomeAddressRejected
+	}
 	if out.CardAnsweredChallenge() {
 		return OutcomeChallengeAnswered
 	}
@@ -369,6 +433,13 @@ func (o LiveOutcome) Explain() string {
 		return "the carrier issued an EAP-AKA Challenge and the card computed a RES for it. " +
 			"Both halves of criterion 2b's evidence exist; whether the ladder then completed " +
 			"is a separate question."
+	case OutcomeAddressRejected:
+		return "authentication finished and the ePDG then refused to assign an internal address " +
+			"(notify 36). Nothing here is a carrier verdict on the card: EAP-Success arrived one " +
+			"message earlier, so the identity, the RES and the AUTH payload have all been " +
+			"accepted. T081 measured three requests refused this way - mirror, dual and ipv6 - " +
+			"so a fourth -cfg variant is a guess, not a diagnosis. See " +
+			"notes/T081-cfg-request.md for what is still untried."
 	case OutcomeEstablished:
 		return "the ladder completed and a CHILD_SA came up."
 	default:

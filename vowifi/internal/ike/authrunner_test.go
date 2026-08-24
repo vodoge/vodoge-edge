@@ -654,6 +654,113 @@ func TestAuthLadderRecordsAndReplaysByteForByte(t *testing.T) {
 	exportCapture(t, path)
 }
 
+// TestTheCFGVariantSurvivesIntoTheSidecarAndBackOut is what keeps every older
+// recording replayable while T081 keeps moving the default.
+//
+// The CFG_REQUEST is inside the first protected message, so changing it changes
+// that message's ciphertext. Without the variant in the sidecar, the day
+// DefaultConfigVariant moves is the day /root/t072/epdg-challenge.pcap - the
+// only recording of a real carrier accepting this card - stops reproducing its
+// own bytes, and nothing would say why.
+//
+// The second half is the part that makes this a test rather than a
+// demonstration: a replay that ignores the recorded variant and uses the
+// default must fail the byte comparison. If it passed, the field would be
+// decoration.
+func TestTheCFGVariantSurvivesIntoTheSidecarAndBackOut(t *testing.T) {
+	const recorded = ConfigVariantIPv6
+	if recorded == DefaultConfigVariant {
+		t.Fatalf("this test needs a variant that is not the default, or it proves nothing")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ike-auth-ipv6.pcap")
+	writer, err := capture.NewWriter(capture.WriterOptions{
+		Path:          path,
+		RecordSecrets: true,
+		Note:          "T081 loopback fake ePDG, CFG_REQUEST variant " + string(recorded),
+	})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	l := startLadder(t, nil, func(r *AuthRunner) { r.ConfigVariant = recorded }, writer)
+	if _, err := l.run(t); err != nil {
+		t.Fatalf("live IKE_AUTH: %v", err)
+	}
+	liveDetail, _ := l.runner.LastDetail()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer Close: %v", err)
+	}
+	if liveDetail.ConfigVariant != recorded {
+		t.Fatalf("the runner recorded variant %q", liveDetail.ConfigVariant)
+	}
+	if !configurationHasAttribute(liveDetail.SentConfiguration, ConfigPCSCFIPv6Address) {
+		t.Fatalf("SentConfiguration does not describe what went out: %s",
+			DescribeConfiguration(liveDetail.SentConfiguration))
+	}
+
+	recording, err := capture.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	seed := recording.Session.AuthSeed
+	if seed == nil || seed.ConfigVariant != string(recorded) {
+		t.Fatalf("the sidecar does not carry the variant: %+v", seed)
+	}
+
+	replayFrom := func(variant ConfigVariant) ([]byte, error) {
+		transport, initSeed, err := capture.OpenReplay(path, capture.ReplayOptions{
+			UseNonESPMarker:      true,
+			RequireExactRequests: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		offlineInit := NewInitRunner()
+		offlineInit.Seed = initSeed
+		replayedInit, err := offlineInit.Run(context.Background(), ikev2.InitConfig{
+			Transport:  transport,
+			LocalIP:    l.socket.LocalIP(),
+			LocalPort:  l.socket.LocalPort(),
+			RemoteIP:   l.fake.Addr().IP,
+			RemotePort: uint16(l.fake.Addr().Port),
+		})
+		if err != nil {
+			return nil, err
+		}
+		offlineAuth := NewAuthRunner(ikev2.Identity{Type: seed.ResponderIDType, Data: seed.ResponderID})
+		offlineAuth.ChildSPI = seed.ChildSPI
+		offlineAuth.PinnedIVs = seed.IVs
+		offlineAuth.ConfigVariant = variant
+		_, err = offlineAuth.Run(context.Background(), ikev2.FullAuthConfig{
+			Transport:   transport,
+			Init:        replayedInit,
+			Keys:        replayedInit.Keys,
+			SIM:         NewRecordedAKAProvider(seed.AKA),
+			InitiatorID: ikev2.Identity{Type: seed.InitiatorIDType, Data: seed.InitiatorID},
+			EAPIdentity: seed.EAPIdentity,
+		})
+		detail, _ := offlineAuth.LastDetail()
+		if len(detail.Rounds) == 0 {
+			return nil, err
+		}
+		return detail.Rounds[0].RequestBytes, err
+	}
+
+	fromSeed, err := replayFrom(ConfigVariant(seed.ConfigVariant))
+	if err != nil {
+		t.Fatalf("replaying with the recorded variant: %v", err)
+	}
+	if !bytes.Equal(fromSeed, liveDetail.Rounds[0].RequestBytes) {
+		t.Fatalf("the recorded variant did not reproduce the first request")
+	}
+
+	fromDefault, err := replayFrom(DefaultConfigVariant)
+	if err == nil && bytes.Equal(fromDefault, liveDetail.Rounds[0].RequestBytes) {
+		t.Fatalf("replaying with the wrong variant still matched, so the sidecar field guards nothing")
+	}
+}
+
 // assertAuthPayloadsAreExportable is the "pull the AUTH payload out on its own"
 // requirement. When the first live contact fails, this is the tool that answers
 // "what exactly did we put in AUTH" without a Wireshark session that has keys.

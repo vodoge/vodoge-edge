@@ -637,6 +637,22 @@ type epdgAuth struct {
 	omitOwnAuth              bool
 	certAuthInFirstResponse  bool
 	eapSuccessCarriesChildSA bool
+	// addressFailure answers the final exchange with notify 36 instead of a
+	// CHILD_SA, unconditionally. This is the T072 rejection, reproduced.
+	addressFailure bool
+	// requirePCSCF answers notify 36 unless the CFG_REQUEST asked for a P-CSCF
+	// address. It models the hypothesis T046 named, so that "adding the P-CSCF
+	// attribute is what fixes it" is a statement some responder actually
+	// enforces rather than a comment in our own encoder.
+	requirePCSCF bool
+	// requireSingleFamily answers notify 36 when the CFG_REQUEST asks for both
+	// an IPv4 and an IPv6 internal address. It models the other candidate cause
+	// of notify 36, so the two can be told apart offline.
+	requireSingleFamily bool
+	// pcscfIPv4 and pcscfIPv6 are what the CFG_REPLY hands back when the
+	// request asked for them.
+	pcscfIPv4 net.IP
+	pcscfIPv6 net.IP
 
 	// --- observed ---
 	initialPayloadTypes []uint8
@@ -647,6 +663,9 @@ type epdgAuth struct {
 	sawTSi              bool
 	sawTSr              bool
 	sawCP               bool
+	observedConfig      ikev2.Configuration
+	observedTSi         ikev2.TrafficSelectors
+	refusalReason       string
 	eapIdentity         string
 	eapResponses        []uint8
 	challenges          int
@@ -674,6 +693,8 @@ func newEPDGAuth() *epdgAuth {
 		espSPI:         []byte{0xde, 0xad, 0xbe, 0xef},
 		maxChallenges:  3,
 		identifier:     40,
+		pcscfIPv4:      net.IPv4(10, 64, 0, 33).To4(),
+		pcscfIPv6:      net.ParseIP("2607:fc20:1:100::33"),
 	}
 }
 
@@ -728,10 +749,23 @@ func (f *fakeEPDG) handleEncryptedAuth(msg ikev2.Message, raw []byte) ([]byte, e
 			a.sawChildSAOffer = true
 		case ikev2.PayloadTSi:
 			a.sawTSi = true
+			selectors, err := ikev2.ParseTrafficSelectors(p.Body)
+			if err != nil {
+				return nil, fmt.Errorf("decoding TSi: %w", err)
+			}
+			a.observedTSi = selectors
 		case ikev2.PayloadTSr:
 			a.sawTSr = true
 		case ikev2.PayloadCP:
 			a.sawCP = true
+			// Decoded rather than remembered as bytes: the responder's whole
+			// job in this file is to judge the request, and it cannot judge
+			// what it has not parsed.
+			config, err := ikev2.ParseConfiguration(p.Body)
+			if err != nil {
+				return nil, fmt.Errorf("decoding CP: %w", err)
+			}
+			a.observedConfig = config
 		case ikev2.PayloadNotify:
 			notify, err := ikev2.ParseNotify(p.Body)
 			if err != nil {
@@ -934,6 +968,24 @@ func (f *fakeEPDG) epdgFinalRound(msg ikev2.Message, a *epdgAuth, authBody []byt
 	}
 	a.clientAuthVerified = true
 
+	// The address decision happens here and not earlier, which is exactly where
+	// T-Mobile made it: the initiator's AUTH is verified first, and only then
+	// does the responder try to satisfy the CFG_REQUEST. That ordering is why
+	// notify 36 is not an authentication verdict.
+	if reason := a.addressFailureReason(); reason != "" {
+		// The reason is kept here and not put on the wire. T-Mobile's notify 36
+		// carried zero octets of notification data, so a fixture that shipped
+		// an explanation would be teaching our parser about a field real ePDGs
+		// leave empty.
+		a.refusalReason = reason
+		notify, err := ikev2.NotifyPayload(ikev2.Notify{NotifyType: ikev2.NotifyInternalAddressFailure})
+		if err != nil {
+			return nil, err
+		}
+		f.logStage(msg.Header.MessageID, authStage{})
+		return f.protectLocked(msg, []ikev2.Payload{notify})
+	}
+
 	payloads := []ikev2.Payload{}
 	if !a.omitOwnAuth {
 		macedIDr := epdgHMAC(prf, f.ikeKeys.SKPr, a.sentIDrBody)
@@ -957,30 +1009,98 @@ func (f *fakeEPDG) epdgFinalRound(msg ikev2.Message, a *epdgAuth, authBody []byt
 	return f.protectLocked(msg, payloads)
 }
 
+// addressFailureReason decides whether this responder can satisfy the
+// CFG_REQUEST it received, and says why not.
+//
+// The two conditional refusals are the two competing explanations for what
+// T-Mobile did on 2026-08-24. Modelling both means the offline tests can tell
+// them apart before a live run spends an SQN step finding out.
+func (a *epdgAuth) addressFailureReason() string {
+	if a.addressFailure {
+		return "this responder refuses every CFG_REQUEST"
+	}
+	if a.requirePCSCF && !configAsksFor(a.observedConfig, ConfigPCSCFIPv4Address, ConfigPCSCFIPv6Address) {
+		return "the CFG_REQUEST carries no P_CSCF_IP4_ADDRESS or P_CSCF_IP6_ADDRESS"
+	}
+	if a.requireSingleFamily &&
+		configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv4Address) &&
+		configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv6Address) {
+		return "the CFG_REQUEST asks for both an IPv4 and an IPv6 internal address"
+	}
+	return ""
+}
+
+func configAsksFor(cfg ikev2.Configuration, wanted ...uint16) bool {
+	for _, attr := range cfg.Attributes {
+		for _, w := range wanted {
+			if attr.Type == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// childPayloads builds the CFG_REPLY, SA and traffic selectors of a successful
+// final response.
+//
+// The reply answers what was asked for rather than returning a fixed list. A
+// fixture that always handed back an IPv4 address would let an IPv6-only
+// request "succeed" with an address of the wrong family, which is the shape of
+// bug this card is trying to find, not one it should be able to hide.
 func (a *epdgAuth) childPayloads() ([]ikev2.Payload, error) {
 	sa, err := ikev2.SecurityAssociationPayload(ikev2.DefaultESPProposal(a.espSPI))
 	if err != nil {
 		return nil, err
 	}
-	tsi, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSi, ikev2.IPv4AnyTrafficSelectors())
+	selectors := ikev2.IPv4AnyTrafficSelectors()
+	if len(a.observedTSi.Selectors) > 0 && a.observedTSi.Selectors[0].Type == ikev2.TSIPv6AddressRange {
+		selectors = IPv6AnyTrafficSelectors()
+	}
+	tsi, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSi, selectors)
 	if err != nil {
 		return nil, err
 	}
-	tsr, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSr, ikev2.IPv4AnyTrafficSelectors())
+	tsr, err := ikev2.TrafficSelectorsPayload(ikev2.PayloadTSr, selectors)
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := ikev2.ConfigurationPayload(ikev2.Configuration{
-		Type: ikev2.CFGReply,
-		Attributes: []ikev2.ConfigurationAttribute{
-			{Type: ikev2.ConfigInternalIPv4Address, Value: []byte{10, 64, 0, 7}},
-			{Type: ikev2.ConfigInternalIPv4DNS, Value: []byte{10, 64, 0, 1}},
-		},
-	})
+	cfg, err := ikev2.ConfigurationPayload(a.configReply())
 	if err != nil {
 		return nil, err
 	}
 	return []ikev2.Payload{cfg, sa, tsi, tsr}, nil
+}
+
+func (a *epdgAuth) configReply() ikev2.Configuration {
+	out := ikev2.Configuration{Type: ikev2.CFGReply}
+	if configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv4Address) || !a.sawCP {
+		out.Attributes = append(out.Attributes,
+			ikev2.ConfigurationAttribute{Type: ikev2.ConfigInternalIPv4Address, Value: []byte{10, 64, 0, 7}},
+			ikev2.ConfigurationAttribute{Type: ikev2.ConfigInternalIPv4DNS, Value: []byte{10, 64, 0, 1}},
+		)
+	}
+	if configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv6Address) {
+		value := append(append([]byte(nil), net.ParseIP("2607:fc20:1:100::7").To16()...), 64)
+		out.Attributes = append(out.Attributes,
+			ikev2.ConfigurationAttribute{Type: ikev2.ConfigInternalIPv6Address, Value: value},
+			ikev2.ConfigurationAttribute{
+				Type:  ikev2.ConfigInternalIPv6DNS,
+				Value: append([]byte(nil), net.ParseIP("2607:fc20:1:100::1").To16()...),
+			},
+		)
+	}
+	if configAsksFor(a.observedConfig, ConfigPCSCFIPv4Address) {
+		out.Attributes = append(out.Attributes, ikev2.ConfigurationAttribute{
+			Type: ConfigPCSCFIPv4Address, Value: append([]byte(nil), a.pcscfIPv4.To4()...),
+		})
+	}
+	if configAsksFor(a.observedConfig, ConfigPCSCFIPv6Address) {
+		out.Attributes = append(out.Attributes, ikev2.ConfigurationAttribute{
+			Type: ConfigPCSCFIPv6Address, Value: append([]byte(nil), a.pcscfIPv6.To16()...),
+		})
+	}
+	return out
 }
 
 // buildChallenge issues an EAP-Request/AKA-Challenge with a real AT_MAC.

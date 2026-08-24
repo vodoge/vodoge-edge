@@ -43,6 +43,15 @@ var (
 	ErrEAPSuccessWithChildSA = errors.New("vowifi/ike: EAP-Success arrived together with the CHILD_SA")
 	// ErrEAPRoundsExhausted bounds a server that keeps asking.
 	ErrEAPRoundsExhausted = errors.New("vowifi/ike: too many EAP rounds")
+	// ErrInternalAddressFailure is notify 36 given a name of its own.
+	//
+	// It is not a synonym for "IKE_AUTH failed". By the time an ePDG sends it,
+	// authentication has already succeeded - T072 had EAP-Success in hand one
+	// message earlier - and what has been refused is the CFG_REQUEST. Reading
+	// it as an authentication problem is exactly the misdiagnosis this project
+	// already paid for once with the IDr, so the error carries the request that
+	// was refused in its own text.
+	ErrInternalAddressFailure = errors.New("vowifi/ike: the responder refused to assign an internal address")
 )
 
 // DefaultMaxEAPRounds bounds the EAP conversation. RFC 4187 full authentication
@@ -114,8 +123,24 @@ type AuthRunner struct {
 	// TSi and TSr override the traffic selectors. Empty means IPv4 any.
 	TSi ikev2.TrafficSelectors
 	TSr ikev2.TrafficSelectors
-	// Configuration overrides the CFG_REQUEST.
+	// Configuration overrides the CFG_REQUEST outright. Setting it wins over
+	// ConfigVariant, and it is not recorded in the capture sidecar, because a
+	// hand-built payload has no name a replay could reconstruct it from. Use
+	// ConfigVariant for anything that has to survive into a recording.
 	Configuration ikev2.Configuration
+	// ConfigVariant selects a named CFG_REQUEST shape and the traffic
+	// selectors that go with it. Empty means whatever
+	// BuildAuthInitialPayloads defaults to.
+	//
+	// The name, not the bytes, is what ends up in the sidecar. That is
+	// deliberate: a recording then says "this run asked for dual" rather than
+	// making the next reader decode a payload to find out, and a replay
+	// reproduces the request from the name even after the default moves.
+	ConfigVariant ConfigVariant
+	// ConfigType overrides the CP payload type of the ConfigVariant request.
+	// Zero means CFG_REQUEST, which is what a UE sends. See
+	// ConfigVariant.ConfigurationOfType for why the other value is reachable.
+	ConfigType uint8
 	// ExtraInitialPayloads are appended to the first request.
 	ExtraInitialPayloads []ikev2.Payload
 	// MaxEAPRounds bounds the EAP conversation. Zero means
@@ -188,9 +213,23 @@ type AuthDetail struct {
 	// InitialPayloadTypes is the payload type list of the first request, in
 	// wire order.
 	InitialPayloadTypes []uint8
-	// SentIDr and SentEAPOnlyNotify are the two additions over the mirror.
+	// SentIDr and SentEAPOnlyNotify are two of the additions over the mirror.
 	SentIDr           bool
 	SentEAPOnlyNotify bool
+	// ConfigVariant is the named CFG_REQUEST shape, when one was used.
+	ConfigVariant ConfigVariant
+	// SentConfiguration is the CFG_REQUEST as it went out. Notify 36 is a
+	// verdict on precisely this payload, so a run that recorded the notify and
+	// not the request would have recorded half of the finding.
+	SentConfiguration ikev2.Configuration
+	// PeerConfiguration is the CFG_REPLY the responder sent, decoded. This is
+	// where the internal address and the P-CSCF addresses arrive, i.e. the
+	// deliverable of criterion 4's first half.
+	PeerConfiguration ConfigReply
+	// PeerConfigurationError is set when a CP payload arrived and would not
+	// decode. A reply we cannot read is a finding, not a reason to fail the
+	// ladder: the CHILD_SA may still be perfectly good.
+	PeerConfigurationError string
 	// PeerSentIDr reports that the responder identified itself.
 	PeerSentIDr bool
 	// PeerIDBody is the IDr payload body as received, which is what the AUTH
@@ -418,21 +457,38 @@ func trimSpace(value string) string {
 }
 
 func (s *authSession) run(ctx context.Context) (ikev2.FullAuthResult, error) {
+	configuration, err := s.offeredConfiguration()
+	if err != nil {
+		return s.result, err
+	}
+	tsi, err := s.offeredTSi()
+	if err != nil {
+		return s.result, err
+	}
+	tsr, err := s.offeredTSr()
+	if err != nil {
+		return s.result, err
+	}
 	initial, err := BuildAuthInitialPayloads(AuthInitialPayloads{
 		InitiatorID:             s.initiatorID,
 		ResponderID:             s.runner.ResponderID,
 		AllowMissingResponderID: s.runner.AllowMissingResponderID,
 		ChildSA:                 s.offeredChildSA(),
 		ChildSPI:                s.childSPI,
-		TSi:                     s.offeredTSi(),
-		TSr:                     s.offeredTSr(),
-		Configuration:           s.offeredConfiguration(),
+		TSi:                     tsi,
+		TSr:                     tsr,
+		Configuration:           configuration,
 		EAPOnlyAuthentication:   !s.runner.DisableEAPOnlyAuthentication,
 		Extra:                   s.runner.ExtraInitialPayloads,
 	})
 	if err != nil {
 		return s.result, err
 	}
+	// The request that was actually built, not the one that was configured.
+	// When nothing overrode it, BuildAuthInitialPayloads filled in the default,
+	// and it is the default that the ePDG will judge.
+	s.detail.ConfigVariant = s.runner.ConfigVariant
+	s.detail.SentConfiguration = configFromPayloads(initial, configuration)
 	s.detail.InitialPayloadTypes = payloadTypes(initial)
 	s.detail.SentIDr = containsPayload(initial, ikev2.PayloadIDr)
 	s.detail.SentEAPOnlyNotify = containsNotify(initial, NotifyEAPOnlyAuthentication)
@@ -465,6 +521,7 @@ func (s *authSession) run(ctx context.Context) (ikev2.FullAuthResult, error) {
 		if err != nil {
 			return s.result, err
 		}
+		s.absorbConfigReply(parts)
 		if len(parts.idrBody) > 0 {
 			s.peerIDBody = parts.idrBody
 			s.detail.PeerSentIDr = true
@@ -569,6 +626,7 @@ func (s *authSession) finish(ctx context.Context) (ikev2.FullAuthResult, error) 
 	if err != nil {
 		return s.result, err
 	}
+	s.absorbConfigReply(parts)
 	if len(parts.idrBody) > 0 {
 		s.peerIDBody = parts.idrBody
 		s.detail.PeerSentIDr = true
@@ -692,10 +750,54 @@ func (s *authSession) exchange(ctx context.Context, payloads []ikev2.Payload) ([
 	})
 	s.noteNotifies(messageID, inner)
 	if err := ikev2.FirstNotifyError(inner); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: message %d: %w", ErrInvalidAuthResponse, messageID, err)
+		return nil, nil, nil, s.nameNotifyError(messageID, err)
 	}
 	s.messageID = messageID + 1
 	return append([]byte(nil), reqBytes...), append([]byte(nil), respBytes...), inner, nil
+}
+
+// nameNotifyError keeps the mirror's classification and adds the one thing it
+// cannot know: what we had asked for.
+//
+// INTERNAL_ADDRESS_FAILURE is singled out because it is the only rejection in
+// this ladder that is not about authentication at all. T072 read
+// "invalid IKE_AUTH response: message 3: ikev2 notify error:
+// INTERNAL_ADDRESS_FAILURE" and had to decrypt a capture to find out which
+// CFG_REQUEST had produced it. Every wrapper in the chain is preserved, so
+// errors.Is still finds ErrInvalidAuthResponse and
+// ikev2.ErrNotifyInternalAddressFailure.
+func (s *authSession) nameNotifyError(messageID uint32, err error) error {
+	wrapped := fmt.Errorf("%w: message %d: %w", ErrInvalidAuthResponse, messageID, err)
+	if !errors.Is(err, ikev2.ErrNotifyInternalAddressFailure) {
+		return wrapped
+	}
+	variant := "unnamed"
+	if s.detail.ConfigVariant != "" {
+		variant = string(s.detail.ConfigVariant)
+	}
+	return fmt.Errorf("%w: %w; authentication had already succeeded, so this is a verdict on the "+
+		"CFG_REQUEST variant %q: %s", ErrInternalAddressFailure, wrapped, variant,
+		DescribeConfiguration(s.detail.SentConfiguration))
+}
+
+// absorbConfigReply decodes a CP payload out of a response.
+//
+// A malformed reply is recorded and not raised. The CHILD_SA may be entirely
+// usable and the tunnel may be up; refusing the whole exchange because one
+// attribute had an unexpected length would throw away a working tunnel over a
+// diagnostic.
+func (s *authSession) absorbConfigReply(parts authResponseParts) {
+	if len(parts.cpBody) == 0 {
+		return
+	}
+	reply, err := ParseConfigReply(parts.cpBody)
+	if err != nil {
+		s.detail.PeerConfigurationError = err.Error()
+		s.detail.PeerConfiguration = ConfigReply{Raw: append([]byte(nil), parts.cpBody...)}
+		return
+	}
+	s.detail.PeerConfigurationError = ""
+	s.detail.PeerConfiguration = reply
 }
 
 // noteNotifies keeps every notify the responder sent, error or not.
@@ -782,6 +884,11 @@ func (s *authSession) publishSeed() {
 		ResponderIDType: s.runner.ResponderID.Type,
 		ResponderID:     s.runner.ResponderID.Data,
 		AKA:             s.detail.AKAVectors,
+		// The variant name, so a replay rebuilds the same first request even
+		// after DefaultConfigVariant moves. An empty string in an older sidecar
+		// means the recording predates named variants; the replay reads that as
+		// ConfigVariantMirror, which is what those runs sent.
+		ConfigVariant: string(s.runner.ConfigVariant),
 	})
 }
 
@@ -792,25 +899,46 @@ func (s *authSession) offeredChildSA() ikev2.SecurityAssociation {
 	return s.cfg.ChildSA
 }
 
-func (s *authSession) offeredTSi() ikev2.TrafficSelectors {
+// offeredTSi and offeredTSr follow the variant when one is named.
+//
+// The selectors are not an independent knob once a variant is in play: a
+// CFG_REQUEST asking for an IPv6 address alongside TSi covering only
+// 0.0.0.0-255.255.255.255 describes a tunnel that cannot carry the address it
+// just asked for, and a responder is entitled to refuse either half of that.
+func (s *authSession) offeredTSi() (ikev2.TrafficSelectors, error) {
 	if len(s.runner.TSi.Selectors) > 0 {
-		return s.runner.TSi
+		return s.runner.TSi, nil
 	}
-	return s.cfg.TSi
+	if s.runner.ConfigVariant != "" {
+		return s.runner.ConfigVariant.TrafficSelectors()
+	}
+	return s.cfg.TSi, nil
 }
 
-func (s *authSession) offeredTSr() ikev2.TrafficSelectors {
+func (s *authSession) offeredTSr() (ikev2.TrafficSelectors, error) {
 	if len(s.runner.TSr.Selectors) > 0 {
-		return s.runner.TSr
+		return s.runner.TSr, nil
 	}
-	return s.cfg.TSr
+	if s.runner.ConfigVariant != "" {
+		return s.runner.ConfigVariant.TrafficSelectors()
+	}
+	return s.cfg.TSr, nil
 }
 
-func (s *authSession) offeredConfiguration() ikev2.Configuration {
+// offeredConfiguration resolves the CFG_REQUEST, most specific first.
+//
+// The error is returned rather than swallowed: an unknown variant name means
+// the operator asked for a shape nobody defined, and sending some other shape
+// under that name would attribute a live measurement - one SQN step - to the
+// wrong request.
+func (s *authSession) offeredConfiguration() (ikev2.Configuration, error) {
 	if s.runner.Configuration.Type != 0 || len(s.runner.Configuration.Attributes) > 0 {
-		return s.runner.Configuration
+		return s.runner.Configuration, nil
 	}
-	return s.cfg.Configuration
+	if s.runner.ConfigVariant != "" {
+		return s.runner.ConfigVariant.ConfigurationOfType(s.runner.ConfigType)
+	}
+	return s.cfg.Configuration, nil
 }
 
 func (s *authSession) noteResponseEAP(parts authResponseParts) {
@@ -905,7 +1033,30 @@ type authResponseParts struct {
 	auth    *AuthValue
 	eap     *eapaka.Packet
 	eapRaw  []byte
+	cpBody  []byte
 	hasSA   bool
+}
+
+// configFromPayloads reads the CP payload back out of the request that was
+// actually built.
+//
+// The configured value is the fallback rather than the answer, because
+// BuildAuthInitialPayloads substitutes the default when nothing was configured
+// - and it is the substituted payload the responder judges. Recording the
+// configured zero value here would produce a receipt saying we asked for
+// nothing.
+func configFromPayloads(payloads []ikev2.Payload, fallback ikev2.Configuration) ikev2.Configuration {
+	for _, p := range payloads {
+		if p.Type != ikev2.PayloadCP {
+			continue
+		}
+		parsed, err := ikev2.ParseConfiguration(p.Body)
+		if err != nil {
+			return fallback
+		}
+		return parsed
+	}
+	return fallback
 }
 
 func parseAuthResponse(inner []ikev2.Payload) (authResponseParts, error) {
@@ -932,6 +1083,8 @@ func parseAuthResponse(inner []ikev2.Payload) (authResponseParts, error) {
 			}
 			out.eap = &packet
 			out.eapRaw = append([]byte(nil), p.Body...)
+		case ikev2.PayloadCP:
+			out.cpBody = append([]byte(nil), p.Body...)
 		case ikev2.PayloadSA:
 			out.hasSA = true
 		}

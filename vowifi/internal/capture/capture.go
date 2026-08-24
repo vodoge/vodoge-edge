@@ -132,6 +132,16 @@ type AuthSeed struct {
 	ResponderIDType uint8       `json:"responder_id_type,omitempty"`
 	ResponderID     []byte      `json:"responder_id,omitempty"`
 	AKA             []AKAVector `json:"aka,omitempty"`
+	// ConfigVariant names the CFG_REQUEST shape the ladder sent, as a string
+	// this package deliberately does not interpret.
+	//
+	// It is here because the shape is the one part of the first request that is
+	// expected to keep changing: T081 is a search for the CFG_REQUEST an ePDG
+	// will accept, and every time the default moves, every older recording
+	// would stop reproducing its own bytes. An empty value means the recording
+	// predates named variants, and a reader should treat it as the mirror's
+	// ikev2.SWuConfigurationRequest - which is what those runs sent.
+	ConfigVariant string `json:"config_variant,omitempty"`
 }
 
 // Valid reports whether the auth seed can drive a byte-exact replay.
@@ -248,6 +258,7 @@ func (w *Writer) SetAuthSeed(seed AuthSeed) {
 		InitiatorID:     append([]byte(nil), seed.InitiatorID...),
 		ResponderIDType: seed.ResponderIDType,
 		ResponderID:     append([]byte(nil), seed.ResponderID...),
+		ConfigVariant:   seed.ConfigVariant,
 	}
 	for _, iv := range seed.IVs {
 		copied.IVs = append(copied.IVs, append([]byte(nil), iv...))

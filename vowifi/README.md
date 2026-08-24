@@ -16,6 +16,13 @@ criterion 2b, and the evidence is in
 `INTERNAL_ADDRESS_FAILURE`, which is a configuration-payload problem and belongs
 to criterion 4. Do not read "criterion 2b holds" as "the tunnel works".
 
+**T081 went after that rejection and did not clear it.** Three CFG_REQUEST
+shapes were put in front of T-Mobile US, and all three were answered
+`INTERNAL_ADDRESS_FAILURE`; a fourth run tried the IDr shape TS 24.302 actually
+specifies and was refused before EAP even started. **The tunnel is still down.**
+What did change is that the failure now has a name, a decoder and a control test
+- see [the configuration payload](#the-configuration-payload-and-why-notify-36-is-not-an-authentication-failure).
+
 ## Why a separate module, and why no fork
 
 `vendor-mirror/vowifi-go-1e9c6e6` is already built for substitution.
@@ -249,6 +256,98 @@ captured evidence from a real ePDG anywhere in this repository**, so:
 `N(EAP_ONLY_AUTHENTICATION) = 16417` is in the same category: it is the RFC 5998
 section 5 IANA allocation, nothing here has seen it come back from a live node,
 and it is one constant so that one line changes if T041d disagrees.
+
+### The configuration payload, and why notify 36 is not an authentication failure
+
+This is T081. `INTERNAL_ADDRESS_FAILURE` (notify 36) arrives *after* EAP-Success,
+on the message carrying `AUTH`. By then the operator has accepted the card, the
+`RES` and our `AUTH` payload. RFC 7296 section 3.10.1 makes notify 36 a verdict
+on one thing only: the `CFG_REQUEST` we sent in the first `IKE_AUTH` request.
+
+The mirror's `ikev2.SWuConfigurationRequest()`
+(`session_payloads.go:146-153`) asks for four attributes:
+
+```
+CFG_REQUEST { INTERNAL_IP4_ADDRESS, INTERNAL_IP4_DNS,
+              INTERNAL_IP6_ADDRESS, INTERNAL_IP6_DNS }
+```
+
+There is no P-CSCF in it, and the mirror does not define the constants: the
+attribute list in `session_payloads.go:26-34` stops at 15, while RFC 7651
+allocated **20 = `P_CSCF_IP4_ADDRESS`** and **21 = `P_CSCF_IP6_ADDRESS`**.
+Without one, a tunnel that came up would have nowhere to send `REGISTER`, so
+criterion 4 needs them regardless of what notify 36 turns out to be about.
+
+`internal/ike/config_payload.go` owns the request now. Shapes are **named**,
+because each one costs an SQN step to measure and a receipt has to say which one
+produced which answer:
+
+| `-cfg` | attributes | TS |
+| --- | --- | --- |
+| `mirror` | the four above, byte for byte | IPv4 |
+| `dual` **(default)** | those four **plus 20 and 21** | IPv4 |
+| `ipv4` | `IP4_ADDRESS`, `IP4_DNS`, `P_CSCF_IP4` | IPv4 |
+| `ipv6` | `IP6_ADDRESS`, `IP6_DNS`, `P_CSCF_IP6` | IPv6 |
+| `ipv4-nopcscf` / `ipv6-nopcscf` | the family axis without the P-CSCF axis | matching |
+
+The traffic selectors belong to the variant rather than being a separate knob:
+asking for an IPv6 address over a tunnel whose `TSi` covers only `0.0.0.0/0`
+describes a tunnel that cannot carry the address it just asked for. The mirror
+has no IPv6 selector helper (`IPv4AnyTrafficSelectors` at
+`session_payloads.go:224-232` is the whole of it), so `ike.IPv6AnyTrafficSelectors`
+is written here and round-trips through the mirror's own codec in a test.
+
+**What was measured, on 2026-08-24, against T-Mobile US:**
+
+| `-cfg` | `-idr` | result | SQN |
+| --- | --- | --- | --- |
+| `mirror` | none | notify 36 (T072) | 1 |
+| `dual` | none | **notify 36** | 1 |
+| `ipv6` | none | **notify 36** | 1 |
+| `dual` | `apn` | `AUTHENTICATION_FAILED` at message 1 | **0** |
+
+So the missing P-CSCF was *not* what notify 36 was about, and neither was the
+dual-family ask. Both are still the right thing to send; neither is sufficient.
+`ipv4` is the one cell nobody has spent an SQN on. Full write-up, including what
+is left to try and why each candidate is ranked where it is, in
+`docs/goals/vodoge-vowifi-call/notes/T081-cfg-request.md`.
+
+The fourth row is worth its own sentence. TS 24.302 section 7.2.2 says the SWu
+`IDr` is not the ePDG's name, it is the **APN-FQDN** of the PDN to attach to
+(TS 23.003 section 19.4.2.4,
+`ims.apn.epc.mnc240.mcc310.pub.3gppnetwork.org`). That is a much better reason to
+send an IDr than the one T041d tried, and T-Mobile refused it too - at message 1,
+before any Challenge, so it cost nothing. Three defensible IDr values have now
+been refused, which retires "T072 sent the wrong IDr shape" as an explanation.
+`ike.LiveConfig.ResponderID` still defaults to sending none and
+`TestTheLiveDefaultSendsNoIDr` still pins it; `-idr apn` is a diagnostic, like
+`-idr card` and `-idr dns` before it.
+
+The failure is named rather than described. `ike.ErrInternalAddressFailure`
+wraps the mirror's `ikev2.ErrNotifyInternalAddressFailure` and carries the
+request that was refused in its own text, and `ike.OutcomeAddressRejected` is a
+distinct outcome from `challenge-answered` - it is strictly *later*, and it
+points at a different file. The fake ePDG grew `requirePCSCF` and
+`requireSingleFamily` knobs so that both candidate causes are enforced by some
+responder rather than asserted by our own encoder, and the control pair
+(`TestTheDefaultRequestSatisfiesAnEPDGThatWantsPCSCF` and
+`TestTheMirrorRequestStillGetsNotify36`) runs the same responder against both
+shapes.
+
+`ConfigReply` decodes the other direction. An attribute whose value is the wrong
+length for its type is an error, not a skipped field, because four octets read
+as an address when the responder meant something else would put a wrong address
+into a receipt that claims to be evidence. Attributes nobody has a constant for
+are kept and printed as hex rather than dropped.
+
+Finally, the variant name travels into the capture sidecar
+(`capture.AuthSeed.ConfigVariant`). The `CFG_REQUEST` is inside the first
+protected message, so changing it changes that message's ciphertext - and
+without the name in the sidecar, the day the default moves is the day
+`/root/t072/epdg-challenge.pcap`, the only recording of a real carrier accepting
+this card, stops reproducing its own bytes with nothing to say why. An empty
+value means the recording predates named variants, and the replay reads that as
+`mirror`, which is what those runs sent.
 
 ### The peer AUTH is actually verified
 

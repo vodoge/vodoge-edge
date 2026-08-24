@@ -74,8 +74,14 @@ func run() error {
 		authWait  = flag.Duration("auth-timeout", ike.DefaultAuthTimeout, "deadline for the whole IKE_AUTH ladder")
 		egress    = flag.String("egress-candidates", "", "comma-separated source IPs to try when reversing the responder's NAT_DETECTION_DESTINATION_IP (default: the two measured on this box)")
 		dryRun    = flag.Bool("dry-run", false, "with -auth: derive the identity and resolve the ePDG, then stop without sending anything")
-		idr       = flag.String("idr", "none", "which IDr to assert: none (the default; T041d measured T-Mobile US refusing every IKE_AUTH that carried one), card (the FQDN derived from the card), or dns (the canonical name that FQDN resolved to)")
+		idr       = flag.String("idr", "none", "which IDr to assert: none (the default; T041d measured T-Mobile US refusing every IKE_AUTH that carried one), card (the ePDG FQDN derived from the card), dns (the canonical name that FQDN resolved to), or apn (the TS 23.003 19.4.2.4 APN-FQDN, which is what TS 24.302 7.2.2 actually asks for here)")
+		apn       = flag.String("apn", ike.WellKnownIMSAPN, "APN network identifier for -idr apn; the operator half of the name still comes from the card")
 		noEAPOnly = flag.Bool("no-eap-only", false, "drop N(EAP_ONLY_AUTHENTICATION) from the first IKE_AUTH request")
+		cfgName   = flag.String("cfg", string(ike.DefaultConfigVariant), "CFG_REQUEST shape: "+configVariantList()+
+			". T072 sent \"mirror\" and T-Mobile US answered INTERNAL_ADDRESS_FAILURE; every other value is an "+
+			"attempt to find out which part of that request it objected to. One run costs one SQN step.")
+		cfgType = flag.String("cfg-type", "request", "CP payload type: request or set. A UE sends CFG_REQUEST; "+
+			"set is reachable only so that axis can be measured")
 	)
 	flag.Parse()
 
@@ -114,6 +120,17 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		// Resolved before anything is dialled. A misspelt variant that got as
+		// far as the ePDG would cost an SQN step on the bench card and produce
+		// a result attributed to a request that was never sent.
+		variant, err := ike.ParseConfigVariant(*cfgName)
+		if err != nil {
+			return err
+		}
+		configType, err := parseConfigType(*cfgType)
+		if err != nil {
+			return err
+		}
 		return runLiveAuth(ctx, liveAuthParams{
 			panelURL:      *panelURL,
 			doh:           *doh,
@@ -135,7 +152,10 @@ func run() error {
 			egress:        candidates,
 			dryRun:        *dryRun,
 			idr:           strings.ToLower(strings.TrimSpace(*idr)),
+			apn:           *apn,
 			noEAPOnly:     *noEAPOnly,
+			configVariant: variant,
+			configType:    configType,
 		})
 	}
 	if strings.TrimSpace(*target) == "" {
@@ -355,6 +375,17 @@ func replayAuthLadder(ctx context.Context, c *capture.Capture, transport *captur
 	runner := ike.NewAuthRunner(ikev2.Identity{Type: seed.ResponderIDType, Data: seed.ResponderID})
 	runner.ChildSPI = seed.ChildSPI
 	runner.PinnedIVs = seed.IVs
+	// The CFG_REQUEST shape comes out of the recording, never out of today's
+	// default. An empty field means the recording predates named variants -
+	// which is the case for everything under /root/t072 - and those runs sent
+	// the mirror's SWuConfigurationRequest. Reading it as anything else would
+	// make the one recording of a real carrier accepting this card stop
+	// reproducing its own bytes the moment the default moves.
+	runner.ConfigVariant = ike.ConfigVariant(seed.ConfigVariant)
+	if runner.ConfigVariant == "" {
+		runner.ConfigVariant = ike.ConfigVariantMirror
+	}
+	fmt.Printf("  CFG        %s (%s)\n", runner.ConfigVariant, recordedVariantProvenance(seed.ConfigVariant))
 	// A recording with no IDr in its seed is a recording of a run that sent no
 	// IDr, and T041d found that T-Mobile answers AUTHENTICATION_FAILED to the
 	// ones that do. Refusing to replay it would make the single most important
@@ -391,8 +422,14 @@ func replayAuthLadder(ctx context.Context, c *capture.Capture, transport *captur
 	if detail.EAPSuccessMessageID != 0 {
 		fmt.Printf("  EAP-Success  message %d (reproduced from the recording)\n", detail.EAPSuccessMessageID)
 	}
+	fmt.Printf("  CFG sent     %s\n", ike.DescribeConfiguration(detail.SentConfiguration))
 	for _, n := range detail.ResponseNotifies {
-		fmt.Printf("  notify       msg %d type %d data %x\n", n.MessageID, n.Type, n.Data)
+		fmt.Printf("  notify       msg %d type %d (%s) data %x\n", n.MessageID, n.Type, notifyName(n.Type), n.Data)
+	}
+	if reply := detail.PeerConfiguration; reply.Present() {
+		for _, line := range reply.Describe() {
+			fmt.Printf("  CFG_REPLY    %s\n", line)
+		}
 	}
 	if err != nil {
 		fmt.Printf("  IKE_AUTH     replay failed after %d exchange(s): %v\n", len(detail.Rounds), err)
@@ -708,9 +745,33 @@ type liveAuthParams struct {
 	akaGrace      time.Duration
 	egress        []net.IP
 	idr           string
+	apn           string
 	noEAPOnly     bool
+	configVariant ike.ConfigVariant
+	configType    uint8
 	responderID   ikev2.Identity
 	dryRun        bool
+}
+
+// configVariantList renders the -cfg choices for the flag help.
+func configVariantList() string {
+	names := make([]string, 0, len(ike.AllConfigVariants))
+	for _, v := range ike.AllConfigVariants {
+		names = append(names, string(v))
+	}
+	return strings.Join(names, ", ")
+}
+
+// parseConfigType turns the -cfg-type word into a CP payload type.
+func parseConfigType(name string) (uint8, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "request", "cfg_request":
+		return ikev2.CFGRequest, nil
+	case "set", "cfg_set":
+		return ikev2.CFGSet, nil
+	default:
+		return 0, fmt.Errorf("-cfg-type %q: want request or set", name)
+	}
 }
 
 // runLiveAuth is T041d: the first contact.
@@ -763,11 +824,42 @@ func runLiveAuth(ctx context.Context, p liveAuthParams) error {
 			return fmt.Errorf("-idr dns: the lookup returned no canonical name to use")
 		}
 		p.responderID = ike.IdentityFQDN(answer.Canonical)
+	case "apn":
+		// The one IDr shape TS 24.302 section 7.2.2 actually specifies for SWu:
+		// the APN-FQDN of the PDN to attach to, not the name of the ePDG. The
+		// operator half is still derived from the card; only the APN network
+		// identifier comes from -apn, and that is a network configuration name
+		// every subscriber on the operator shares.
+		identity, err := subscription.APNIdentity(p.apn)
+		if err != nil {
+			return err
+		}
+		p.responderID = identity
 	default:
-		return fmt.Errorf("-idr %q: want none, card or dns", p.idr)
+		return fmt.Errorf("-idr %q: want none, card, dns or apn", p.idr)
 	}
 	fmt.Printf("  IDr        %s\n", describeIDr(p, subscription))
 	fmt.Printf("  EAP-only   %v\n", !p.noEAPOnly)
+
+	// The CFG_REQUEST is printed before anything is dialled, because it is the
+	// payload under test and because a run whose receipt does not say what was
+	// asked for cannot be compared with the next one.
+	variant := p.configVariant
+	if variant == "" {
+		variant = ike.DefaultConfigVariant
+	}
+	request, err := variant.ConfigurationOfType(p.configType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  CFG        %s\n", variant)
+	fmt.Printf("             %s\n", variant.Why())
+	fmt.Printf("             %s\n", ike.DescribeConfiguration(request))
+	selectors, err := variant.TrafficSelectors()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  TS         %s\n", describeSelectors(selectors))
 
 	limit := p.maxCandidates
 	if limit <= 0 || limit > MaxLiveAuthCandidates {
@@ -889,6 +981,8 @@ func liveAuthOnce(
 		AKA:          provider,
 		ResponderID:  p.responderID,
 
+		ConfigVariant:   p.configVariant,
+		ConfigType:      p.configType,
 		DisableEAPOnly:  p.noEAPOnly,
 		Groups:          p.groups,
 		Capture:         writer,
@@ -971,6 +1065,7 @@ func reportLiveResult(result ike.LiveResult, err error) {
 		if detail.ChildSAMessageID != 0 {
 			fmt.Printf("  CHILD_SA   message %d\n", detail.ChildSAMessageID)
 		}
+		reportConfiguration(result)
 		if detail.EarlyPeerAuthMethod != 0 {
 			fmt.Printf("  peer AUTH  method %d arrived before EAP finished: the responder ignored RFC 5998\n",
 				detail.EarlyPeerAuthMethod)
@@ -1015,6 +1110,74 @@ func reportLiveResult(result ike.LiveResult, err error) {
 		fmt.Printf("  criterion  2b second half MET: the RES above was computed by the enabled profile\n" +
 			"             on the bench eUICC from the carrier own RAND/AUTN.\n")
 	}
+}
+
+// reportConfiguration prints both halves of the configuration exchange.
+//
+// Both halves, because notify 36 is a verdict on the request and a receipt that
+// only carried the verdict would be the T072 situation again: a number with no
+// way to tell what produced it short of decrypting the capture.
+func reportConfiguration(result ike.LiveResult) {
+	detail := result.AuthDetail
+	if len(detail.SentConfiguration.Attributes) > 0 || detail.SentConfiguration.Type != 0 {
+		fmt.Printf("  CFG sent   %s (%s)\n", ike.DescribeConfiguration(detail.SentConfiguration),
+			orUnnamed(string(result.ConfigVariantUsed)))
+	}
+	if detail.PeerConfigurationError != "" {
+		fmt.Printf("  CFG_REPLY  would not decode: %s\n", detail.PeerConfigurationError)
+	}
+	reply := result.Config()
+	if !reply.Present() {
+		if result.AuthDone {
+			fmt.Printf("  CFG_REPLY  none: the ePDG answered without a configuration payload\n")
+		}
+		return
+	}
+	for i, line := range reply.Describe() {
+		if i == 0 {
+			fmt.Printf("  CFG_REPLY  %s\n", line)
+			continue
+		}
+		fmt.Printf("             %s\n", line)
+	}
+	switch {
+	case reply.HavePCSCF():
+		fmt.Printf("  P-CSCF     acquired: IMS registration has a destination\n")
+	case result.Auth.ChildSA != nil:
+		fmt.Printf("  P-CSCF     NOT acquired: the tunnel is up and there is still nowhere to\n" +
+			"             send REGISTER. Criterion 4 is not met by an ESP SA alone.\n")
+	}
+}
+
+// recordedVariantProvenance says whether the replayed CFG_REQUEST came out of
+// the sidecar or out of the backward compatibility rule.
+func recordedVariantProvenance(recorded string) string {
+	if recorded != "" {
+		return "from the sidecar"
+	}
+	return "the sidecar predates named variants, so this is the mirror's SWuConfigurationRequest"
+}
+
+func describeSelectors(ts ikev2.TrafficSelectors) string {
+	parts := make([]string, 0, len(ts.Selectors))
+	for _, s := range ts.Selectors {
+		family := "IPv4"
+		if s.Type == ikev2.TSIPv6AddressRange {
+			family = "IPv6"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s-%s ports %d-%d", family, s.StartAddr, s.EndAddr, s.StartPort, s.EndPort))
+	}
+	if len(parts) == 0 {
+		return "(none)"
+	}
+	return strings.Join(parts, "; ")
+}
+
+func orUnnamed(value string) string {
+	if value == "" {
+		return "unnamed variant"
+	}
+	return value
 }
 
 // notifyName labels the notify types that actually turn up in an IKE_AUTH
@@ -1088,7 +1251,10 @@ func describeIDr(p liveAuthParams, subscription ike.Subscription) string {
 		return "(omitted - the default, because T041d measured every IKE_AUTH carrying one " +
 			"coming back AUTHENTICATION_FAILED from T-Mobile US)"
 	case string(p.responderID.Data) == subscription.EPDGFQDN():
-		return string(p.responderID.Data) + " (derived from the card's MCC/MNC)"
+		return string(p.responderID.Data) + " (the ePDG name, derived from the card's MCC/MNC)"
+	case p.idr == "apn":
+		return string(p.responderID.Data) + " (the TS 23.003 19.4.2.4 APN-FQDN: APN " + p.apn +
+			", operator half derived from the card's MCC/MNC)"
 	default:
 		return string(p.responderID.Data) + " (the canonical name the card-derived FQDN resolved to)"
 	}

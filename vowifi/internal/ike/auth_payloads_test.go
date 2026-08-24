@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
@@ -247,6 +248,68 @@ func TestBuildAuthInitialPayloadsCarriesIDrAndEAPOnly(t *testing.T) {
 	}
 	if idr.Type != ikev2.IDFQDN || string(idr.Data) != "epdg.example" {
 		t.Fatalf("IDr = %d/%q", idr.Type, idr.Data)
+	}
+}
+
+// TestTheAPNFQDNKeepsItsOperatorHalfOnTheCard covers the one IDr shape
+// TS 24.302 section 7.2.2 actually specifies for SWu.
+//
+// The point of the assertions is provenance, not spelling. Everything except
+// the APN network identifier has to be the same derivation EPDGFQDN uses, so
+// that offering this IDr does not become a back door for a hand-typed operator
+// - which is what goal oracle criterion 2b refuses.
+func TestTheAPNFQDNKeepsItsOperatorHalfOnTheCard(t *testing.T) {
+	sub, err := DeriveSubscription("867018069514820", "310240529712215", "310-240", "test")
+	if err != nil {
+		t.Fatalf("DeriveSubscription: %v", err)
+	}
+	got, err := sub.APNFQDN(WellKnownIMSAPN)
+	if err != nil {
+		t.Fatalf("APNFQDN: %v", err)
+	}
+	// The operator half is taken from the ePDG name rather than rewritten, so a
+	// change to the MNC padding rule cannot make the two disagree silently.
+	operator, ok := strings.CutPrefix(sub.EPDGFQDN(), "epdg.")
+	if !ok {
+		t.Fatalf("EPDGFQDN no longer starts with epdg.: %q", sub.EPDGFQDN())
+	}
+	want := WellKnownIMSAPN + ".apn." + operator
+	if got != want {
+		t.Fatalf("APNFQDN = %q, want %q", got, want)
+	}
+	if !strings.Contains(got, "mnc240.mcc310") {
+		t.Fatalf("the APN-FQDN lost the card's three-digit MNC: %q", got)
+	}
+	if strings.Contains(got, sub.IMSI) || strings.Contains(got, sub.IMEI) {
+		t.Fatalf("the APN-FQDN leaks a subscriber identity: %q", got)
+	}
+
+	identity, err := sub.APNIdentity(" IMS ")
+	if err != nil {
+		t.Fatalf("APNIdentity: %v", err)
+	}
+	if identity.Type != ikev2.IDFQDN || string(identity.Data) != want {
+		t.Fatalf("APNIdentity = %d/%q", identity.Type, identity.Data)
+	}
+	// An APN that is not a DNS label is refused rather than concatenated into a
+	// name that would be silently wrong on the wire.
+	for _, bad := range []string{"", "   ", "ims apn", "ims/1", "ims_4g"} {
+		if _, err := sub.APNFQDN(bad); !errors.Is(err, ErrCardReadout) {
+			t.Fatalf("APNFQDN(%q) err = %v, want ErrCardReadout", bad, err)
+		}
+	}
+
+	// A two-digit MNC still pads to three, the same way EPDGFQDN does.
+	hk, err := DeriveSubscription("867018069514820", "454006395021420", "454-00", "test")
+	if err != nil {
+		t.Fatalf("DeriveSubscription: %v", err)
+	}
+	hkAPN, err := hk.APNFQDN(WellKnownIMSAPN)
+	if err != nil {
+		t.Fatalf("APNFQDN: %v", err)
+	}
+	if !strings.Contains(hkAPN, "mnc000.mcc454") {
+		t.Fatalf("two-digit MNC did not pad: %q", hkAPN)
 	}
 }
 

@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -458,5 +459,219 @@ func TestTheLiveDefaultSendsNoIDr(t *testing.T) {
 	}
 	if !result.AuthDetail.SentEAPOnlyNotify {
 		t.Fatalf("EAP_ONLY_AUTHENTICATION was dropped; T041d's successful run carried it")
+	}
+}
+
+// TestInternalAddressFailureIsItsOwnOutcome reproduces the exact wall T072 hit,
+// offline.
+//
+// This is the control the whole card is built around. Before T081 this path
+// produced OutcomeChallengeAnswered and an error reading "invalid IKE_AUTH
+// response: message 3: ikev2 notify error: INTERNAL_ADDRESS_FAILURE", which is
+// true, useless, and points at the wrong file: it reads like the ladder failed
+// authentication when authentication had already succeeded a message earlier.
+func TestInternalAddressFailureIsItsOwnOutcome(t *testing.T) {
+	sub := benchSubscription(t)
+	f, a := startLiveFake(t, sub, func(a *epdgAuth) { a.addressFailure = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if err == nil {
+		t.Fatalf("notify 36 must not come back as a working tunnel")
+	}
+	if !errors.Is(err, ErrInternalAddressFailure) {
+		t.Fatalf("err = %v, want ErrInternalAddressFailure", err)
+	}
+	// The mirror's own classification survives underneath ours. Losing it would
+	// mean a caller matching on the notify type stops matching.
+	if !errors.Is(err, ikev2.ErrNotifyInternalAddressFailure) {
+		t.Fatalf("err = %v, want the mirror's notify class to survive the wrapping", err)
+	}
+	if !errors.Is(err, ErrInvalidAuthResponse) {
+		t.Fatalf("err = %v, want ErrInvalidAuthResponse to survive the wrapping", err)
+	}
+	if result.Outcome != OutcomeAddressRejected {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeAddressRejected)
+	}
+	// The card answered and the carrier accepted it. Both of those are still
+	// true and must not be erased by the later refusal.
+	if !result.CardAnsweredChallenge() {
+		t.Fatalf("the card's answer was lost behind the address failure")
+	}
+	if result.AuthDetail.EAPSuccessMessageID == 0 {
+		t.Fatalf("EAP-Success was recorded as absent on a run that got one")
+	}
+	if result.TunnelIsUp() {
+		t.Fatalf("TunnelIsUp on a run the ePDG refused an address to")
+	}
+	if a.refusalReason == "" {
+		t.Fatalf("the fixture did not take the refusal path; it answered normally")
+	}
+
+	var saw36 bool
+	for _, n := range result.AuthDetail.ResponseNotifies {
+		if n.Type == ikev2.NotifyInternalAddressFailure {
+			saw36 = true
+			if len(n.Data) != 0 {
+				t.Fatalf("notify 36 carried %x; the one T-Mobile sent carried nothing", n.Data)
+			}
+		}
+	}
+	if !saw36 {
+		t.Fatalf("notify 36 was not kept as data: %+v", result.AuthDetail.ResponseNotifies)
+	}
+
+	// The error has to name what was refused. "Notify 36" without the request
+	// is what sent T072 back to decrypt a capture to find out what it had
+	// asked for.
+	for _, want := range []string{string(DefaultConfigVariant), "P_CSCF_IP4_ADDRESS", "CFG_REQUEST"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error does not mention %q: %v", want, err)
+		}
+	}
+	if !strings.Contains(result.Outcome.Explain(), "Nothing here is a carrier verdict on the card") {
+		t.Fatalf("the explanation lets notify 36 be read as a card rejection: %q", result.Outcome.Explain())
+	}
+}
+
+// TestTheDefaultRequestSatisfiesAnEPDGThatWantsPCSCF is the other half of the
+// control pair: one responder, two CFG_REQUEST shapes, opposite outcomes.
+//
+// Together with the mirror case below, this is what turns "adding the P-CSCF
+// attribute fixes notify 36" from a hypothesis in a comment into a behaviour
+// that some responder actually enforces.
+func TestTheDefaultRequestSatisfiesAnEPDGThatWantsPCSCF(t *testing.T) {
+	sub := benchSubscription(t)
+	f, _ := startLiveFake(t, sub, func(a *epdgAuth) { a.requirePCSCF = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("RunLiveTunnel: %v", err)
+	}
+	if result.Outcome != OutcomeEstablished {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeEstablished)
+	}
+	if result.ConfigVariantUsed != DefaultConfigVariant {
+		t.Fatalf("variant = %q, want the default %q", result.ConfigVariantUsed, DefaultConfigVariant)
+	}
+	reply := result.Config()
+	if !reply.HavePCSCF() {
+		t.Fatalf("no P-CSCF came back: %v", reply.Describe())
+	}
+	if len(reply.PCSCFIPv4) != 1 || reply.PCSCFIPv4[0].String() != "10.64.0.33" {
+		t.Fatalf("P_CSCF_IP4_ADDRESS = %v", reply.PCSCFIPv4)
+	}
+	if len(reply.PCSCFIPv6) != 1 {
+		t.Fatalf("P_CSCF_IP6_ADDRESS = %v", reply.PCSCFIPv6)
+	}
+	if !reply.HaveInternalAddress() || !result.TunnelIsUp() {
+		t.Fatalf("the tunnel is not reported up: %v", reply.Describe())
+	}
+	if result.AuthDetail.PeerConfigurationError != "" {
+		t.Fatalf("the CFG_REPLY would not decode: %s", result.AuthDetail.PeerConfigurationError)
+	}
+}
+
+// TestTheMirrorRequestStillGetsNotify36 is the negative of the pair above.
+func TestTheMirrorRequestStillGetsNotify36(t *testing.T) {
+	sub := benchSubscription(t)
+	f, a := startLiveFake(t, sub, func(a *epdgAuth) { a.requirePCSCF = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	cfg.ConfigVariant = ConfigVariantMirror
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if !errors.Is(err, ErrInternalAddressFailure) {
+		t.Fatalf("err = %v, want ErrInternalAddressFailure", err)
+	}
+	if result.Outcome != OutcomeAddressRejected {
+		t.Fatalf("outcome = %s", result.Outcome)
+	}
+	if result.ConfigVariantUsed != ConfigVariantMirror {
+		t.Fatalf("variant = %q", result.ConfigVariantUsed)
+	}
+	if !strings.Contains(a.refusalReason, "P_CSCF") {
+		t.Fatalf("the responder refused for some other reason: %q", a.refusalReason)
+	}
+	// The request the responder saw is the mirror's, byte for byte. That is
+	// what makes this pair a controlled comparison rather than two runs that
+	// happened to differ.
+	want, err := ikev2.SWuConfigurationRequest().MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	got, err := a.observedConfig.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fatalf("the control did not send the mirror request:\n got %x\nwant %x", got, want)
+	}
+}
+
+// TestASingleFamilyVariantAnswersTheOtherCandidateCause covers the second
+// explanation for notify 36, so that a live failure of the P-CSCF hypothesis
+// has a tested next step instead of an improvised one.
+func TestASingleFamilyVariantAnswersTheOtherCandidateCause(t *testing.T) {
+	sub := benchSubscription(t)
+
+	f, a := startLiveFake(t, sub, func(a *epdgAuth) { a.requireSingleFamily = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if !errors.Is(err, ErrInternalAddressFailure) {
+		t.Fatalf("the dual-stack default should be refused here: %v", err)
+	}
+	if result.Outcome != OutcomeAddressRejected {
+		t.Fatalf("outcome = %s", result.Outcome)
+	}
+	if !strings.Contains(a.refusalReason, "both") {
+		t.Fatalf("refusal reason = %q", a.refusalReason)
+	}
+
+	f2, _ := startLiveFake(t, sub, func(a *epdgAuth) { a.requireSingleFamily = true })
+	cfg2, _ := liveConfigFor(t, f2, sub, newTestAKAProvider())
+	cfg2.ConfigVariant = ConfigVariantIPv6
+	result2, err := RunLiveTunnel(context.Background(), cfg2)
+	if err != nil {
+		t.Fatalf("the IPv6-only variant should be accepted here: %v", err)
+	}
+	if result2.Outcome != OutcomeEstablished || !result2.TunnelIsUp() {
+		t.Fatalf("outcome = %s, tunnel up = %v", result2.Outcome, result2.TunnelIsUp())
+	}
+	reply := result2.Config()
+	if len(reply.IPv6Address) != 1 || reply.IPv6Address[0].PrefixLen != 64 {
+		t.Fatalf("no IPv6 address in the reply: %v", reply.Describe())
+	}
+	if len(reply.IPv4Address) != 0 {
+		t.Fatalf("an IPv4 address came back for an IPv6-only request: %v", reply.IPv4Address)
+	}
+	if len(reply.PCSCFIPv6) != 1 || len(reply.PCSCFIPv4) != 0 {
+		t.Fatalf("P-CSCF families do not match the request: v4=%v v6=%v", reply.PCSCFIPv4, reply.PCSCFIPv6)
+	}
+}
+
+// TestAnUnknownConfigVariantNeverReachesTheCard stops a typo costing an SQN
+// step. Past IKE_SA_INIT the next thing that happens is an AUTHENTICATE on a
+// card the user cannot physically reach.
+func TestAnUnknownConfigVariantNeverReachesTheCard(t *testing.T) {
+	sub := benchSubscription(t)
+	f, _ := startLiveFake(t, sub, nil)
+	provider := newTestAKAProvider()
+	cfg, socket := liveConfigFor(t, f, sub, provider)
+	cfg.ConfigVariant = "ipv7"
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if !errors.Is(err, ErrUnknownConfigVariant) {
+		t.Fatalf("err = %v, want ErrUnknownConfigVariant", err)
+	}
+	if result.InitDone || result.AuthAttempted {
+		t.Fatalf("something was sent: init=%v auth=%v", result.InitDone, result.AuthAttempted)
+	}
+	if provider.callCount() != 0 {
+		t.Fatalf("the card was asked %d time(s) for a run that could never have worked",
+			provider.callCount())
+	}
+	if socket.Stats().IKESent != 0 {
+		t.Fatalf("%d datagram(s) left the box", socket.Stats().IKESent)
 	}
 }

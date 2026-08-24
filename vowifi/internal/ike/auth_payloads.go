@@ -206,7 +206,8 @@ type AuthInitialPayloads struct {
 	// TSi and TSr default to IPv4 any.
 	TSi ikev2.TrafficSelectors
 	TSr ikev2.TrafficSelectors
-	// Configuration defaults to the mirror's SWu CFG_REQUEST.
+	// Configuration defaults to DefaultConfigVariant, which is the mirror's
+	// SWu CFG_REQUEST plus the two P-CSCF attributes it never had.
 	Configuration ikev2.Configuration
 	// EAPOnlyAuthentication adds the RFC 5998 notify.
 	EAPOnlyAuthentication bool
@@ -250,9 +251,18 @@ func BuildAuthInitialPayloads(p AuthInitialPayloads) ([]ikev2.Payload, error) {
 			ErrMissingResponderID)
 	}
 
+	// The CFG_REQUEST default is no longer the mirror's. T072 sent
+	// ikev2.SWuConfigurationRequest() at T-Mobile US and got notify 36
+	// (INTERNAL_ADDRESS_FAILURE) back on the message carrying AUTH, and that
+	// request has no P-CSCF attribute at all - so even a tunnel that came up on
+	// it would have had nowhere to send REGISTER. See config_payload.go.
 	cfg := p.Configuration
 	if cfg.Type == 0 && len(cfg.Attributes) == 0 {
-		cfg = ikev2.SWuConfigurationRequest()
+		derived, err := DefaultConfigVariant.Configuration()
+		if err != nil {
+			return nil, err
+		}
+		cfg = derived
 	}
 	cp, err := ikev2.ConfigurationPayload(cfg)
 	if err != nil {

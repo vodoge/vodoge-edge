@@ -228,6 +228,55 @@ func (s Subscription) ResponderIdentity() ikev2.Identity {
 	return IdentityFQDN(s.EPDGFQDN())
 }
 
+// WellKnownIMSAPN is the APN Network Identifier every IMS deployment uses.
+//
+// It is a well-known constant, not an identity: GSMA IR.92 section 4.1 and
+// 3GPP TS 23.003 section 9.1 both fix the IMS well-known APN as "ims", and
+// every operator identifier around it is still derived from the card. It is a
+// parameter rather than a literal because an operator that used a different
+// APN Network Identifier would need one word changed, not a rebuild of the
+// derivation chain - and because a receipt should be able to say which APN was
+// asked for.
+const WellKnownIMSAPN = "ims"
+
+// APNFQDN is the TS 23.003 section 19.4.2.4 APN-FQDN:
+//
+//	<APN Network Identifier>.apn.epc.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org
+//
+// The operator half comes from the card, exactly as EPDGFQDN's does. Only the
+// APN Network Identifier is supplied, and TS 23.003 calls that a network
+// configuration name rather than a subscriber identity - it names the packet
+// data network to attach to, and every subscriber on the operator uses the same
+// one.
+//
+// This is the payload TS 24.302 section 7.2.2 puts in the IDr of an SWu
+// IKE_AUTH. Note what that means: on this interface the IDr is not "the name of
+// the box we are talking to", it is "which PDN we want". T041d read it the
+// first way, sent the ePDG's own name, and was answered AUTHENTICATION_FAILED.
+func (s Subscription) APNFQDN(apn string) (string, error) {
+	apn = strings.Trim(strings.TrimSpace(strings.ToLower(apn)), ".")
+	if apn == "" {
+		return "", fmt.Errorf("%w: no APN network identifier", ErrCardReadout)
+	}
+	for i := 0; i < len(apn); i++ {
+		c := apn[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.'
+		if !ok {
+			return "", fmt.Errorf("%w: APN %q is not a DNS label", ErrCardReadout, apn)
+		}
+	}
+	return fmt.Sprintf("%s.apn.epc.mnc%s.mcc%s.pub.3gppnetwork.org", apn, PadMNC(s.MNC), s.MCC), nil
+}
+
+// APNIdentity is APNFQDN as an ID_FQDN identity, ready to be an IDr.
+func (s Subscription) APNIdentity(apn string) (ikev2.Identity, error) {
+	fqdn, err := s.APNFQDN(apn)
+	if err != nil {
+		return ikev2.Identity{}, err
+	}
+	return IdentityFQDN(fqdn), nil
+}
+
 // Describe is the derivation chain, one line per step, for the receipt.
 func (s Subscription) Describe() []string {
 	return []string{
