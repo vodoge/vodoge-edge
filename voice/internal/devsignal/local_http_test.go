@@ -107,6 +107,7 @@ func TestEveryRouteRefusesAnUnauthorisedCaller(t *testing.T) {
 		{http.MethodPost, "/offer"},
 		{http.MethodPost, "/hangup"},
 		{http.MethodGet, "/stats"},
+		{http.MethodPost, "/report"},
 	}
 	for _, route := range routes {
 		// Right network, no token.
@@ -183,8 +184,43 @@ func TestIndexServesThePageWithEchoCancellationOff(t *testing.T) {
 	}
 }
 
-func TestStatsRequiresTheTokenAndReturnsJSON(t *testing.T) {
+func TestStatsCarriesBothEndsOfThePath(t *testing.T) {
 	s := newTestServer(t)
+
+	// Nothing reported yet: the edge half must still be there.
+	body := getStats(t, s)
+	edge, ok := body["edge"].(map[string]any)
+	if !ok || edge["status"] != "idle" {
+		t.Fatalf("edge stats missing: %v", body)
+	}
+	if body["browser"] != nil {
+		t.Fatalf("browser report should be absent before the page posts one: %v", body["browser"])
+	}
+
+	// The page posts what it is actually decoding; /stats has to hand both
+	// halves back together, because "the edge sent packets" is not the same
+	// claim as "the browser heard something".
+	req := httptest.NewRequest(http.MethodPost, "/report", strings.NewReader(`{"received":123,"heard":{"rms":0.21}}`))
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set(TokenHeader, "s3cret")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("report returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body = getStats(t, s)
+	browser, ok := body["browser"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser report missing from stats: %v", body)
+	}
+	if browser["received"] != float64(123) {
+		t.Fatalf("unexpected browser report: %v", browser)
+	}
+}
+
+func getStats(t *testing.T, s *Server) map[string]any {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/stats?token=s3cret", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
 	rec := httptest.NewRecorder()
@@ -192,13 +228,11 @@ func TestStatsRequiresTheTokenAndReturnsJSON(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stats returned %d", rec.Code)
 	}
-	var body map[string]string
+	var body map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode stats: %v", err)
 	}
-	if body["status"] != "idle" {
-		t.Fatalf("unexpected stats: %v", body)
-	}
+	return body
 }
 
 func TestTLSCertificateIsGeneratedForTheBindAddress(t *testing.T) {

@@ -59,13 +59,29 @@ the `vodoge-edge` checkout, exactly as it does in the workspace. It is
 
 ## Run on the edge VM
 
+ufw is active on the edge VM with a default-deny INPUT policy, so two rules are
+needed once. Both are scoped to vmnet8 and to the VM's own address:
+
+```sh
+ssh vodoge-edge-root
+ufw allow proto tcp from 192.168.78.0/24 to 192.168.78.10 port 8443 \
+  comment "vodoge-voice phase-a local signalling"
+ufw allow proto udp from 192.168.78.0/24 to 192.168.78.10 port 40000:40100 \
+  comment "vodoge-voice phase-a RTP"
+```
+
 ```sh
 ssh vodoge-edge
 /tmp/vodoge-voice \
   -bind-ip 192.168.78.10 -bind-port 8443 \
   -operator-cidr 192.168.78.0/24 \
-  -media-interface ens160 -media-ip 192.168.78.10
+  -media-interface ens160 -media-ip 192.168.78.10 \
+  -media-port-min 40000 -media-port-max 40100
 ```
+
+Pinning the media port range is what makes the second ufw rule finite; without
+it ICE takes an ephemeral port and the rule would have to cover the whole
+ephemeral range.
 
 It prints the URL to open, including a freshly generated session token, plus the
 SHA-256 of the self-signed certificate it just made.
@@ -112,6 +128,42 @@ edge log shows no `browser track:` line.
 
 All seven counters have to move. A single stalled one localises the break
 immediately, which is the whole reason they are reported per hop.
+
+## Proving it by ear, and proving it without one
+
+"I heard it" is not reproducible and cannot be put in a receipt, so the page
+also reports what the browser is decoding: `inbound-rtp.audioLevel` and
+`totalAudioEnergy` come out of Chrome's own decoder, and `heard.peaks` is a
+peak-held spectrum taken from the decoded remote stream through a WebAudio
+analyser tap. The tap is a separate branch from the `<audio>` element, so
+measuring does not change what the operator hears.
+
+Two directions need two separate pieces of evidence, and packet counters alone
+give neither: a relay that forwarded 1900 packets of silence has the same
+counters as one carrying speech. The way to separate them is to move one knob
+at a time and watch the spectrum follow.
+
+Measured on 2026-08-24, Chrome on the VMware host against the edge VM
+(Chrome's fake capture device supplies a ~400 Hz beep as the microphone):
+
+| run | `-tone-hz` | echo | peaks the browser decoded |
+| --- | --- | --- | --- |
+| A | 1200 | on | **388-409 Hz** (-24 dB) and **1206 Hz** (-28 dB) |
+| B | 1700 | on | **409 Hz** (-22 dB) and **1701 Hz** (-27.5 dB) |
+| C | 1700 | off | **1701 Hz** (-27.5 dB) only; peak RMS 0.38 -> 0.14 |
+
+- B versus A: the high peak followed `-tone-hz`, so it is the stand-in peer's
+  tone. **The IMS-leg-to-browser direction carries audible audio.**
+- C versus B: with the echo disabled the ~400 Hz component disappeared
+  entirely, so it was the microphone audio coming back. **The
+  browser-to-IMS-leg direction carries audible audio too.**
+
+The echo is disabled in run C by setting `-echo-delay-ms` past the delay line's
+four-second buffer, which mutes it.
+
+To hear it yourself, open the page normally and listen for a 1200 Hz beep
+roughly three times per two seconds, then talk: your own voice comes back about
+0.7 s later, at nearly full level, over the top of the beeping.
 
 ## Two constraints worth restating
 

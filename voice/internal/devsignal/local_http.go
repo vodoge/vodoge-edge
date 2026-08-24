@@ -39,6 +39,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -80,6 +81,9 @@ type Server struct {
 	listener    net.Listener
 	httpServer  *http.Server
 	fingerprint string
+
+	reportMu sync.Mutex
+	report   json.RawMessage
 }
 
 // New validates the configuration and binds the listener.
@@ -142,6 +146,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/offer", s.guard(s.handleOffer))
 	mux.HandleFunc("/hangup", s.guard(s.handleHangup))
 	mux.HandleFunc("/stats", s.guard(s.handleStats))
+	mux.HandleFunc("/report", s.guard(s.handleReport))
 	return mux
 }
 
@@ -282,16 +287,48 @@ func (s *Server) handleHangup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
 }
 
+// handleReport takes the browser's own view of the call: its getStats()
+// counters and a spectrum reading of the audio it is actually decoding.
+//
+// The edge can count what it sent, but only the browser can say what came out
+// the other end, and "the edge sent packets" has never been the same claim as
+// "the operator heard something". Parking the browser's report next to the edge
+// counters means one /stats fetch shows both ends of the path.
+func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body json.RawMessage
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(w, "bad report: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.reportMu.Lock()
+	s.report = body
+	s.reportMu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// BrowserReport is the last report the page posted, or nil.
+func (s *Server) BrowserReport() json.RawMessage {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	return s.report
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.cfg.Stats == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "no call"})
-		return
+	out := map[string]any{"browser": s.BrowserReport()}
+	if s.cfg.Stats != nil {
+		out["edge"] = s.cfg.Stats()
+	} else {
+		out["edge"] = map[string]string{"status": "no call"}
 	}
-	writeJSON(w, http.StatusOK, s.cfg.Stats())
+	writeJSON(w, http.StatusOK, out)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -391,8 +428,9 @@ vowifi-go relay &rarr; stand-in IMS peer (tone + delayed echo). No IMS, no ePDG,
  <div><h2>Edge</h2><pre id="edgeStats">-</pre></div>
 </div>
 <script>
-var token = new URLSearchParams(location.search).get('token') || '';
-var pc = null, timer = null;
+var params = new URLSearchParams(location.search);
+var token = params.get('token') || '';
+var pc = null, timer = null, analyser = null, audioCtx = null;
 var stateEl = document.getElementById('state');
 
 function setState(s) { stateEl.textContent = s; }
@@ -415,7 +453,10 @@ async function start() {
   });
   pc = new RTCPeerConnection({ iceServers: [] });
   pc.oniceconnectionstatechange = function () { setState('ice: ' + pc.iceConnectionState); };
-  pc.ontrack = function (e) { document.getElementById('remote').srcObject = e.streams[0]; };
+  pc.ontrack = function (e) {
+    document.getElementById('remote').srcObject = e.streams[0];
+    listen(e.streams[0]);
+  };
   stream.getAudioTracks().forEach(function (t) { pc.addTrack(t, stream); });
   var offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -440,20 +481,104 @@ async function stop() {
   setState('idle');
 }
 
+// listen taps the decoded remote audio so the page can say what is actually
+// coming out of the speaker, not merely how many packets arrived. The tap is a
+// separate branch from the <audio> element, so measuring does not change what
+// the operator hears.
+function listen(stream) {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0;
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  // Sample far faster than the report interval and keep the loudest reading.
+  // The stand-in peer beeps for 300 ms out of every 1500 ms, so a once-a-second
+  // instantaneous sample lands in the gap four times out of five and would
+  // report silence on a perfectly healthy call.
+  hold = { rms: 0, bins: new Float32Array(analyser.frequencyBinCount).fill(-200) };
+  setInterval(sample, 40);
+}
+
+var hold = null;
+
+function sample() {
+  if (!analyser) { return; }
+  var bins = new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatFrequencyData(bins);
+  for (var i = 0; i < bins.length; i++) {
+    if (bins[i] > hold.bins[i]) { hold.bins[i] = bins[i]; }
+  }
+  var time = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(time);
+  var sum = 0;
+  for (var j = 0; j < time.length; j++) { sum += time[j] * time[j]; }
+  var rms = Math.sqrt(sum / time.length);
+  if (rms > hold.rms) { hold.rms = rms; }
+}
+
+function heard() {
+  if (!analyser || !hold) { return null; }
+  var hzPerBin = audioCtx.sampleRate / analyser.fftSize;
+  var peaks = [];
+  for (var i = 2; i < hold.bins.length - 1; i++) {
+    if (hold.bins[i] > -70 && hold.bins[i] > hold.bins[i - 1] && hold.bins[i] >= hold.bins[i + 1]) {
+      peaks.push({ hz: Math.round(i * hzPerBin), db: Math.round(hold.bins[i] * 10) / 10 });
+    }
+  }
+  peaks.sort(function (a, b) { return b.db - a.db; });
+  var out = {
+    sample_rate: audioCtx.sampleRate,
+    peak_rms: Math.round(hold.rms * 10000) / 10000,
+    peaks: peaks.slice(0, 4)
+  };
+  hold = { rms: 0, bins: new Float32Array(analyser.frequencyBinCount).fill(-200) };
+  return out;
+}
+
 async function poll() {
+  var out = null;
   if (pc) {
-    var out = { sent: 0, received: 0, codec: '', rtt: null, jitter: null };
+    out = {
+      sent: 0, received: 0, bytes_received: 0, codec: '', rtt: null, jitter: null,
+      candidate_pair: '', inbound_audio_level: null, inbound_audio_energy: null,
+      mic_audio_level: null, concealed_samples: null
+    };
     var report = await pc.getStats();
+    var pairs = {};
     report.forEach(function (s) {
       if (s.type === 'outbound-rtp' && s.kind === 'audio') { out.sent = s.packetsSent; }
+      if (s.type === 'media-source' && s.kind === 'audio') { out.mic_audio_level = s.audioLevel; }
       if (s.type === 'inbound-rtp' && s.kind === 'audio') {
         out.received = s.packetsReceived;
+        out.bytes_received = s.bytesReceived;
         out.jitter = s.jitter;
+        // audioLevel and totalAudioEnergy come out of Chrome's own decoder, so
+        // they answer "was there sound" without depending on WebAudio or on a
+        // real output device being present.
+        out.inbound_audio_level = s.audioLevel;
+        out.inbound_audio_energy = s.totalAudioEnergy;
+        out.concealed_samples = s.concealedSamples;
       }
       if (s.type === 'codec' && s.mimeType) { out.codec = s.mimeType; }
-      if (s.type === 'candidate-pair' && s.nominated) { out.rtt = s.currentRoundTripTime; }
+      if (s.type === 'local-candidate' || s.type === 'remote-candidate') { pairs[s.id] = s; }
+      if (s.type === 'candidate-pair' && s.state === 'succeeded') {
+        out.rtt = s.currentRoundTripTime;
+        out._local = s.localCandidateId;
+        out._remote = s.remoteCandidateId;
+      }
     });
+    if (out._local && pairs[out._local] && pairs[out._remote]) {
+      out.candidate_pair = pairs[out._local].address + ':' + pairs[out._local].port + ' (' + pairs[out._local].candidateType + ') -> ' +
+        pairs[out._remote].address + ':' + pairs[out._remote].port + ' (' + pairs[out._remote].candidateType + ')';
+    }
+    delete out._local;
+    delete out._remote;
+    out.heard = heard();
     document.getElementById('browserStats').textContent = JSON.stringify(out, null, 2);
+    fetch('/report?token=' + encodeURIComponent(token), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(out)
+    });
   }
   var res = await fetch('/stats?token=' + encodeURIComponent(token));
   document.getElementById('edgeStats').textContent = JSON.stringify(await res.json(), null, 2);
@@ -461,6 +586,7 @@ async function poll() {
 
 document.getElementById('start').onclick = function () { start().catch(function (e) { setState('error: ' + e); }); };
 document.getElementById('stop').onclick = function () { stop(); };
+if (params.get('auto') === '1') { start().catch(function (e) { setState('error: ' + e); }); }
 </script>
 </body>
 </html>
