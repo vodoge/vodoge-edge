@@ -1,15 +1,24 @@
 package ike
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/boa-z/vowifi-go/engine/sim"
 	"github.com/boa-z/vowifi-go/engine/swu/eapaka"
 
+	"github.com/yuanshuai1122/vodoge-edge/vowifi/internal/aka"
 	"github.com/yuanshuai1122/vodoge-edge/vowifi/internal/capture"
 )
 
@@ -274,5 +283,211 @@ func TestRecordingAKAProviderClassifiesFailures(t *testing.T) {
 	}
 	if vectors[2].Failure != capture.AKAFailureAuth {
 		t.Fatalf("auth failure recorded as %q", vectors[2].Failure)
+	}
+}
+
+// startFakeLeaseDaemon serves the AT lease protocol over a real unix socket.
+//
+// It is the daemon's side of the wire, not the bridge's: one JSON request per
+// line, one JSON answer per line, the answer shapes at.rs outcome_json produces.
+// Using a real socket rather than an in-memory pipe means the transport under
+// test here is the transport the edge box uses.
+//
+// The stand-in card secret is the fixture's testUSIMKey, the same one the fake
+// ePDG holds, so a success really does have to travel RAND/AUTN out and
+// RES/CK/IK back across the socket for the ladder to complete.
+func startFakeLeaseDaemon(t *testing.T, refuse bool) (*aka.Provider, func() int) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "lease")
+	if err != nil {
+		t.Skipf("no temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "at-lease.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("unix sockets unavailable here: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	var mu sync.Mutex
+	calls := 0
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				reader := bufio.NewReader(conn)
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				var request struct {
+					Op   string `json:"op"`
+					RAND string `json:"rand"`
+					AUTN string `json:"autn"`
+				}
+				if err := json.Unmarshal([]byte(line), &request); err != nil {
+					return
+				}
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				// The daemon only ever gets asked to authenticate.
+				if request.Op != "authenticate" {
+					_, _ = conn.Write([]byte(`{"ok":false,"error":"bad_request","message":"unexpected op"}` + "\n"))
+					return
+				}
+				if refuse {
+					_, _ = conn.Write([]byte(`{"ok":true,"op":"authenticate",` +
+						`"outcome":"authentication_failure","sw":"9862",` +
+						`"detail":"card rejected the challenge: incorrect MAC (SW 9862)"}` + "\n"))
+					return
+				}
+				randBytes, err1 := hex.DecodeString(request.RAND)
+				autnBytes, err2 := hex.DecodeString(request.AUTN)
+				if err1 != nil || err2 != nil {
+					_, _ = conn.Write([]byte(`{"ok":false,"error":"bad_request","message":"not hex"}` + "\n"))
+					return
+				}
+				vector := usimVector(testUSIMKey, randBytes, autnBytes)
+				answer, _ := json.Marshal(map[string]any{
+					"ok": true, "op": "authenticate", "outcome": "success",
+					"res": strings.ToUpper(hex.EncodeToString(vector.RES)),
+					"ck":  strings.ToUpper(hex.EncodeToString(vector.CK)),
+					"ik":  strings.ToUpper(hex.EncodeToString(vector.IK)),
+				})
+				_, _ = conn.Write(append(answer, '\n'))
+			}()
+		}
+	}()
+
+	provider := &aka.Provider{SocketPath: path, IMEI: "867018069514820", Timeout: 10 * time.Second}
+	return provider, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+}
+
+// TestLadderRunsWithTheCardBehindTheLeaseSocket is the T041c acceptance test
+// that does not need hardware: the whole IKE_AUTH ladder completes with the only
+// source of RES/CK/IK being a socket, exactly as it will be on the edge box.
+//
+// It is not a substitute for the bench evidence and is not meant to be. What it
+// pins is the part the bench cannot show cheaply - that the bridge is
+// wire-compatible with the ladder, that the challenge really crosses the socket,
+// and that the keys the AUTH payload is built from came back through it.
+func TestLadderRunsWithTheCardBehindTheLeaseSocket(t *testing.T) {
+	l := startLadder(t, nil, nil, nil)
+	bridge, calls := startFakeLeaseDaemon(t, false)
+
+	cfg := l.authConfig()
+	cfg.SIM = bridge
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := l.runner.Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("IKE_AUTH over the lease bridge: %v", err)
+	}
+	if result.ChildSA == nil {
+		t.Fatalf("no CHILD_SA")
+	}
+	if calls() != 1 {
+		t.Fatalf("the lease socket was asked %d times, want 1", calls())
+	}
+	if l.provider.callCount() != 0 {
+		t.Fatalf("the in-process test provider answered %d challenges; the socket was supposed to",
+			l.provider.callCount())
+	}
+	if !l.epdg.clientAuthVerified {
+		t.Fatalf("the ePDG did not verify the AUTH built from keys that came off the socket")
+	}
+}
+
+// TestLeaseRefusalBecomesAnAuthenticationRejectOnTheWire is the bench outcome,
+// end to end.
+//
+// 9862 is what both eUICCs on the bench answer to a synthetic AUTN (T033, T047).
+// This drives that exact daemon answer through the bridge and asserts what
+// reaches the network: an EAP-Response/AKA-Authentication-Reject, observed by
+// the responder after decrypting it, and a named error rather than a retry.
+func TestLeaseRefusalBecomesAnAuthenticationRejectOnTheWire(t *testing.T) {
+	l := startLadder(t, nil, nil, nil)
+	bridge, calls := startFakeLeaseDaemon(t, true)
+
+	cfg := l.authConfig()
+	cfg.SIM = bridge
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := l.runner.Run(ctx, cfg)
+	if !errors.Is(err, ErrAKAAuthFailure) {
+		t.Fatalf("err = %v, want ErrAKAAuthFailure", err)
+	}
+	if result.ChildSA != nil {
+		t.Fatalf("a CHILD_SA came out of a card refusal")
+	}
+	if l.epdg.authRejects != 1 {
+		t.Fatalf("the ePDG saw %d Authentication-Reject packets, want 1", l.epdg.authRejects)
+	}
+	if l.epdg.syncFailures != 0 {
+		t.Fatalf("9862 was misclassified as a resynchronisation")
+	}
+	if calls() != 1 {
+		t.Fatalf("the lease socket was asked %d times; a refusal must not be retried", calls())
+	}
+}
+
+// TestLeaseBridgeTimeoutIsNotACardVerdict closes the loop on the deadline.
+//
+// A stalled bridge must not look like either card answer, because eapaka turns
+// those into packets: sim.ErrSyncFailure into an AT_AUTS resynchronisation and
+// sim.ErrAuthFailure into a reject. Neither would be true, and both would be
+// MAC-correct and therefore believed.
+func TestLeaseBridgeTimeoutIsNotACardVerdict(t *testing.T) {
+	dir, err := os.MkdirTemp("", "lease")
+	if err != nil {
+		t.Skipf("no temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "at-lease.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("unix sockets unavailable here: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// Accept and never answer: the module is busy elsewhere.
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+
+	bridge := &aka.Provider{
+		SocketPath: path,
+		Timeout:    200 * time.Millisecond,
+		Grace:      200 * time.Millisecond,
+	}
+	started := time.Now()
+	_, err = bridge.CalculateAKA(bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16))
+	if !errors.Is(err, aka.ErrTimeout) {
+		t.Fatalf("err = %v, want aka.ErrTimeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the bound did not hold: %s", elapsed)
+	}
+	if errors.Is(err, sim.ErrAuthFailure) || errors.Is(err, sim.ErrSyncFailure) {
+		t.Fatalf("a stall was reported as a card verdict: %v", err)
+	}
+	// And the wrapper above it keeps that property.
+	if errors.Is(err, ErrAKADeadlineExceeded) {
+		t.Fatalf("the bridge error was confused with the wrapper's: %v", err)
 	}
 }

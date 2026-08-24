@@ -34,6 +34,7 @@ The full seam inventory, with the evidence behind each claim, is in
 | Package | Contents |
 | --- | --- |
 | `internal/ike` | the single UDP socket, the DH groups, the proposal builder, the `IKE_SA_INIT` runner, the `IKE_AUTH` runner and the EAP-AKA driver |
+| `internal/aka` | the bridge from `sim.AKAProvider` to the real USIM, over the edge daemon's AT lease socket |
 | `internal/capture` | pcap recording, offline replay of raw IKE/ESP datagrams, and AUTH payload extraction |
 | `cmd/vodoge-ike-probe` | one-shot probe against an ePDG, with capture, replay and AUTH export modes |
 
@@ -274,13 +275,165 @@ abandoned call keeps running.** Its goroutine cannot be cancelled because the
 interface offers no way to ask. It writes to a buffered channel and exits on its
 own, and it works on private copies of RAND/AUTN so it cannot scribble on a
 buffer the caller moved past - but it still occupies the card. A real bridge
-needs its own serialisation on top, and that is T041c's problem; this wrapper
-only guarantees that the IKE side stops waiting.
+needs its own serialisation on top; this wrapper only guarantees that the IKE
+side stops waiting. T041c built that bridge and its own bound - see
+[the card bridge](#the-card-bridge-internalaka), which is where the question
+"what does the *next* challenge meet" is answered.
 
 A timeout must not be mistaken for a card refusal:
 `ErrAKADeadlineExceeded` is neither `sim.ErrSyncFailure` nor
 `sim.ErrAuthFailure`, so eapaka does not manufacture an AT_AUTS out of a stall.
 There is a test for exactly that.
+
+### The card bridge: `internal/aka`
+
+`aka.Provider` implements `sim.AKAProvider` by asking the edge daemon, over a
+0600 unix socket under `/run` speaking one JSON object per line
+(`edge-modem/src/at.rs:806-820`):
+
+```json
+{"op":"authenticate","imei":"867018069514820","rand":"<32 hex>","autn":"<32 hex>"}
+```
+
+**It builds no APDU and classifies no status word.** All of that already exists
+on the Rust side and was measured on the bench by T047: the FCP tag-84 gate that
+refuses to AUTHENTICATE against whatever else might be selected, the
+basic-channel `00 88 00 81 22 10<RAND>10<AUTN> 00`, the 61xx/6Cxx recovery, and
+the mapping from status word to outcome. Redoing any of it here would create a
+second source of truth for the one thing on this path that cannot be settled by
+reading code - what the card actually says - and only one of the two copies
+would ever meet hardware.
+
+The three outcome labels map onto the three shapes `sim` already has:
+
+| daemon outcome | what this package returns |
+| --- | --- |
+| `success` | `sim.AKAResult{RES, CK, IK}`, no error (`kc` is dropped; EAP-AKA has no use for it) |
+| `sync_failure` | `sim.NewSyncFailureError(auts)`, empty result, so eapaka's AUTS-carrier path builds the `AT_AUTS` |
+| `authentication_failure` | `sim.NewMACFailureError()` wrapped with the raw status word, so eapaka builds the Authentication-Reject |
+| `{"ok":false,...}` | `ErrLeaseRefused`, **never** either of the above |
+
+That last row is the safety property. A broken pipe, a `6E00` from `STATUS`, an
+unmapped status word: none of those is the card rejecting a challenge, and
+`eapaka.BuildAKAFailureResponse` turns `sim.ErrAuthFailure` and
+`sim.ErrSyncFailure` into MAC-correct packets. Forging either out of a transport
+fault would put a message on the wire that the card never authorised, and the
+network would believe it.
+
+#### Only `authenticate`, never `execute_at`
+
+The lease speaks two operations (`AtLease`, `edge-modem/src/at.rs:726-740`).
+`execute_at` runs an arbitrary AT command, which is total control of the module -
+USB re-enumeration, messaging, profile switching. This package sends
+`authenticate` and nothing else, and that is asserted rather than asserted-in-a-
+comment: `TestProviderOnlyEverSendsAuthenticate` reads back every request line
+the package produced and fails on any other `op`, on the substring `execute_at`,
+and on any field outside `{op, imei, rand, autn}`. `vodoge-ike-probe` has no flag
+that could ask for anything else and must not grow one.
+
+The transport is a unix socket on the box. It is never a TCP listener and never
+crosses a machine boundary. The socket is mode 0600 and owned by root, so the
+caller runs as root; a non-root caller gets `aka.ErrDial`, not a hang.
+
+#### The hard deadline, and what the *next* challenge meets
+
+`sim.AKAProvider.CalculateAKA` has no context and no cancellation, so the bound
+has to be enforced from inside the bridge. `Provider.Timeout` (default 15s) is a
+socket deadline over the whole call - slot, dial, write, read - and it is set
+below `ike.DefaultAKATimeout` (20s) on purpose, so the error that reaches the IKE
+state machine names the socket and the phase instead of the outer wrapper's
+generic "something below me is slow". The outer bound stays as a backstop.
+
+A bound is needed because the far side has none worth relying on: the Rust
+arbiter's `acquire()` has no timeout at all (`at.rs:646-666`), the per-command
+ceiling is `MAX_LEASE_TIMEOUT` = 300s, and a wedged holder is unbounded. T047
+watched a real AKA challenge wait **41.5 seconds** behind a slow poll. The ePDG
+gave up long before that.
+
+**The abandoned exchange keeps running.** This is the part that leaves ghosts, so
+it is spelled out:
+
+1. **The port stays held.** The daemon is blocked in `acquire()` or in the
+   AUTHENTICATE itself and cannot be told we left. The next challenge queues
+   behind it and will also time out unless the holder finished meanwhile - which
+   is the correct report, because the card genuinely is unavailable.
+2. **Nothing is retried.** One call, one request line. A retry piles a second
+   AUTHENTICATE onto a port that is already stuck, and an AUTHENTICATE the card
+   *accepts* advances SQN - so a retry on a timeout can desynchronise the card
+   against the network, and that surfaces much later as an AT_AUTS storm with
+   nothing pointing back here.
+3. **A late answer can never be read as somebody else's.** Every call gets its
+   own connection. On a pooled connection, a request that timed out and a reply
+   that landed a millisecond later would leave the stream one message out of
+   step, and every subsequent challenge would be answered with the previous
+   challenge's RES: a tunnel that comes up on the wrong keys and looks like a
+   carrier problem.
+4. **The daemon's connection budget cannot be exhausted from here.** An abandoned
+   connection still occupies one of the daemon's `MAX_LEASE_CLIENTS` = 8 slots
+   until its thread unblocks, and the console shares that budget. The abandoned
+   connection is therefore handed to a reaper rather than closed blind: the
+   reaper reads the late answer, reports it through `Observe`, and only then
+   frees an in-flight slot. `MaxInFlight` (default 4) caps how many may be
+   outstanding; past that, a challenge is refused immediately with `ErrBusy`
+   rather than queued. After `Grace` (default 5m) the reaper gives up and closes
+   anyway, so a permanently wedged holder costs a slot, not a goroutine.
+
+`ErrTimeout` and `ErrBusy` are neither `sim.ErrSyncFailure` nor
+`sim.ErrAuthFailure`, so a stall cannot be laundered into a card verdict. Tests
+cover each of these; the deadline ones were checked by mutation (removing the
+socket deadline hangs `TestProviderStopsWaitingAtItsDeadline`; mapping `ok:false`
+onto `sim.NewMACFailureError` reddens `TestProviderNeverForgesACardRefusal`).
+
+#### Bench forensics: `-aka-selftest`
+
+```sh
+# run as root: the lease socket is 0600
+/root/vodoge-ike-probe -aka-selftest -aka-imei 867018069514820
+/root/vodoge-ike-probe -aka-selftest -aka-imei 867018069514820 \
+    -aka-rand 000102030405060708090A0B0C0D0E0F \
+    -aka-autn 0000000000018000A1A2A3A4A5A6A7A8
+```
+
+It touches no network. It does touch the card: a challenge the card accepts
+advances SQN, which is normal and expected by the network, but it is why this is
+not a thing to run in a loop. RES is printed in full (it travels inside EAP
+anyway); CK and IK are printed only as lengths, so a receipt built from this
+output is safe to paste.
+
+What T069 measured on `867018069514820` (WEBBING profile, EC20-CE), first hand:
+
+| AUTN | shape | answer |
+| --- | --- | --- |
+| `101112131415161718191A1B1C1D1E1F` | T033/T047 synthetic, AMF separation bit clear | `9862` |
+| `0000000000018000A1A2A3A4A5A6A7A8` | well formed, **AMF `8000`**, EPS separation bit set | `9862` |
+| `0000000000010000A1A2A3A4A5A6A7A8` | well formed, AMF `0000`, UMTS AKA | `9862` |
+| `FFFFFFFFFFFE8000A1A2A3A4A5A6A7A8` | SQN far in the future | `9862` |
+| `000...000` / `FFF...FFF` | degenerate | `9862` |
+| `0000000000018000A1A2A3A4A5A6A7A8` with a fresh RAND | same AUTN, different RAND | `9862` |
+
+So on this card the refusal is always in the **status word**, never `9000` with
+body tag `DD`; and the MAC is checked before the sequence number, because a
+far-future SQN still answers `9862` rather than a `DC` resynchronisation. That
+retires the open question T047 recorded - for the *refusal* half of it.
+
+**What is still untested, and cannot be tested here:** a challenge whose MAC is
+correct. K lives only in the card and in the operator's AuC, so no AUTN made on
+this bench can verify. The `DB` success body and the `DC` synchronisation body
+have therefore still never been seen from real hardware; the parsers for them are
+covered by unit tests only. That is T041d's to close, against a real ePDG.
+
+`867018069509705` (China Mobile, not an eUICC) answers `6E00` to the `STATUS`
+that reads the FCP, so the gate refuses it with `status_refused` before any
+AUTHENTICATE is sent - and the bridge reports that as "not a card verdict",
+which is the behaviour that matters. Verified on hardware, unchanged from T047.
+
+The deadline was verified on hardware too, three ways: against the real daemon
+with a 5 ms bound (gave up at 5 ms, one request, and the reaper then collected
+the abandoned exchange's real answer - `9862` at 28 ms - proving it had kept
+running); with the very next challenge succeeding normally at 28 ms; and against
+a socket that accepts and never answers, where six challenges at a 400 ms bound
+produced four timeouts and two immediate `ErrBusy` refusals, with the stall
+server confirming it had accepted exactly four connections.
 
 ### The fake ePDG is encrypted now
 
@@ -368,10 +521,11 @@ says so instead of dialling a bogus address. Pass an address resolved out of ban
 (T038 used DoH) when that happens.
 
 `IKE_SA_INIT` carries no identity, so a successful probe proves reachability and
-algorithm selection and nothing more. The probe deliberately does not run a live
-`IKE_AUTH`: that needs a real USIM, which is T041c, and a real ePDG, which is
-T041d. It does replay a recorded `IKE_AUTH` ladder, and it can export the AUTH
-payloads out of one.
+algorithm selection and nothing more. The probe still does not run a live
+`IKE_AUTH`: the USIM half of that exists now (`-aka-selftest`, T041c), but the
+real ePDG half is T041d. It does replay a recorded `IKE_AUTH` ladder, it can
+export the AUTH payloads out of one, and it can put one challenge to a real card
+without touching the network.
 
 ## Tests
 
@@ -389,6 +543,14 @@ the real socket. `TestAuthRunnerWalksTheWholeLadder` and
 `TestAuthRunnerRejectsEAPSuccessSharingTheChildSA` (T041b) do the stronger
 version: the fixture is encrypted, and the second one makes the fake do the wrong
 thing on purpose so the refusal is the runner's, not the fixture's.
+
+`TestLadderRunsWithTheCardBehindTheLeaseSocket` and
+`TestLeaseRefusalBecomesAnAuthenticationRejectOnTheWire` (T041c) run the whole
+ladder with a fake lease daemon on a real unix socket as the only source of
+RES/CK/IK, and assert on the responder's side. They are not a substitute for the
+bench evidence in the T041 note; what they pin is the part the bench cannot show
+cheaply - that the bridge is wire-compatible with the ladder, and that a `9862`
+from the socket leaves as an Authentication-Reject rather than as a retry.
 
 `-race` is not available in this environment: the Windows Go toolchain has no C
 compiler, and the WSL Go is 1.24 against a go1.26.3 module. Following T041a, the

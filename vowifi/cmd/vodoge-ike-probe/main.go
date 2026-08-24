@@ -14,6 +14,8 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -26,8 +28,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/boa-z/vowifi-go/engine/sim"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 
+	"github.com/yuanshuai1122/vodoge-edge/vowifi/internal/aka"
 	"github.com/yuanshuai1122/vodoge-edge/vowifi/internal/capture"
 	"github.com/yuanshuai1122/vodoge-edge/vowifi/internal/ike"
 )
@@ -54,6 +58,14 @@ func run() error {
 		strictReplay  = flag.Bool("strict-replay", true, "in replay mode, require our request bytes to match the recording exactly")
 		exportAuth    = flag.String("export-auth", "", "in replay mode, write every AUTH payload body to this directory as .auth.bin files")
 		maxCandidates = flag.Int("max-candidates", 4, "how many resolved addresses to try")
+		akaSelftest   = flag.Bool("aka-selftest", false, "ask the AT lease socket for one AKA challenge and print what the card said; touches no network")
+		akaSocket     = flag.String("aka-socket", "", "AT lease socket path (default: $VODOGE_AT_LEASE_SOCKET, then "+aka.DefaultSocketPath+")")
+		akaIMEI       = flag.String("aka-imei", "", "which module to use; empty lets the daemon choose")
+		akaTimeout    = flag.Duration("aka-timeout", aka.DefaultTimeout, "hard upper bound on one challenge")
+		akaGrace      = flag.Duration("aka-grace", aka.DefaultGrace, "how long to keep waiting for the answer to an abandoned challenge, for the record")
+		akaRAND       = flag.String("aka-rand", defaultAKARAND, "RAND as 32 hex digits")
+		akaAUTN       = flag.String("aka-autn", defaultAKAAUTN, "AUTN as 32 hex digits")
+		akaRepeat     = flag.Int("aka-repeat", 1, "how many challenges to send")
 	)
 	flag.Parse()
 
@@ -65,6 +77,17 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *akaSelftest {
+		return runAKASelftest(akaSelftestParams{
+			socket:  *akaSocket,
+			imei:    *akaIMEI,
+			timeout: *akaTimeout,
+			grace:   *akaGrace,
+			rand:    *akaRAND,
+			autn:    *akaAUTN,
+			repeat:  *akaRepeat,
+		})
+	}
 	if *replayPath != "" {
 		return runReplay(ctx, *replayPath, *strictReplay, *exportAuth)
 	}
@@ -421,4 +444,152 @@ func joinAddrs(addrs []*net.UDPAddr) string {
 		parts = append(parts, a.String())
 	}
 	return strings.Join(parts, ", ")
+}
+
+// The synthetic challenge T033 and T047 used on the bench. Both eUICCs answered
+// 9862 to it, so it is the pair to reach for when the question is "is the path
+// alive", as opposed to "what does this card do with a well-formed AUTN".
+const (
+	defaultAKARAND = "000102030405060708090A0B0C0D0E0F"
+	defaultAKAAUTN = "101112131415161718191A1B1C1D1E1F"
+)
+
+type akaSelftestParams struct {
+	socket  string
+	imei    string
+	timeout time.Duration
+	grace   time.Duration
+	rand    string
+	autn    string
+	repeat  int
+}
+
+// runAKASelftest asks the card one question and prints the answer verbatim.
+//
+// This is the forensics mode. The interesting evidence on this path is not
+// "did it work" - it is which status word a particular card produces for a
+// particular AUTN, because that mapping is the one thing on the whole path that
+// cannot be established by reading a specification. The three sources that
+// disagree about 98xx all sound confident.
+//
+// It sends `authenticate` and nothing else. The lease also speaks `execute_at`,
+// which would run any AT command at all; this tool has no way to ask for that
+// and must not grow one.
+//
+// It touches no network. A challenge does touch the card: an AUTHENTICATE the
+// card accepts advances SQN, which is normal and is what the network expects,
+// but it is the reason this is not something to run in a loop for fun.
+func runAKASelftest(p akaSelftestParams) error {
+	randBytes, err := hex.DecodeString(strings.TrimSpace(p.rand))
+	if err != nil || len(randBytes) != 16 {
+		return fmt.Errorf("-aka-rand must be 32 hex digits: %q", p.rand)
+	}
+	autnBytes, err := hex.DecodeString(strings.TrimSpace(p.autn))
+	if err != nil || len(autnBytes) != 16 {
+		return fmt.Errorf("-aka-autn must be 32 hex digits: %q", p.autn)
+	}
+	if p.repeat < 1 {
+		p.repeat = 1
+	}
+
+	// A challenge that timed out is not over: the daemon is still running it and
+	// will answer into a connection the caller has walked away from. Waiting for
+	// that answer before exiting is the only way to record what the abandoned
+	// exchange actually did, and "what did the abandoned exchange do" is the
+	// question this whole mode exists to answer.
+	late := make(chan struct{}, 64)
+	provider := &aka.Provider{
+		SocketPath: p.socket,
+		IMEI:       p.imei,
+		Timeout:    p.timeout,
+		Grace:      p.grace,
+		Observe: func(o aka.Observation) {
+			printAKAObservation(o)
+			if o.Late {
+				late <- struct{}{}
+			}
+		},
+	}
+	fmt.Printf("AT lease     %s\n", provider.SocketPathOrDefault())
+	fmt.Printf("module       %s\n", orAny(p.imei))
+	fmt.Printf("deadline     %s (grace %s)\n", p.timeout, p.grace)
+	fmt.Printf("RAND         %s\n", strings.ToUpper(hex.EncodeToString(randBytes)))
+	fmt.Printf("AUTN         %s\n", strings.ToUpper(hex.EncodeToString(autnBytes)))
+
+	var failures, abandoned int
+	for i := 0; i < p.repeat; i++ {
+		fmt.Printf("\n--- challenge %d/%d ---\n", i+1, p.repeat)
+		result, err := provider.CalculateAKA(randBytes, autnBytes)
+		switch {
+		case err == nil:
+			// RES goes on the wire inside EAP, so printing it costs nothing.
+			// CK and IK are session key material and only their lengths are
+			// printed: a receipt that quoted them would be a receipt nobody
+			// could safely paste anywhere.
+			fmt.Printf("  verdict    accepted; RES %s, CK %d octets, IK %d octets\n",
+				strings.ToUpper(hex.EncodeToString(result.RES)), len(result.CK), len(result.IK))
+		case errors.Is(err, sim.ErrAuthFailure):
+			fmt.Printf("  verdict    the card rejected the challenge -> sim.ErrAuthFailure "+
+				"(eapaka sends EAP-Response/AKA-Authentication-Reject)\n    %v\n", err)
+		case errors.Is(err, sim.ErrSyncFailure):
+			var carrier interface{ AUTS() []byte }
+			auts := []byte(nil)
+			if errors.As(err, &carrier) {
+				auts = carrier.AUTS()
+			}
+			fmt.Printf("  verdict    resynchronisation -> sim.ErrSyncFailure, AUTS %s "+
+				"(eapaka sends AT_AUTS)\n", strings.ToUpper(hex.EncodeToString(auts)))
+		case errors.Is(err, aka.ErrTimeout):
+			failures++
+			abandoned++
+			fmt.Printf("  verdict    NO ANSWER within the bound. This is not a card verdict and is\n" +
+				"             deliberately not retried; the exchange is still running on the daemon,\n" +
+				"             so the next challenge may queue behind it.\n")
+			fmt.Printf("    %v\n", err)
+		default:
+			failures++
+			fmt.Printf("  verdict    not a card verdict: %v\n", err)
+		}
+	}
+	for i := 0; i < abandoned; i++ {
+		fmt.Printf("\nwaiting up to %s for the answer to an abandoned challenge...\n", p.grace)
+		select {
+		case <-late:
+		case <-time.After(p.grace + time.Second):
+			fmt.Printf("  it never came. The module is still held by whatever is in front of it.\n")
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d of %d challenge(s) did not reach the card", failures, p.repeat)
+	}
+	return nil
+}
+
+// printAKAObservation prints the daemon's own words, uninterpreted. This is the
+// line a receipt quotes.
+func printAKAObservation(o aka.Observation) {
+	tag := "answer"
+	if o.Late {
+		tag = "LATE answer to an abandoned challenge"
+	}
+	fmt.Printf("  %s after %s\n", tag, o.Elapsed.Round(time.Millisecond))
+	if o.Outcome != "" {
+		fmt.Printf("    outcome  %s\n", o.Outcome)
+	}
+	if o.StatusWord != "" {
+		fmt.Printf("    sw       %s\n", o.StatusWord)
+	}
+	if o.Detail != "" {
+		fmt.Printf("    detail   %s\n", o.Detail)
+	}
+	if o.ErrorCode != "" {
+		fmt.Printf("    error    %s: %s\n", o.ErrorCode, o.Message)
+	}
+}
+
+func orAny(imei string) string {
+	if strings.TrimSpace(imei) == "" {
+		return "(daemon's choice)"
+	}
+	return imei
 }
