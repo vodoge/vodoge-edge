@@ -646,6 +646,17 @@ func (r *ReplayTransport) ExchangeIKE(ctx context.Context, request []byte) ([]by
 	if r.opts.RequireExactRequests && !matched {
 		return nil, fmt.Errorf("%w: no recorded transmission matches request %d", ErrReplayMismatch, len(r.sent))
 	}
+	// The response is matched on the IKE header, not taken as "the next inbound
+	// datagram".
+	//
+	// The live socket matches (ikev2.Socket.ExchangeIKE), so a recording made
+	// against a real ePDG can and does contain datagrams the live run dropped:
+	// T041d's first successful capture holds a late duplicate of an earlier
+	// response, which the live socket counted as one unmatched drop and ignored.
+	// A replay that handed that duplicate back as the answer to the next request
+	// fails with "unexpected header", i.e. the replay contradicts the run it is
+	// a recording of. Reproducing the matching is what makes the replay a replay.
+	requestHeader, headerErr := ikev2.ParseHeader(request)
 	for r.cursor < len(r.records) {
 		rec := r.records[r.cursor]
 		r.cursor++
@@ -656,9 +667,35 @@ func (r *ReplayTransport) ExchangeIKE(ctx context.Context, request []byte) ([]by
 		if r.opts.UseNonESPMarker && len(payload) >= 4 {
 			payload = payload[4:]
 		}
+		if headerErr == nil && !replayMatchesResponse(requestHeader, payload) {
+			continue
+		}
 		return append([]byte(nil), payload...), nil
 	}
 	return nil, fmt.Errorf("%w: no response recorded after request %d", ErrReplayExhausted, len(r.sent))
+}
+
+// replayMatchesResponse is the live socket's response-matching rule, restated.
+//
+// It is restated rather than shared because ike imports capture and the
+// dependency cannot go the other way. That makes it two copies of one rule,
+// which is a cost; the alternative was a replay that silently disagrees with
+// the transport it replays, which is worse and was already observed.
+func replayMatchesResponse(request ikev2.Header, raw []byte) bool {
+	resp, err := ikev2.ParseHeader(raw)
+	if err != nil {
+		return false
+	}
+	if resp.Flags&ikev2.FlagResponse == 0 {
+		return false
+	}
+	if resp.InitiatorSPI != request.InitiatorSPI {
+		return false
+	}
+	if resp.MessageID != request.MessageID {
+		return false
+	}
+	return resp.ExchangeType == request.ExchangeType
 }
 
 // SendESPPacket satisfies swu.ESPPacketTransport.

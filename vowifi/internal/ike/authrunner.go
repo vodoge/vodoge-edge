@@ -169,6 +169,16 @@ type AuthRound struct {
 	ResponseBytes []byte
 }
 
+// AuthNotify is one notify the responder put in an IKE_AUTH response.
+type AuthNotify struct {
+	MessageID uint32
+	Type      uint16
+	Data      []byte
+	// Malformed holds the payload body when it would not parse as a notify at
+	// all, because that is also a finding.
+	Malformed []byte
+}
+
 // AuthDetail is packet-level evidence about what the ladder actually did.
 //
 // ikev2.FullAuthResult cannot carry it, and reading the source is not evidence:
@@ -188,6 +198,9 @@ type AuthDetail struct {
 	PeerIDBody []byte
 	// Rounds is one entry per IKE_AUTH exchange.
 	Rounds []AuthRound
+	// ResponseNotifies is every notify the responder sent, in order, error
+	// notifies included. This is what names the rejection.
+	ResponseNotifies []AuthNotify
 	// EAPSuccessMessageID and ChildSAMessageID must differ. That they do is the
 	// core claim of this card.
 	EAPSuccessMessageID uint32
@@ -663,10 +676,10 @@ func (s *authSession) exchange(ctx context.Context, payloads []ikev2.Payload) ([
 		h.ExchangeType != ikev2.ExchangeIKE_AUTH || h.MessageID != messageID || h.Flags&ikev2.FlagResponse == 0 {
 		return nil, nil, nil, fmt.Errorf("%w: unexpected header on message %d", ErrInvalidAuthResponse, messageID)
 	}
-	if err := ikev2.FirstNotifyError(inner); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: message %d: %w", ErrInvalidAuthResponse, messageID, err)
-	}
-	s.messageID = messageID + 1
+	// Both of these happen before FirstNotifyError, on purpose. A rejection is
+	// carried by a notify, so the exchange that gets rejected is precisely the
+	// one whose record must survive - and until T041d the only rejections this
+	// package had ever seen were the ones its own fixture produced.
 	s.detail.Rounds = append(s.detail.Rounds, AuthRound{
 		MessageID:     messageID,
 		SentPayloads:  payloadTypes(payloads),
@@ -677,7 +690,39 @@ func (s *authSession) exchange(ctx context.Context, payloads []ikev2.Payload) ([
 		RequestBytes:  append([]byte(nil), reqBytes...),
 		ResponseBytes: append([]byte(nil), respBytes...),
 	})
+	s.noteNotifies(messageID, inner)
+	if err := ikev2.FirstNotifyError(inner); err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: message %d: %w", ErrInvalidAuthResponse, messageID, err)
+	}
+	s.messageID = messageID + 1
 	return append([]byte(nil), reqBytes...), append([]byte(nil), respBytes...), inner, nil
+}
+
+// noteNotifies keeps every notify the responder sent, error or not.
+//
+// ikev2.FirstNotifyError turns an error notify into a Go error and the type
+// number ends up inside the message text. That is fine to read and useless to
+// assert on, and "which notify did the ePDG reject us with" is the single most
+// load-bearing fact in a failed first contact.
+func (s *authSession) noteNotifies(messageID uint32, inner []ikev2.Payload) {
+	for _, p := range inner {
+		if p.Type != ikev2.PayloadNotify {
+			continue
+		}
+		n, err := ikev2.ParseNotify(p.Body)
+		if err != nil {
+			s.detail.ResponseNotifies = append(s.detail.ResponseNotifies, AuthNotify{
+				MessageID: messageID,
+				Malformed: p.Body,
+			})
+			continue
+		}
+		s.detail.ResponseNotifies = append(s.detail.ResponseNotifies, AuthNotify{
+			MessageID: messageID,
+			Type:      n.NotifyType,
+			Data:      append([]byte(nil), n.NotificationData...),
+		})
+	}
 }
 
 func (s *authSession) header(messageID uint32) ikev2.Header {

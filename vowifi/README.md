@@ -3,11 +3,18 @@
 IKEv2 / ESP transport and IKE_SA_INIT for the VoWiFi tunnel, injected into the
 read-only `vowifi-go` mirror rather than forked from it.
 
-This is T041a plus T041b: the transport, `IKE_SA_INIT`, and the whole `IKE_AUTH`
-loop with RFC 5998 EAP-only authentication. The real USIM bridge (T041c), the
-live ePDG contact (T041d) and the ESP data plane plus IKE fragmentation (T041e)
-are still to come; the AKA provider here is an injected test implementation and
-nothing in this module has ever touched hardware or a carrier.
+This is T041a through T041d: the transport, `IKE_SA_INIT`, the whole `IKE_AUTH`
+loop with RFC 5998 EAP-only authentication, the real USIM bridge, and the first
+live contact with a carrier. The ESP data plane plus IKE fragmentation (T041e)
+is still to come.
+
+**On 2026-08-24 this stack got an EAP-AKA Challenge out of T-Mobile US, answered
+it with the eUICC on the bench, and got EAP-Success back.** That is goal oracle
+criterion 2b, and the evidence is in
+`docs/goals/vodoge-vowifi-call/notes/T072-first-epdg-contact.md`. The tunnel did
+*not* come up: the ePDG rejected the final exchange with
+`INTERNAL_ADDRESS_FAILURE`, which is a configuration-payload problem and belongs
+to criterion 4. Do not read "criterion 2b holds" as "the tunnel works".
 
 ## Why a separate module, and why no fork
 
@@ -170,6 +177,24 @@ compatibility choice, not a correctness one; it follows the RFC 5998 section 2
 example while keeping the mirror's CP placement. A missing IDr is an error
 (`ErrMissingResponderID`), not a quieter request - the same decision T041a made
 about `NAT_DETECTION`, for the same reason.
+
+**T041d measured that IDr and it is wrong for T-Mobile US.** Five distinct GSLB
+nodes on 2026-08-24: every `IKE_AUTH` carrying an IDr came back
+`AUTHENTICATION_FAILED` at message 1, and every one without got an EAP-AKA
+Challenge. Two different, defensible values were tried - the card-derived FQDN
+and the canonical name it resolves to - and both were refused, so this ePDG
+objects to the payload being there rather than to what is in it. Note that its
+*own* IDr is byte-for-byte the card-derived name, so this is not a naming
+mismatch.
+
+So `ike.LiveConfig.ResponderID` sends nothing when it is left zero, the probe's
+`-idr` defaults to `none`, and `TestTheLiveDefaultSendsNoIDr` pins it.
+`AuthRunner`'s own default is unchanged: it is the lower-level component with
+its own contract, and `-idr card` / `-idr dns` still reproduce the table above.
+
+This is the single most expensive thing T041d learned, because
+`AUTHENTICATION_FAILED` reads exactly like "the operator does not accept this
+SIM" and it was in fact "delete one payload".
 
 The ladder:
 
@@ -422,6 +447,19 @@ this bench can verify. The `DB` success body and the `DC` synchronisation body
 have therefore still never been seen from real hardware; the parsers for them are
 covered by unit tests only. That is T041d's to close, against a real ePDG.
 
+**T041d closed it.** On 2026-08-24 T-Mobile US produced a Challenge whose MAC
+*was* correct, and this card answered it:
+
+```
+AT_RAND  00B4149F82C51FC005873EFF0B3EF595
+AT_AUTN  E0F1271A6ACD00000369EEA305810731
+RES      E225E8F895564EAD          (CK and IK 16 octets each, not printed)
+```
+
+`outcome success` from the daemon in 155 ms, and EAP-Success from the operator
+in the next message. The `DB` success body has now been seen from real hardware;
+the `DC` resynchronisation body still has not.
+
 `867018069509705` (China Mobile, not an eUICC) answers `6E00` to the `STATUS`
 that reads the FCP, so the gate refuses it with `status_refused` before any
 AUTHENTICATE is sent - and the bridge reports that as "not a card verdict",
@@ -521,11 +559,50 @@ says so instead of dialling a bogus address. Pass an address resolved out of ban
 (T038 used DoH) when that happens.
 
 `IKE_SA_INIT` carries no identity, so a successful probe proves reachability and
-algorithm selection and nothing more. The probe still does not run a live
-`IKE_AUTH`: the USIM half of that exists now (`-aka-selftest`, T041c), but the
-real ePDG half is T041d. It does replay a recorded `IKE_AUTH` ladder, it can
-export the AUTH payloads out of one, and it can put one challenge to a real card
-without touching the network.
+algorithm selection and nothing more.
+
+### `-auth`: the whole ladder, against the ePDG the card names
+
+```sh
+# as root: the AT lease socket is 0600
+./vodoge-ike-probe -auth -aka-imei 867018069514820 \
+    -capture /root/t072/epdg.pcap -record-secrets
+
+# derive and resolve, send nothing
+./vodoge-ike-probe -auth -aka-imei 867018069514820 -dry-run
+```
+
+**There is no flag for the operator.** `-auth` reads the card through the edge
+daemon's `/api/status`, derives the ePDG FQDN and the IMPI from the IMSI and the
+EF_AD-derived MNC length, and refuses `-target` outright. Criterion 2b rejects an
+identity we chose, and the cheapest way to be able to say we did not choose one
+is to have nowhere to put one. `-aka-imei` selects *hardware*; that IMEI never
+goes on the wire and two tests assert it.
+
+The name is resolved over DoH, not the system resolver, because the box answers
+every name - random ones included - out of `198.18.0.0/16` (T036). An answer in
+that range is `ErrFakeIPAnswer` rather than an address to dial.
+
+`-idr` (`none` by default, see above), `-no-eap-only` and `-keepalive` vary the
+three decisions that had no live evidence behind them. `-egress-candidates` feeds
+the NAT-D reverse solve that reports which of this box's two UDP exits the
+responder saw; on 2026-08-24 that was `34.174.243.156` (GCP, Dallas) on all three
+solved exchanges, never the Beijing CGNAT.
+
+A live run costs a real AUTHENTICATE on a real card, which advances SQN when the
+card accepts it. `MaxLiveAuthCandidates` is 3 and it is a constant, not a
+default: if three GSLB nodes will not answer `IKE_SA_INIT`, that is a network
+result and a fourth attempt is impatience.
+
+### Reading a rejection
+
+The outcome is one of `udp-unreachable`, `ike-auth-no-reply`,
+`ike-auth-rejected`, `card-refused-challenge`, `challenge-answered`,
+`tunnel-established`. Keeping them apart is the whole job: the first is a fact
+about the path that no payload edit can change, the middle two say our payloads
+are wrong, and the last three are about the card and the operator. The probe
+prints `LiveOutcome.Explain()` next to the verdict so a receipt cannot quietly
+promote one into another.
 
 ## Tests
 
@@ -534,8 +611,13 @@ cd vowifi && GOWORK=off go test ./...
 ```
 
 Everything runs on loopback against a fake ePDG; no hardware, no US line, no
-carrier. Nothing in this module has ever spoken to a real operator, so no test
-here is evidence for goal oracle criterion 2b.
+carrier. **No test here is evidence for goal oracle criterion 2b** - that
+evidence is a pcap taken against T-Mobile US, and it lives on the edge box with
+the note that describes it. What the tests do is stop the measured facts from
+being refactored away: `TestTheLiveDefaultSendsNoIDr` pins the IDr finding,
+`TestThreeDigitMNCSurvivesTheWholeDerivation` pins the three digits that come off
+the card, and `TestCardRefusalIsClassifiedAsClassThreeNotAsAFailedExchange` pins
+the distinction the receipt is written in.
 
 `TestFakeEPDGSeparatesEAPSuccessFromChildSA` (T041a) refuses the "EAP-Success and
 the CHILD_SA arrive in one message" assumption by driving a plaintext ladder over

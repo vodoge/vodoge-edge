@@ -66,6 +66,16 @@ func run() error {
 		akaRAND       = flag.String("aka-rand", defaultAKARAND, "RAND as 32 hex digits")
 		akaAUTN       = flag.String("aka-autn", defaultAKAAUTN, "AUTN as 32 hex digits")
 		akaRepeat     = flag.Int("aka-repeat", 1, "how many challenges to send")
+
+		auth      = flag.Bool("auth", false, "run the whole IKEv2 ladder against the ePDG this card names, with the card answering EAP-AKA")
+		panelURL  = flag.String("panel", ike.DefaultPanelURL, "edge daemon panel base URL; the card readout comes from its /api/status")
+		doh       = flag.String("doh", ike.DefaultDoHEndpoint, "DoH endpoint used to resolve the ePDG FQDN, because the box's own resolver answers everything from 198.18.0.0/16")
+		keepalive = flag.Duration("keepalive", ike.DefaultKeepalivePeriod, "NAT-T keepalive interval, started as soon as IKE_SA_INIT completes; negative disables it")
+		authWait  = flag.Duration("auth-timeout", ike.DefaultAuthTimeout, "deadline for the whole IKE_AUTH ladder")
+		egress    = flag.String("egress-candidates", "", "comma-separated source IPs to try when reversing the responder's NAT_DETECTION_DESTINATION_IP (default: the two measured on this box)")
+		dryRun    = flag.Bool("dry-run", false, "with -auth: derive the identity and resolve the ePDG, then stop without sending anything")
+		idr       = flag.String("idr", "none", "which IDr to assert: none (the default; T041d measured T-Mobile US refusing every IKE_AUTH that carried one), card (the FQDN derived from the card), or dns (the canonical name that FQDN resolved to)")
+		noEAPOnly = flag.Bool("no-eap-only", false, "drop N(EAP_ONLY_AUTHENTICATION) from the first IKE_AUTH request")
 	)
 	flag.Parse()
 
@@ -90,6 +100,43 @@ func run() error {
 	}
 	if *replayPath != "" {
 		return runReplay(ctx, *replayPath, *strictReplay, *exportAuth)
+	}
+	if *auth {
+		// -target is refused rather than ignored. The whole point of this mode
+		// is that the ePDG name is derived from the card; accepting a name
+		// here would put a human-chosen operator back into the one exchange
+		// that exists to prove the operator was not human-chosen.
+		if strings.TrimSpace(*target) != "" {
+			return fmt.Errorf("-auth derives the ePDG from the card and refuses -target; " +
+				"use -target without -auth for a reachability probe")
+		}
+		candidates, err := parseEgressCandidates(*egress)
+		if err != nil {
+			return err
+		}
+		return runLiveAuth(ctx, liveAuthParams{
+			panelURL:      *panelURL,
+			doh:           *doh,
+			imei:          *akaIMEI,
+			port:          *port,
+			localIP:       *localIP,
+			localPort:     uint16(*localPort),
+			groups:        groups,
+			initTimeout:   *timeout,
+			authTimeout:   *authWait,
+			keepalive:     *keepalive,
+			attempts:      *attempts,
+			capturePath:   *capturePath,
+			recordSecrets: *recordSecrets,
+			maxCandidates: *maxCandidates,
+			akaSocket:     *akaSocket,
+			akaTimeout:    *akaTimeout,
+			akaGrace:      *akaGrace,
+			egress:        candidates,
+			dryRun:        *dryRun,
+			idr:           strings.ToLower(strings.TrimSpace(*idr)),
+			noEAPOnly:     *noEAPOnly,
+		})
 	}
 	if strings.TrimSpace(*target) == "" {
 		return fmt.Errorf("-target is required")
@@ -219,9 +266,12 @@ func probeOne(ctx context.Context, p probeParams) error {
 	fmt.Printf("  key material %d octets, SK_ei %d, SK_ai %d\n",
 		len(result.KeyMaterial), len(result.Keys.SKEi), len(result.Keys.SKAi))
 	fmt.Printf("  MOBIKE       %v\n", result.MOBIKESupported)
-	fmt.Printf("  NAT-D sent   %v (responder echoed source=%v destination=%v)\n",
-		detail.NAT.Sent, detail.NAT.ResponderSentSource, detail.NAT.ResponderSentDestination)
 	fmt.Printf("  behind NAT   local=%v peer=%v\n", detail.NAT.BehindNAT, detail.NAT.PeerBehindNAT)
+	// Which egress the responder saw is worth knowing here too, and this is the
+	// cheap place to learn it: a reachability probe carries no identity and can
+	// be run before the card is switched, so the egress question is answered
+	// before the run that costs an SQN step.
+	reportEgress(detail.NAT, result.InitiatorSPI, result.ResponderSPI, p.remote, nil)
 
 	stats := socket.Stats()
 	fmt.Printf("  socket       sent=%d recv=%d retransmits=%d unmatched=%d foreign=%d\n",
@@ -277,11 +327,15 @@ func runReplay(ctx context.Context, path string, strict bool, exportAuthDir stri
 	fmt.Printf("  selected     %s\n", detail.Selection)
 	fmt.Printf("  SKEYSEED     %d octets\n", len(result.SKEYSEED))
 
-	if err := replayAuthLadder(ctx, c, transport, result); err != nil {
+	// The ladder error is held rather than returned. A recording of a rejected
+	// exchange is the one most worth exporting, and returning here would make
+	// -export-auth work only on the runs that did not need it.
+	ladderErr := replayAuthLadder(ctx, c, transport, result)
+	fmt.Printf("  unconsumed   %d datagram(s)\n", transport.Remaining())
+	if err := exportAuthPayloads(c, result.Keys, exportAuthDir); err != nil {
 		return err
 	}
-	fmt.Printf("  unconsumed   %d datagram(s)\n", transport.Remaining())
-	return exportAuthPayloads(c, result.Keys, exportAuthDir)
+	return ladderErr
 }
 
 // replayAuthLadder replays the IKE_AUTH ladder when the sidecar carries one.
@@ -301,6 +355,30 @@ func replayAuthLadder(ctx context.Context, c *capture.Capture, transport *captur
 	runner := ike.NewAuthRunner(ikev2.Identity{Type: seed.ResponderIDType, Data: seed.ResponderID})
 	runner.ChildSPI = seed.ChildSPI
 	runner.PinnedIVs = seed.IVs
+	// A recording with no IDr in its seed is a recording of a run that sent no
+	// IDr, and T041d found that T-Mobile answers AUTHENTICATION_FAILED to the
+	// ones that do. Refusing to replay it would make the single most important
+	// capture in this repository unreplayable. Strict mode still asserts the
+	// request bytes, so if the recording really did carry an IDr the replay
+	// fails on the comparison rather than on this decision.
+	if seed.ResponderIDType == 0 || len(seed.ResponderID) == 0 {
+		runner.AllowMissingResponderID = true
+	}
+	// The card's answers, out of the sidecar. This is the criterion 2b evidence
+	// and it is readable with no hardware, no carrier and no live run - which is
+	// the whole point of having recorded it.
+	for i, v := range seed.AKA {
+		fmt.Printf("  AKA vector %d (from the recording, not from a card)\n", i+1)
+		fmt.Printf("    AT_RAND  %X\n", v.RAND)
+		fmt.Printf("    AT_AUTN  %X\n", v.AUTN)
+		if v.Failure == "" {
+			fmt.Printf("    RES      %X\n", v.RES)
+			fmt.Printf("    CK/IK    %d/%d octets (not printed)\n", len(v.CK), len(v.IK))
+		} else {
+			fmt.Printf("    failure  %s (AUTS %X)\n", v.Failure, v.AUTS)
+		}
+	}
+
 	auth, err := runner.Run(ctx, ikev2.FullAuthConfig{
 		Transport:   transport,
 		Init:        init,
@@ -310,6 +388,12 @@ func replayAuthLadder(ctx context.Context, c *capture.Capture, transport *captur
 		EAPIdentity: seed.EAPIdentity,
 	})
 	detail, _ := runner.LastDetail()
+	if detail.EAPSuccessMessageID != 0 {
+		fmt.Printf("  EAP-Success  message %d (reproduced from the recording)\n", detail.EAPSuccessMessageID)
+	}
+	for _, n := range detail.ResponseNotifies {
+		fmt.Printf("  notify       msg %d type %d data %x\n", n.MessageID, n.Type, n.Data)
+	}
 	if err != nil {
 		fmt.Printf("  IKE_AUTH     replay failed after %d exchange(s): %v\n", len(detail.Rounds), err)
 		return err
@@ -592,4 +676,420 @@ func orAny(imei string) string {
 		return "(daemon's choice)"
 	}
 	return imei
+}
+
+// MaxLiveAuthCandidates bounds how many ePDG addresses a live run will try.
+//
+// Three, and it is a hard number rather than a default. Two things make this
+// unlike the reachability probe: a Challenge the card accepts advances SQN, and
+// the GSLB behind the ePDG name hands out a different address on every lookup,
+// so "try them all" is unbounded. If three nodes in a row will not answer
+// IKE_SA_INIT, that is a network result and the fourth attempt is not evidence,
+// it is impatience.
+const MaxLiveAuthCandidates = 3
+
+type liveAuthParams struct {
+	panelURL      string
+	doh           string
+	imei          string
+	port          int
+	localIP       string
+	localPort     uint16
+	groups        []uint16
+	initTimeout   time.Duration
+	authTimeout   time.Duration
+	keepalive     time.Duration
+	attempts      int
+	capturePath   string
+	recordSecrets bool
+	maxCandidates int
+	akaSocket     string
+	akaTimeout    time.Duration
+	akaGrace      time.Duration
+	egress        []net.IP
+	idr           string
+	noEAPOnly     bool
+	responderID   ikev2.Identity
+	dryRun        bool
+}
+
+// runLiveAuth is T041d: the first contact.
+//
+// The order of the first three steps is the load-bearing part. The card is read
+// first, the ePDG name is derived from that reading, and only then is anything
+// resolved or dialled - so there is no point in this program at which an
+// operator identity could have come from a flag, a config file or a constant.
+// Goal oracle criterion 2b rejects an identity we chose, and the cheapest way
+// to be able to say we did not choose one is to have nowhere to put it.
+func runLiveAuth(ctx context.Context, p liveAuthParams) error {
+	readout, err := ike.FetchCardReadout(ctx, p.panelURL, p.imei)
+	if err != nil {
+		return err
+	}
+	subscription, err := readout.Subscription()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("card readout\n")
+	fmt.Printf("  ICCID      %s\n", readout.ICCID)
+	fmt.Printf("  state      %s (registration is not required for this exchange; the ePDG is\n"+
+		"             reached over the public internet and the card only has to be enabled)\n", readout.State)
+	for _, line := range subscription.Describe() {
+		fmt.Printf("  %s\n", line)
+	}
+
+	fqdn := subscription.EPDGFQDN()
+	resolver := &ike.DoHResolver{Endpoint: p.doh}
+	answer, err := resolver.LookupA(ctx, fqdn)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nDNS over %s\n", answer.Endpoint)
+	for _, hop := range answer.Chain {
+		fmt.Printf("  %s\n", hop)
+	}
+
+	// The IDr choice, made here rather than inside the tunnel, because it is a
+	// diagnostic axis and not a property of the subscription. Every option is
+	// still derived: "card" is the name the IMSI produces, "dns" is the name
+	// that name resolved to. Neither is typed in.
+	switch p.idr {
+	case "", "none":
+		p.idr = "none"
+	case "card":
+		p.responderID = subscription.ResponderIdentity()
+	case "dns":
+		if answer.Canonical == "" {
+			return fmt.Errorf("-idr dns: the lookup returned no canonical name to use")
+		}
+		p.responderID = ike.IdentityFQDN(answer.Canonical)
+	default:
+		return fmt.Errorf("-idr %q: want none, card or dns", p.idr)
+	}
+	fmt.Printf("  IDr        %s\n", describeIDr(p, subscription))
+	fmt.Printf("  EAP-only   %v\n", !p.noEAPOnly)
+
+	limit := p.maxCandidates
+	if limit <= 0 || limit > MaxLiveAuthCandidates {
+		limit = MaxLiveAuthCandidates
+	}
+	candidates := make([]*net.UDPAddr, 0, len(answer.IPs))
+	for _, ip := range answer.IPs {
+		candidates = append(candidates, &net.UDPAddr{IP: ip, Port: p.port})
+	}
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	fmt.Printf("  trying     %s\n", joinAddrs(candidates))
+
+	if p.dryRun {
+		fmt.Printf("\n-dry-run: nothing was sent. The card was read, the name was derived from it,\n" +
+			"and the name resolved. No packet reached a carrier and no challenge reached the card.\n")
+		return nil
+	}
+
+	egressCandidates := p.egress
+	if len(egressCandidates) == 0 {
+		egressCandidates = ike.KnownEgressIPs()
+	}
+
+	var failures []string
+	for i, candidate := range candidates {
+		fmt.Printf("\n--- candidate %d/%d: %s ---\n", i+1, len(candidates), candidate)
+		result, err := liveAuthOnce(ctx, p, subscription, candidate, i, egressCandidates)
+		reportLiveResult(result, err)
+		if err == nil {
+			return nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %s: %v", candidate, result.Outcome, err))
+		// A carrier that put a challenge in front of the card has already told
+		// us the thing worth knowing. Trying the next node would spend another
+		// SQN step to learn nothing new.
+		if result.SawCarrierChallenge() {
+			return fmt.Errorf("%s: %w", result.Outcome, err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return fmt.Errorf("all %d candidate(s) failed:\n  %s", len(candidates), strings.Join(failures, "\n  "))
+}
+
+func liveAuthOnce(
+	ctx context.Context,
+	p liveAuthParams,
+	subscription ike.Subscription,
+	remote *net.UDPAddr,
+	index int,
+	egress []net.IP,
+) (ike.LiveResult, error) {
+	var writer *capture.Writer
+	if path := capturePathFor(p.capturePath, index); path != "" {
+		var err error
+		writer, err = capture.NewWriter(capture.WriterOptions{
+			Path:          path,
+			RemoteAddr:    remote,
+			RecordSecrets: p.recordSecrets,
+			Note: fmt.Sprintf("vodoge-ike-probe live IKE_AUTH to %s (%s) for IMSI %s on %s",
+				remote, subscription.EPDGFQDN(), subscription.IMSI, subscription.IMEI),
+			Warnf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "WARNING: "+format+"\n", args...) },
+		})
+		if err != nil {
+			return ike.LiveResult{}, err
+		}
+		defer func() {
+			if err := writer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "capture close: %v\n", err)
+				return
+			}
+			fmt.Printf("  capture    %s (%d datagrams)\n", path, writer.Count())
+			fmt.Printf("             replay: vodoge-ike-probe -replay %s -export-auth %s.auth\n", path, path)
+		}()
+	}
+
+	cfg := ike.SocketConfig{
+		LocalPort: p.localPort,
+		Remote:    remote,
+		Capture:   writer,
+		Retransmit: ike.RetransmitPolicy{
+			Initial:    DefaultInitialWait,
+			Multiplier: 1.8,
+			Max:        20 * time.Second,
+			Attempts:   p.attempts,
+		},
+	}
+	if p.localIP != "" {
+		ip := net.ParseIP(p.localIP)
+		if ip == nil {
+			return ike.LiveResult{}, fmt.Errorf("cannot parse -local-ip %q", p.localIP)
+		}
+		cfg.LocalIP = ip
+	}
+	socket, err := ike.Listen(cfg)
+	if err != nil {
+		return ike.LiveResult{}, err
+	}
+	defer func() { _ = socket.Close(context.Background()) }()
+	fmt.Printf("  socket     local %s -> remote %s\n", socket.LocalAddr(), remote)
+
+	// The card, and nothing else. aka.Provider speaks one operation to the
+	// lease socket and this tool has no flag that could ask for another.
+	provider := &aka.Provider{
+		SocketPath: p.akaSocket,
+		IMEI:       subscription.IMEI,
+		Timeout:    p.akaTimeout,
+		Grace:      p.akaGrace,
+		Observe:    printAKAObservation,
+	}
+	fmt.Printf("  AT lease   %s (module %s)\n", provider.SocketPathOrDefault(), subscription.IMEI)
+
+	result, runErr := ike.RunLiveTunnel(ctx, ike.LiveConfig{
+		Socket:       socket,
+		Subscription: subscription,
+		AKA:          provider,
+		ResponderID:  p.responderID,
+
+		DisableEAPOnly:  p.noEAPOnly,
+		Groups:          p.groups,
+		Capture:         writer,
+		KeepalivePeriod: p.keepalive,
+		InitTimeout:     p.initTimeout,
+		AuthTimeout:     p.authTimeout,
+		Log:             func(format string, args ...any) { fmt.Printf("  "+format+"\n", args...) },
+	})
+	if result.InitDone {
+		reportEgress(result.InitDetail.NAT, result.Init.InitiatorSPI, result.Init.ResponderSPI, remote, egress)
+	}
+	stats := socket.Stats()
+	fmt.Printf("  socket     sent=%d recv=%d retransmits=%d unmatched=%d foreign=%d keepalives=%d\n",
+		stats.IKESent, stats.IKEReceived, stats.IKERetransmits, stats.IKEUnmatchedDrops,
+		stats.ForeignSourceDrops, stats.KeepalivesSent)
+	return result, runErr
+}
+
+// reportEgress answers "which of this box's two UDP exits did the carrier see".
+//
+// It is not cosmetic. A US carrier's ePDG applies policy to the source address,
+// and this box reaches some destinations through a Beijing CGNAT and others
+// through a GCP node in Dallas (T038 section 7). Reading the answer out of the
+// responder's own NAT-D hash is the only measurement available from inside the
+// VM, and T038 established that it is exact: six lookups, six unique hits.
+func reportEgress(nat ike.NATDetection, spiI, spiR uint64, remote *net.UDPAddr, candidates []net.IP) {
+	fmt.Printf("  NAT-D      sent=%v; responder echoed source=%v destination=%v\n",
+		nat.Sent, nat.ResponderSentSource, nat.ResponderSentDestination)
+	if len(candidates) == 0 {
+		candidates = ike.KnownEgressIPs()
+	}
+	if len(nat.PeerDestinationHash) == 0 {
+		fmt.Printf("  egress     unmeasurable: this responder sent no NAT_DETECTION_DESTINATION_IP,\n" +
+			"             so the apparent source address cannot be recovered from this exchange\n")
+		return
+	}
+	endpoint, ok := ike.SolveApparentEndpoint(nat.PeerDestinationHash, spiI, spiR, candidates)
+	if !ok {
+		names := make([]string, 0, len(candidates))
+		for _, ip := range candidates {
+			names = append(names, ip.String())
+		}
+		fmt.Printf("  egress     the responder hash matches none of %v on any port;\n"+
+			"             we left this box by a third path nobody has recorded\n", names)
+		return
+	}
+	fmt.Printf("  egress     %s as %s saw us (recovered from its NAT-D hash)\n", endpoint, remote.IP)
+}
+
+// reportLiveResult prints the verdict in the terms goal oracle criterion 2b is
+// written in, and refuses to round a refusal up to a success.
+func reportLiveResult(result ike.LiveResult, err error) {
+	fmt.Printf("\n  outcome    %s\n", result.Outcome)
+	fmt.Printf("  meaning    %s\n", wrapIndent(result.Outcome.Explain(), "             "))
+	if err != nil {
+		fmt.Printf("  error      %v\n", err)
+	}
+	detail := result.AuthDetail
+	if result.AuthAttempted {
+		fmt.Printf("  IKE_AUTH   %d exchange(s); IDr sent %v; EAP_ONLY_AUTHENTICATION sent %v; peer sent IDr %v\n",
+			len(detail.Rounds), detail.SentIDr, detail.SentEAPOnlyNotify, detail.PeerSentIDr)
+		if len(detail.PeerIDBody) > 0 {
+			fmt.Printf("  peer IDr   %x\n", detail.PeerIDBody)
+		}
+		for _, n := range detail.ResponseNotifies {
+			if len(n.Malformed) > 0 {
+				fmt.Printf("  notify     msg %d UNPARSEABLE %x\n", n.MessageID, n.Malformed)
+				continue
+			}
+			fmt.Printf("  notify     msg %d type %d (%s) data %x\n", n.MessageID, n.Type, notifyName(n.Type), n.Data)
+		}
+		// EAP-Success is the carrier's verdict on the RES, and it is a
+		// different claim from "the card produced one". Printing the message it
+		// arrived in keeps the two separable in the receipt.
+		if detail.EAPSuccessMessageID != 0 {
+			fmt.Printf("  EAP-Success message %d: the operator accepted the RES\n", detail.EAPSuccessMessageID)
+		} else if result.AuthAttempted {
+			fmt.Printf("  EAP-Success none: the operator never accepted an EAP exchange\n")
+		}
+		if detail.ChildSAMessageID != 0 {
+			fmt.Printf("  CHILD_SA   message %d\n", detail.ChildSAMessageID)
+		}
+		if detail.EarlyPeerAuthMethod != 0 {
+			fmt.Printf("  peer AUTH  method %d arrived before EAP finished: the responder ignored RFC 5998\n",
+				detail.EarlyPeerAuthMethod)
+		}
+		if len(detail.LocalAuth) > 0 {
+			fmt.Printf("  our AUTH   method %d, %d octets\n", detail.LocalAuthMethod, len(detail.LocalAuth))
+		}
+		if len(detail.PeerAuth) > 0 {
+			fmt.Printf("  peer AUTH  method %d verified=%v\n", detail.PeerAuthMethod, detail.PeerAuthVerified)
+		}
+	}
+
+	vectors := result.Challenges()
+	if len(vectors) == 0 {
+		fmt.Printf("  criterion  2b NOT MET: no EAP-AKA Challenge from this carrier ever reached the card.\n")
+		return
+	}
+	fmt.Printf("  criterion  2b first half MET: this carrier put %d EAP-AKA Challenge(s) in front of\n"+
+		"             the enabled profile on the bench eUICC.\n", len(vectors))
+	for i, v := range vectors {
+		fmt.Printf("  challenge %d\n", i+1)
+		fmt.Printf("    AT_RAND  %X\n", v.RAND)
+		fmt.Printf("    AT_AUTN  %X\n", v.AUTN)
+		switch v.Failure {
+		case "":
+			// RES travels inside EAP on the wire, so printing it costs nothing.
+			// CK and IK are session key material: lengths only, so this output
+			// is safe to paste into a receipt.
+			fmt.Printf("    RES      %X\n", v.RES)
+			fmt.Printf("    CK/IK    %d/%d octets (not printed)\n", len(v.CK), len(v.IK))
+		case "sync":
+			fmt.Printf("    verdict  the card asked to resynchronise; AT_AUTS %X\n", v.AUTS)
+			fmt.Printf("    2b       second half NOT met by this challenge\n")
+		case "auth":
+			fmt.Printf("    verdict  the card REFUSED this challenge (see the status word above)\n")
+			fmt.Printf("    2b       second half NOT met: the challenge was real, the RES was not produced\n")
+		default:
+			fmt.Printf("    verdict  the card was not reached: %s. Not a card verdict.\n", v.Failure)
+		}
+	}
+	if result.CardAnsweredChallenge() {
+		fmt.Printf("  criterion  2b second half MET: the RES above was computed by the enabled profile\n" +
+			"             on the bench eUICC from the carrier own RAND/AUTN.\n")
+	}
+}
+
+// notifyName labels the notify types that actually turn up in an IKE_AUTH
+// rejection. Anything else prints as its number rather than as a guess.
+func notifyName(value uint16) string {
+	switch value {
+	case 14:
+		return "NO_PROPOSAL_CHOSEN"
+	case 17:
+		return "INVALID_SYNTAX"
+	case 24:
+		return "AUTHENTICATION_FAILED"
+	case 34:
+		return "SINGLE_PAIR_REQUIRED"
+	case 35:
+		return "NO_ADDITIONAL_SAS"
+	case 36:
+		return "INTERNAL_ADDRESS_FAILURE"
+	case 37:
+		return "FAILED_CP_REQUIRED"
+	case 38:
+		return "TS_UNACCEPTABLE"
+	case 39:
+		return "INVALID_SELECTORS"
+	case 16385:
+		return "INITIAL_CONTACT"
+	case 16388:
+		return "NAT_DETECTION_SOURCE_IP"
+	case 16389:
+		return "NAT_DETECTION_DESTINATION_IP"
+	case 16396:
+		return "IPCOMP_SUPPORTED"
+	case 16403:
+		return "MOBIKE_SUPPORTED"
+	case ike.NotifyEAPOnlyAuthentication:
+		return "EAP_ONLY_AUTHENTICATION"
+	default:
+		return "unnamed"
+	}
+}
+
+func wrapIndent(text, indent string) string {
+	return strings.ReplaceAll(text, "\n", "\n"+indent)
+}
+
+func parseEgressCandidates(list string) ([]net.IP, error) {
+	if strings.TrimSpace(list) == "" {
+		return nil, nil
+	}
+	var out []net.IP
+	for _, field := range strings.Split(list, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		ip := net.ParseIP(field)
+		if ip == nil {
+			return nil, fmt.Errorf("bad -egress-candidates entry %q", field)
+		}
+		out = append(out, ip)
+	}
+	return out, nil
+}
+
+// describeIDr names the IDr and, more importantly, where it came from. On a
+// rejected first contact the provenance is the part that has to survive into
+// the receipt.
+func describeIDr(p liveAuthParams, subscription ike.Subscription) string {
+	switch {
+	case len(p.responderID.Data) == 0:
+		return "(omitted - the default, because T041d measured every IKE_AUTH carrying one " +
+			"coming back AUTHENTICATION_FAILED from T-Mobile US)"
+	case string(p.responderID.Data) == subscription.EPDGFQDN():
+		return string(p.responderID.Data) + " (derived from the card's MCC/MNC)"
+	default:
+		return string(p.responderID.Data) + " (the canonical name the card-derived FQDN resolved to)"
+	}
 }

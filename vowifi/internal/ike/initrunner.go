@@ -50,6 +50,16 @@ type NATDetection struct {
 	// missing notify is not by itself an error.
 	ResponderSentSource      bool
 	ResponderSentDestination bool
+	// PeerSourceHash and PeerDestinationHash are the notify bodies exactly as
+	// the responder sent them.
+	//
+	// Keeping them is what makes the egress measurable. The destination hash is
+	// SHA-1 over our address as the responder saw it, so it is the only thing on
+	// this path that reports which of the box's two UDP egresses the datagram
+	// actually took (T038 section 7). Comparing it against our own view, which
+	// is all BehindNAT does, throws that away.
+	PeerSourceHash      []byte
+	PeerDestinationHash []byte
 	// BehindNAT is true when the responder's DESTINATION hash disagrees with our
 	// own view of our address, i.e. something rewrote our source.
 	BehindNAT bool
@@ -527,11 +537,13 @@ func (r *InitRunner) evaluateNAT(cfg ikev2.InitConfig, nat *NATDetection, notifi
 		switch n.NotifyType {
 		case ikev2.NotifyNATDetectionSourceIP:
 			nat.ResponderSentSource = true
+			nat.PeerSourceHash = append([]byte(nil), n.NotificationData...)
 			if !equalBytes(n.NotificationData, peerHash) {
 				nat.PeerBehindNAT = true
 			}
 		case ikev2.NotifyNATDetectionDestinationIP:
 			nat.ResponderSentDestination = true
+			nat.PeerDestinationHash = append([]byte(nil), n.NotificationData...)
 			if !equalBytes(n.NotificationData, ourHash) {
 				nat.BehindNAT = true
 			}
