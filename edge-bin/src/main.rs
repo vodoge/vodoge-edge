@@ -2412,13 +2412,10 @@ mod linux {
             .ok()
             .filter(edge_modem::AtExchange::succeeded)
             .and_then(|exchange| edge_modem::first_bare_digits(&exchange.lines));
-        // Same derivation as the QMI path: MCC is three digits and every
-        // network this runs on has a two digit MNC.
-        let home = imsi.as_ref().and_then(|value| {
-            let mcc = value.get(0..3)?.parse::<u16>().ok()?;
-            let mnc = value.get(3..5)?.parse::<u16>().ok()?;
-            Some(Network::new(mcc, mnc))
-        });
+        // Same derivation as the QMI path, and the same source for the one
+        // thing an IMSI does not carry: where its MNC ends.
+        let ef_ad = read_ef_ad_over_at(&mut port);
+        let home = at_home_network(imsi.as_deref(), &ef_ad, &at_path.display().to_string());
         let family = port
             .command("AT+CGMM")
             .ok()
@@ -2451,6 +2448,219 @@ mod linux {
             manageable: false,
             usb: edge_modem::usb_device_of_at(at_path),
         })
+    }
+
+    /// What to assume when the card would not say how long its MNC is.
+    ///
+    /// Two is what this agent assumed unconditionally until `EF_AD` was read,
+    /// and it is right for every card on the bench -- but it is an assumption,
+    /// so it is only ever reached with a log line naming the card that forced
+    /// it. A silent fallback here does not blank the home network, it fills it
+    /// with a wrong one.
+    const FALLBACK_MNC_DIGITS: usize = 2;
+
+    /// The home network as the AT-only probe derives it.
+    ///
+    /// `AT+CIMI` gives the IMSI and `+CRSM` gives `EF_AD`; both come off the
+    /// card, neither is configured here. That is what makes the console's
+    /// operator name a card reading rather than a claim of ours.
+    fn at_home_network(imsi: Option<&str>, ef_ad: &[String], source: &str) -> Option<Network> {
+        let bytes = parse_crsm_binary(ef_ad);
+        Network::from_imsi(imsi?, mnc_digits_or_fallback(bytes, source))
+    }
+
+    /// The home network as the QMI probe derives it. Same rule, same decoder;
+    /// only the transport for `EF_AD` differs.
+    fn qmi_home_network(
+        imsi: Option<&str>,
+        ef_ad: Result<Vec<u8>, String>,
+        source: &str,
+    ) -> Option<Network> {
+        Network::from_imsi(imsi?, mnc_digits_or_fallback(ef_ad, source))
+    }
+
+    fn mnc_digits_or_fallback(ef_ad: Result<Vec<u8>, String>, source: &str) -> usize {
+        let digits = ef_ad.and_then(|bytes| {
+            // The bytes go in the message: an EF_AD this decoder rejects is
+            // the one thing that cannot be re-read from the log later.
+            Network::mnc_digits_from_ef_ad(&bytes)
+                .map_err(|error| format!("{error} ({})", edge_modem::hex_upper(&bytes)))
+        });
+        match digits {
+            Ok(digits) => digits,
+            Err(error) => {
+                log_error(format!(
+                    "EF_AD {source}: {error}; assuming a {FALLBACK_MNC_DIGITS}-digit MNC"
+                ));
+                FALLBACK_MNC_DIGITS
+            }
+        }
+    }
+
+    /// `EF_AD` over the AT port, for a module with no QMI interface.
+    ///
+    /// `+CRSM` is restricted access to the file the module's own USIM
+    /// application already has selected: one command on the basic channel,
+    /// no logical channel opened, nothing left selected afterwards. The path
+    /// argument is deliberately absent -- all three bench modules answer
+    /// `+CME ERROR: 23` to `AT+CRSM=176,28589,0,0,4,,"7FFF"` and answer
+    /// `+CRSM: 144,0,"00000002"` without it.
+    fn read_ef_ad_over_at(port: &mut edge_modem::AtPort) -> Vec<String> {
+        let command = format!("AT+CRSM=176,{EF_AD_FILE_ID},0,0,{EF_AD_READ_BYTES}");
+        port.command(&command)
+            .ok()
+            .filter(edge_modem::AtExchange::succeeded)
+            .map(|exchange| exchange.lines)
+            .unwrap_or_default()
+    }
+
+    /// `EF_AD` is `6FAD`, and `+CRSM` names files in decimal. The QMI path
+    /// reaches the same file through `edge_modem`'s own constant; this is the
+    /// AT spelling of it, not a second opinion about which file to read.
+    const EF_AD_FILE_ID: u16 = 0x6fad;
+
+    /// Four bytes is all that is wanted: byte 4 carries the MNC length and
+    /// what follows it is for services this agent does not read. Asking for
+    /// the whole file would need its length first, which is a second command.
+    const EF_AD_READ_BYTES: u8 = 4;
+
+    /// `+CRSM: <sw1>,<sw2>,"<hex>"`.
+    ///
+    /// `sw1` is decimal, so a card that answered normally says `144`. `91xx`
+    /// is accepted too: it means the read succeeded and a proactive command
+    /// is waiting, and rejecting it would drop a perfectly good `EF_AD` on a
+    /// card that happens to run a SIM toolkit applet.
+    fn parse_crsm_binary(lines: &[String]) -> Result<Vec<u8>, String> {
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("+CRSM:"))
+            .ok_or_else(|| format!("no +CRSM line in {lines:?}"))?;
+        let body = line.trim_start_matches("+CRSM:").trim();
+        let mut fields = body.splitn(3, ',');
+        let sw1: u8 = fields
+            .next()
+            .and_then(|field| field.trim().parse().ok())
+            .ok_or_else(|| format!("no SW1 in {line:?}"))?;
+        let sw2: u8 = fields
+            .next()
+            .and_then(|field| field.trim().parse().ok())
+            .ok_or_else(|| format!("no SW2 in {line:?}"))?;
+        if !(sw1 == 0x90 && sw2 == 0x00) && sw1 != 0x91 {
+            return Err(format!("card answered SW {sw1:02x}{sw2:02x}"));
+        }
+        let hex = fields
+            .next()
+            .map(|field| field.trim().trim_matches('"'))
+            .filter(|field| !field.is_empty())
+            .ok_or_else(|| format!("no data in {line:?}"))?;
+        edge_modem::decode_hex(hex).ok_or_else(|| format!("{hex:?} is not hex"))
+    }
+
+    #[cfg(test)]
+    mod home_network_tests {
+        use super::*;
+
+        /// The US profile this product exists to run. Both probes must slice
+        /// its IMSI where `EF_AD` says, not at a fixed two digits: `310-26`
+        /// is not an operator, it is what `310260…` looks like after the
+        /// wrong cut, and it reaches the console as a bare string and the
+        /// ePDG FQDN as `mnc026`.
+        #[test]
+        fn the_qmi_probe_reads_a_three_digit_mnc_off_the_card() {
+            let home = qmi_home_network(
+                Some("310260123456789"),
+                Ok(vec![0x00, 0x00, 0x00, 0x03]),
+                "/dev/cdc-wdm0",
+            );
+            assert_eq!(home.map(Network::numeric), Some("310-260".to_string()));
+        }
+
+        #[test]
+        fn the_at_only_probe_reads_a_three_digit_mnc_off_the_card() {
+            let home = at_home_network(
+                Some("310260123456789"),
+                &["+CRSM: 144,0,\"00000003\"".to_string()],
+                "/dev/ttyUSB2",
+            );
+            assert_eq!(home.map(Network::numeric), Some("310-260".to_string()));
+        }
+
+        /// The three cards on the bench, with the `EF_AD` each one actually
+        /// answered on 2026-08-24 -- `00 00 00 02` over QMI READ TRANSPARENT
+        /// and `+CRSM: 144,0,"00000002"` over AT, on all three. Their home
+        /// networks are what the cloud shows today and must not move.
+        #[test]
+        fn the_bench_cards_report_the_same_home_network_as_before() {
+            let bench = [
+                ("454006395021420", "454-00"),
+                ("460026303803275", "460-02"),
+                ("454003063217957", "454-00"),
+            ];
+            for (imsi, expected) in bench {
+                let over_qmi =
+                    qmi_home_network(Some(imsi), Ok(vec![0x00, 0x00, 0x00, 0x02]), "bench");
+                assert_eq!(over_qmi.map(Network::numeric), Some(expected.to_string()));
+                let over_at = at_home_network(
+                    Some(imsi),
+                    &["+CRSM: 144,0,\"00000002\"".to_string()],
+                    "bench",
+                );
+                assert_eq!(over_at.map(Network::numeric), Some(expected.to_string()));
+            }
+        }
+
+        /// A card that will not say keeps today's behaviour rather than
+        /// guessing something new, on both transports.
+        #[test]
+        fn a_card_that_will_not_state_its_mnc_length_falls_back_to_two() {
+            assert_eq!(
+                qmi_home_network(Some("460026303803275"), Err("no card".into()), "bench")
+                    .map(Network::numeric),
+                Some("460-02".to_string())
+            );
+            // Three bytes: an older card that never states the length.
+            assert_eq!(
+                qmi_home_network(Some("460026303803275"), Ok(vec![0x00, 0x00, 0x00]), "bench")
+                    .map(Network::numeric),
+                Some("460-02".to_string())
+            );
+            // `+CME ERROR: 23`, which is what the bench modules answer when
+            // `+CRSM` is given a path argument: no `+CRSM:` line at all.
+            assert_eq!(
+                at_home_network(Some("460026303803275"), &[], "bench").map(Network::numeric),
+                Some("460-02".to_string())
+            );
+        }
+
+        /// `+CRSM` reports the status word in decimal, and a failed read
+        /// still comes back on an `OK` line. Reading `6A82` as data would
+        /// hand the decoder two bytes of status word as an `EF_AD`.
+        #[test]
+        fn a_crsm_answer_that_is_not_a_successful_read_is_rejected() {
+            assert!(parse_crsm_binary(&["+CRSM: 106,130".to_string()]).is_err());
+            assert!(parse_crsm_binary(&["+CRSM: 148,4,\"\"".to_string()]).is_err());
+            assert!(parse_crsm_binary(&["OK".to_string()]).is_err());
+            assert!(parse_crsm_binary(&["+CRSM: 144,0,\"00zz0002\"".to_string()]).is_err());
+            assert_eq!(
+                parse_crsm_binary(&["+CRSM: 144,0,\"00000002\"".to_string()]),
+                Ok(vec![0x00, 0x00, 0x00, 0x02])
+            );
+            // `91xx`: read succeeded, a proactive command is waiting.
+            assert_eq!(
+                parse_crsm_binary(&["+CRSM: 145,32,\"00000003\"".to_string()]),
+                Ok(vec![0x00, 0x00, 0x00, 0x03])
+            );
+        }
+
+        /// The command is the one that was sampled on all three modules.
+        /// Adding the path argument makes them answer `+CME ERROR: 23`.
+        #[test]
+        fn the_crsm_read_is_the_command_the_bench_answered() {
+            assert_eq!(
+                format!("AT+CRSM=176,{EF_AD_FILE_ID},0,0,{EF_AD_READ_BYTES}"),
+                "AT+CRSM=176,28589,0,0,4"
+            );
+        }
     }
 
     /// One `+CREG`-shaped query, mapped onto the contract's vocabulary.
@@ -2703,13 +2913,11 @@ mod linux {
             .map(|s| s.registration_state)
             .unwrap_or(NasRegistrationState::Unknown(255));
         let state = registration.wire().to_string();
-        // MCC is always three digits; the rest of a 15-digit IMSI is a
-        // two-digit MNC in every network this runs on.
-        let home = imsi.as_ref().and_then(|value| {
-            let mcc = value.get(0..3)?.parse::<u16>().ok()?;
-            let mnc = value.get(3..5)?.parse::<u16>().ok()?;
-            Some(Network::new(mcc, mnc))
-        });
+        // MCC is always the first three digits. How many of the rest are the
+        // MNC is a property of the card, not of this fleet, so it is read
+        // from the card too -- see `qmi_home_network`.
+        let ef_ad = client.read_ef_ad().map_err(|error| error.to_string());
+        let home = qmi_home_network(imsi.as_deref(), ef_ad, &path.display().to_string());
         let serving_plmn = serving
             .as_ref()
             .and_then(|s| Some(Network::new(s.mcc?, s.mnc?)));
