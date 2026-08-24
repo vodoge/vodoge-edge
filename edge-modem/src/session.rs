@@ -1575,6 +1575,193 @@ const SETTLE_STEP: Duration = Duration::from_millis(1_500);
 /// value flips well before registration does.
 const SETTLE_ATTEMPTS: usize = 8;
 
+/// The gap between `AT+CFUN=0` and `AT+CFUN=1` on the last rung.
+///
+/// Three seconds because that is the only interval this pair has ever been
+/// measured with on this bench (T085, `867018069509705`, 2026-08-25). The
+/// ladder used to reuse `SETTLE_STEP` here, which is 1.5s and has never been
+/// tried — and "3s works" does not imply "1.5s works" for a firmware that is
+/// powering the card down and back up. The rung is only reached when a restart
+/// has already gone wrong, so the extra second and a half buys removal of an
+/// untested assumption at no cost anybody will notice.
+const CFUN_CYCLE_GAP: Duration = Duration::from_millis(3_000);
+
+/// How many times `AT+CPIN?` is read before the card is called "not ready
+/// yet".
+///
+/// An upper bound on patience, **not** a prediction of how long the card
+/// takes. There is no honest number for that: the same `AT+CFUN=0` /
+/// `AT+CFUN=1` pair reached `+CPIN: READY` in about 15s on `867018069514820`
+/// (T079) and in 2.3s on `867018069509705` (T085) — a factor of three between
+/// two sticks of the same model. Anything hard-coded as "the" duration is
+/// therefore wrong on one of them, which is why the success criterion below is
+/// a state and this constant only decides when to stop asking.
+///
+/// 20 attempts × `SETTLE_STEP` is a little under thirty seconds, roughly twice
+/// the slowest reading anyone has taken, so a card that is merely slow is not
+/// reported as a card that is missing.
+const CARD_ATTEMPTS: usize = 20;
+
+/// Said whenever a restart ends with the radio up and the card not there.
+///
+/// It names the one thing that has cleared this state on this bench, and in
+/// the same breath says why the agent does not do it: the symptom has been
+/// seen twice and the same pair of commands cleared it twice, and n=2 is an
+/// empirical regularity, not a mechanism. Nobody has established *why* the
+/// card falls off, so nothing here is allowed to fire it automatically at
+/// hardware the operator cannot unplug.
+pub const CARD_RECOVERY_NOTE: &str = "on this bench a card in this state has been brought back \
+     twice by AT+CFUN=0, a few seconds, then AT+CFUN=1 over the LAN-only /api/at endpoint \
+     (about 15s on 867018069514820, 2.3s on 867018069509705, neither left the USB bus); this \
+     agent will not issue it by itself, because two successes are an empirical regularity and \
+     not an established mechanism, and the failure it treats is not understood";
+
+/// What the card says about itself, as read from `AT+CPIN?`.
+///
+/// Three separate things come back at three separate times after the radio is
+/// told to come up — the radio, then the card, then the network — and this
+/// type exists because the middle one used to be invisible to this module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CardState {
+    /// `+CPIN: READY`. The card has finished initialising.
+    Ready,
+    /// `+CME ERROR: 14`, SIM busy. The card is initialising right now; this is
+    /// the good intermediate state, and waiting is exactly the right response
+    /// to it.
+    Initialising,
+    /// `+CME ERROR: 10` (not inserted) or `13` (SIM failure). Read literally
+    /// this says there is no card, but on this bench a card answering 13 has
+    /// twice gone 13 → 14 → `READY` on its own after a functionality cycle, so
+    /// it is not treated as final either.
+    Absent(u16),
+    /// `+CPIN: SIM PIN` and its relatives. Someone has to type something; no
+    /// amount of waiting turns this into `READY`, so the wait stops here.
+    Locked(String),
+    /// Anything else the module said.
+    Unknown(String),
+}
+
+impl CardState {
+    /// The only state in which the module is usable by anything that touches
+    /// the card — AKA, eUICC sessions, IMSI reads, messaging.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    /// Whether polling again could plausibly change the answer.
+    ///
+    /// `false` only for a card that is waiting on a human. Everything else is
+    /// worth re-reading until the bound runs out, including `Unknown`: an
+    /// unrecognised answer is a reason to keep looking, not a reason to
+    /// conclude.
+    pub fn waiting_can_help(&self) -> bool {
+        !matches!(self, Self::Ready | Self::Locked(_))
+    }
+}
+
+impl fmt::Display for CardState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready => write!(formatter, "+CPIN: READY"),
+            Self::Initialising => write!(formatter, "+CME ERROR: 14 (SIM busy, initialising)"),
+            Self::Absent(code) => write!(formatter, "+CME ERROR: {code} (no usable card)"),
+            Self::Locked(code) => write!(formatter, "+CPIN: {code} (waiting for a code)"),
+            Self::Unknown(text) => write!(formatter, "unrecognised +CPIN answer: {text}"),
+        }
+    }
+}
+
+/// The Quectel-specific readings taken alongside `AT+CPIN?`.
+///
+/// Recorded, never a gate. `AT+CPIN?` is the criterion because it is the one
+/// reading whose transition has been measured on two different sticks; these
+/// two are corroboration for whoever reads the report afterwards. `+QINISTAT`
+/// in particular reaches 7 only once SMS and phonebook initialisation are also
+/// finished, and nobody has established that every card here gets there —
+/// gating on it would risk calling a perfectly usable module broken.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CardEvidence {
+    /// The second field of `+QSIMSTAT: <urc>,<inserted>`.
+    pub inserted: Option<bool>,
+    /// `+QINISTAT` as a bitmask: 1 CPIN done, 2 SMS done, 4 phonebook done,
+    /// so 7 is everything and 0 is a card that has not started.
+    pub init_status: Option<u8>,
+}
+
+impl fmt::Display for CardEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "+QSIMSTAT {}, +QINISTAT {}",
+            match self.inserted {
+                Some(true) => "inserted".to_string(),
+                Some(false) => "no card".to_string(),
+                None => "unread".to_string(),
+            },
+            match self.init_status {
+                Some(value) => value.to_string(),
+                None => "unread".to_string(),
+            }
+        )
+    }
+}
+
+/// Read an `AT+CPIN?` exchange the way the module actually answers it.
+///
+/// Both halves matter: a ready card answers on a `+CPIN:` line and terminates
+/// `OK`, while a card that is missing or busy produces **no lines at all** and
+/// puts everything in the terminator. Passing only the lines would make the
+/// two most important states — busy and absent — indistinguishable from each
+/// other and from silence.
+pub fn parse_cpin(lines: &[String], terminator: &str) -> CardState {
+    if let Some(state) = lines.iter().find_map(|line| {
+        let rest = line.trim().strip_prefix("+CPIN:")?;
+        let value = rest.trim();
+        Some(if value.eq_ignore_ascii_case("READY") {
+            CardState::Ready
+        } else {
+            CardState::Locked(value.to_string())
+        })
+    }) {
+        return state;
+    }
+    let terminator = terminator.trim();
+    if let Some(code) = terminator
+        .strip_prefix("+CME ERROR:")
+        .and_then(|rest| rest.trim().parse::<u16>().ok())
+    {
+        return match code {
+            // 14 is the one worth telling apart: it means the card is busy
+            // initialising, which is the difference between "wait" and
+            // "something is wrong".
+            14 => CardState::Initialising,
+            other => CardState::Absent(other),
+        };
+    }
+    CardState::Unknown(if terminator.is_empty() {
+        "no answer".to_string()
+    } else {
+        terminator.to_string()
+    })
+}
+
+/// The insertion flag out of `+QSIMSTAT: <urc>,<inserted>`.
+pub fn parse_qsimstat(lines: &[String]) -> Option<bool> {
+    lines.iter().find_map(|line| {
+        let rest = line.trim().strip_prefix("+QSIMSTAT:")?;
+        let inserted = rest.split(',').nth(1)?.trim();
+        Some(inserted == "1")
+    })
+}
+
+/// The bitmask out of `+QINISTAT: <mask>`.
+pub fn parse_qinistat(lines: &[String]) -> Option<u8> {
+    lines.iter().find_map(|line| {
+        let rest = line.trim().strip_prefix("+QINISTAT:")?;
+        rest.split(',').next()?.trim().parse::<u8>().ok()
+    })
+}
+
 /// The two control paths a radio restart needs on one module.
 ///
 /// QMI and AT reach the same firmware over different USB interfaces of the
@@ -1594,6 +1781,22 @@ pub trait ModuleRadio {
     /// `AT+CFUN=<value>`. `Ok(false)` means the module answered with an error
     /// result code, which is still an answer; `Err` is for losing the port.
     fn write_functionality(&mut self, value: u8) -> Result<bool, String>;
+    /// `AT+CPIN?`.
+    ///
+    /// Every answer, including `+CME ERROR`, is a reading and comes back as
+    /// `Ok`; `Err` is only for losing the port. That is the opposite of
+    /// `read_functionality`, on purpose — there, an error result code means
+    /// the module will not say where its radio is and the restart must not
+    /// proceed; here, the error codes *are* the interesting states.
+    fn read_card_state(&mut self) -> Result<CardState, String>;
+    /// `AT+QSIMSTAT?` and `AT+QINISTAT`, for the report only.
+    ///
+    /// Defaulted to nothing so that an implementation which cannot ask
+    /// Quectel-specific questions is not forced to lie about them; the
+    /// criterion never depends on this.
+    fn read_card_evidence(&mut self) -> CardEvidence {
+        CardEvidence::default()
+    }
     /// Wait for the module to act on what it was just told.
     ///
     /// A hook rather than a `thread::sleep` inside the ladder, so the ladder
@@ -1612,6 +1815,11 @@ pub struct RestartReport {
     pub cfun_before: Option<u8>,
     pub cfun_after: Option<u8>,
     pub mode_after: Option<OperatingMode>,
+    /// Where the card was when the wait for it ended. `None` means the radio
+    /// never came back, so the card was never reached.
+    pub card_after: Option<CardState>,
+    /// The corroborating card readings, where they could be taken.
+    pub card_evidence: CardEvidence,
     /// Every rung that was attempted, in order.
     pub steps: Vec<String>,
 }
@@ -1620,13 +1828,18 @@ impl fmt::Display for RestartReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "before {}, after {}, QMI {}; tried: {}",
+            "before {}, after {}, QMI {}, card {} ({}); tried: {}",
             describe_cfun(self.cfun_before),
             describe_cfun(self.cfun_after),
             match self.mode_after {
                 Some(mode) => format!("{mode:?}"),
                 None => "unreadable".to_string(),
             },
+            match &self.card_after {
+                Some(state) => state.to_string(),
+                None => "not reached".to_string(),
+            },
+            self.card_evidence,
             if self.steps.is_empty() {
                 "nothing".to_string()
             } else {
@@ -1658,6 +1871,9 @@ pub enum RestartError {
     /// The module answered, but not where it was asked to be — including the
     /// case where QMI and `+CFUN?` disagree about where that is.
     NotRestored(RestartReport),
+    /// The radio came back and the card did not. **This is not a failed
+    /// restart** — see `radio_restored` and the comment on the wait itself.
+    CardNotReady(RestartReport),
 }
 
 impl fmt::Display for RestartError {
@@ -1689,6 +1905,12 @@ impl fmt::Display for RestartError {
                  stranded, so bringing it up with the radio control or asking for another \
                  restart is the next thing to try"
             ),
+            Self::CardNotReady(report) => write!(
+                formatter,
+                "the radio came back but the card did not: AT+CPIN? never reached READY \
+                 ({report}); the module is online and answering, so this is not a failed \
+                 restart and asking for another one is not the fix — {CARD_RECOVERY_NOTE}"
+            ),
         }
     }
 }
@@ -1704,8 +1926,21 @@ impl RestartError {
             Self::Port { report, .. }
             | Self::AlreadyStranded(report)
             | Self::Stranded(report)
-            | Self::NotRestored(report) => Some(report),
+            | Self::NotRestored(report)
+            | Self::CardNotReady(report) => Some(report),
         }
+    }
+
+    /// Whether the radio is up despite this not being an `Ok`.
+    ///
+    /// There are two different things a caller can be told here and it must be
+    /// able to tell them apart without reading prose: "the restart did not
+    /// work, the module's radio is down" and "the restart worked, the radio is
+    /// online, and the card on it is not usable". The second one is not an
+    /// argument for restarting again, and it does not mean the module is lost
+    /// — it means the next step is about the card, not about the radio.
+    pub fn radio_restored(&self) -> bool {
+        matches!(self, Self::CardNotReady(_))
     }
 
     /// A short, stable code for the command result, so the console can tell
@@ -1717,6 +1952,7 @@ impl RestartError {
             Self::AlreadyStranded(_) => "modem_already_stranded",
             Self::Stranded(_) => "modem_stranded_offline",
             Self::NotRestored(_) => "restart_not_restored",
+            Self::CardNotReady(_) => "restart_card_not_ready",
         }
     }
 }
@@ -1724,8 +1960,37 @@ impl RestartError {
 /// Take one module's radio down and bring it back, or say why it is not back.
 ///
 /// The contract is the point: this returns `Ok` only when the module has been
-/// read, by two independent means, to be online again. Everything else is an
-/// error naming the state the module is actually in.
+/// read to be online again by two independent means **and** the card on it has
+/// been read to be initialised. Everything else is an error naming the state
+/// the module is actually in.
+///
+/// # Where the line is drawn, and why
+///
+/// Coming back is three events, not one, and on 2026-08-25 they were measured
+/// on `867018069509705` at three different times after `AT+CFUN=1`:
+///
+/// | reading | when |
+/// | --- | --- |
+/// | `AT+CFUN=1` answers `OK` | 294ms |
+/// | `AT+CPIN?` still `+CME ERROR: 14` | 0.3s |
+/// | `AT+CPIN?` reads `READY` | 2.3s |
+/// | `AT+CREG?` reads `0,1` | 5.4s |
+///
+/// This function guarantees the **first two** layers: radio online, card
+/// initialised. It deliberately does **not** wait for registration.
+///
+/// Registration is the only one of the three that depends on something outside
+/// this box. A module sitting where its operator has no coverage never
+/// registers, and it is still a perfectly working module — `867018069509705`
+/// spent days at `+COPS: 2` for exactly that reason. Waiting for `+CREG` would
+/// turn "no signal here" into "your restart failed", which is a worse lie than
+/// the one this change is fixing. The card, by contrast, is entirely local:
+/// nothing outside the stick decides whether it initialises, and everything a
+/// caller does after a restart — AKA, eUICC sessions, IMSI reads, messaging —
+/// fails with `+CME ERROR: 13`/`14` until it has.
+///
+/// So: `Ok` means "usable". Registration is the caller's own business, and the
+/// poll loop that watches for it is already elsewhere.
 pub fn restart_radio<R: ModuleRadio>(radio: &mut R) -> Result<RestartReport, RestartError> {
     let mut report = RestartReport::default();
 
@@ -1800,9 +2065,37 @@ pub fn restart_radio<R: ModuleRadio>(radio: &mut R) -> Result<RestartReport, Res
     // Two readings, and both have to agree. `+CFUN: 1` while QMI still reports
     // anything else is the exact shape of a success that is not one, and this
     // section exists because that shape was reported as `ok` once already.
-    match report.mode_after {
-        Some(OperatingMode::Online) => Ok(report),
-        _ => Err(RestartError::NotRestored(report)),
+    if report.mode_after != Some(OperatingMode::Online) {
+        return Err(RestartError::NotRestored(report));
+    }
+
+    // The radio is back. Now find out whether the module is usable, which is a
+    // different question and used to be an unasked one.
+    //
+    // Nothing below sends anything to the module except reads. In particular
+    // this does **not** run `AT+CFUN=0` / `AT+CFUN=1` at a card that will not
+    // initialise, even though that pair has cleared this state twice: two
+    // successes are a regularity, not a mechanism, and firing an unexplained
+    // remedy at hardware nobody can unplug is a different decision from the
+    // one this function is allowed to make. It reports, and names the remedy
+    // for whoever is reading.
+    let card = match wait_for_card(radio, &mut report) {
+        Ok(state) => state,
+        Err(reason) => {
+            return Err(RestartError::Port {
+                step: "card_read_back".to_string(),
+                reason,
+                report,
+            })
+        }
+    };
+    report.card_evidence = radio.read_card_evidence();
+    report.card_after = Some(card.clone());
+
+    if card.is_ready() {
+        Ok(report)
+    } else {
+        Err(RestartError::CardNotReady(report))
     }
 }
 
@@ -1862,7 +2155,9 @@ fn climb_back<R: ModuleRadio>(radio: &mut R, report: &mut RestartReport) {
             return;
         }
     }
-    radio.pause(SETTLE_STEP);
+    // `CFUN_CYCLE_GAP`, not `SETTLE_STEP`: this is the one pause in the ladder
+    // whose length has actually been observed to work on hardware.
+    radio.pause(CFUN_CYCLE_GAP);
     match radio.write_functionality(CFUN_FULL) {
         Ok(true) => {
             report
@@ -1898,6 +2193,43 @@ fn wait_for_full<R: ModuleRadio>(radio: &mut R, report: &mut RestartReport) -> b
         }
     }
     false
+}
+
+/// Poll `AT+CPIN?` until the card is initialised, or until patience runs out.
+///
+/// The stopping condition is a **state**, never a duration. That is not a
+/// stylistic preference: the same functionality cycle reached `READY` in about
+/// 15s on one stick and in 2.3s on another, so any sleep long enough for the
+/// first is six times too long for the second, and any sleep short enough for
+/// the second reports the first as broken. `CARD_ATTEMPTS` bounds how long
+/// this is willing to keep asking; it is not a claim about how long the card
+/// takes.
+///
+/// Returns the last state read. `Err` means the AT port was lost, which is a
+/// different thing from the card not being ready and is reported as such.
+fn wait_for_card<R: ModuleRadio>(
+    radio: &mut R,
+    report: &mut RestartReport,
+) -> Result<CardState, String> {
+    let mut last: Option<CardState> = None;
+    for attempt in 0..CARD_ATTEMPTS {
+        let state = radio.read_card_state()?;
+        // Transitions only. The interesting thing about `13 → 14 → READY` is
+        // that it happened, not that it was sampled twenty times, and a report
+        // nobody can read is not a report.
+        if last.as_ref() != Some(&state) {
+            report.steps.push(format!("card {state}"));
+        }
+        let done = state.is_ready() || !state.waiting_can_help();
+        last = Some(state);
+        if done {
+            break;
+        }
+        if attempt + 1 < CARD_ATTEMPTS {
+            radio.pause(SETTLE_STEP);
+        }
+    }
+    Ok(last.unwrap_or_else(|| CardState::Unknown("never read".to_string())))
 }
 
 fn describe_cfun(value: Option<u8>) -> String {

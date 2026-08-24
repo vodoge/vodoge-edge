@@ -112,10 +112,11 @@ pub use nas::{
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{
-    parse_cfun, restart_radio, DownloadOutcome, DownloadRequest, EsimAuthenticationInputs,
-    EsimLocalInfo, EuiccSnapshot, HttpStep, IsdrSession, ModuleRadio, QmiClient, QmiTransport,
-    RestartError, RestartReport, SegmentTransfer, SessionError, SyncRequest, CFUN_DISABLE_RF,
-    CFUN_FULL, CFUN_MINIMUM, CFUN_OFFLINE, CFUN_RESET_NOTE, CTL_SYNC,
+    parse_cfun, parse_cpin, parse_qinistat, parse_qsimstat, restart_radio, CardEvidence, CardState,
+    DownloadOutcome, DownloadRequest, EsimAuthenticationInputs, EsimLocalInfo, EuiccSnapshot,
+    HttpStep, IsdrSession, ModuleRadio, QmiClient, QmiTransport, RestartError, RestartReport,
+    SegmentTransfer, SessionError, SyncRequest, CARD_RECOVERY_NOTE, CFUN_DISABLE_RF, CFUN_FULL,
+    CFUN_MINIMUM, CFUN_OFFLINE, CFUN_RESET_NOTE, CTL_SYNC,
 };
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,

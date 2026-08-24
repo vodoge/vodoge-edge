@@ -435,6 +435,37 @@ mod linux {
             Ok(exchange.succeeded())
         }
 
+        fn read_card_state(&mut self) -> Result<edge_modem::CardState, String> {
+            let exchange = self
+                .at_port()?
+                .command("AT+CPIN?")
+                .map_err(|error| error.to_string())?;
+            // Unlike `AT+CFUN?`, an error result code here is the reading. A
+            // card that is initialising answers `+CME ERROR: 14` with no
+            // lines at all, and that is the single most informative thing this
+            // whole sequence can be told, so the terminator goes to the parser
+            // rather than being turned into an `Err`.
+            Ok(edge_modem::parse_cpin(&exchange.lines, &exchange.terminator))
+        }
+
+        fn read_card_evidence(&mut self) -> edge_modem::CardEvidence {
+            // Best effort by construction: these two are corroboration for the
+            // operator reading the report, never a criterion, so a module that
+            // will not answer them simply leaves the fields unread.
+            let mut evidence = edge_modem::CardEvidence::default();
+            if let Ok(port) = self.at_port() {
+                if let Ok(exchange) = port.command("AT+QSIMSTAT?") {
+                    evidence.inserted = edge_modem::parse_qsimstat(&exchange.lines);
+                }
+            }
+            if let Ok(port) = self.at_port() {
+                if let Ok(exchange) = port.command("AT+QINISTAT") {
+                    evidence.init_status = edge_modem::parse_qinistat(&exchange.lines);
+                }
+            }
+            evidence
+        }
+
         fn pause(&mut self, duration: Duration) {
             std::thread::sleep(duration);
         }
@@ -1008,7 +1039,19 @@ mod linux {
                         // carries one line, and the report says which rungs
                         // were tried, which is the part the next operator
                         // needs.
-                        log_error(format!("restart {imei}: {error}"));
+                        //
+                        // Two different things can arrive here and they are
+                        // logged differently on purpose: a radio that did not
+                        // come back is a failed restart, while a radio that
+                        // came back over a card that did not is a working
+                        // module with a card problem. Reading the second as
+                        // the first produces exactly the wrong next action —
+                        // another restart.
+                        if error.radio_restored() {
+                            log_line(format!("restart {imei}: radio back, card not: {error}"));
+                        } else {
+                            log_error(format!("restart {imei}: {error}"));
+                        }
                         SendError::new(error.code(), error.to_string())
                     })
                 })?;
