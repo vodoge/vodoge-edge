@@ -223,8 +223,13 @@ dependencies = [
 name = "edge-modem"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "edge-core",
  "libc",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
 ]
 
 [[package]]

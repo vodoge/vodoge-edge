@@ -3,7 +3,8 @@ use std::{error::Error, fmt};
 use crate::{
     dms, es10c, nas, uim, unique_tlv, wms, AllocationError, ApduResponse, CellLocationInfo,
     ClientAllocationRequest, ClientAssignment, ClientId, ClientRegistry, ClientRegistryError,
-    CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, EuiccInfo2, ListedMessage,
+    ConfiguredAddresses, CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError,
+    EuiccInfo1, EuiccInfo2, ListedMessage,
     MessageId, MessageMode, MessageTag, NasError, NotificationMetadata, OperatingMode,
     PendingNotification, PendingTransactions, Profile, QmiRequest, QmiResponse, QmiResult,
     RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError, TransactionId,
@@ -344,6 +345,59 @@ impl<T: QmiTransport> QmiClient<T> {
         outcome
     }
 
+    /// Everything ES9+ `InitiateAuthentication` needs from the chip.
+    ///
+    /// One channel again, and for a stronger reason than tidiness: the
+    /// challenge is only meaningful next to the `GetEUICCInfo1` that names the
+    /// CI keys the same chip will verify with, and reading them through two
+    /// sessions leaves room for them to come from two different cards.
+    ///
+    /// Read-only. `GetEUICCChallenge` generates a fresh random each call and
+    /// stores nothing an operator can see; the profile inventory, the enabled
+    /// profile and the pending notifications are all untouched.
+    pub fn read_esim_authentication_inputs(
+        &mut self,
+        slot: u8,
+    ) -> Result<EsimAuthenticationInputs, SessionError> {
+        let mut session = self.isdr_session(slot)?;
+        let outcome = (|| {
+            let eid = session.read_eid()?;
+            let challenge = session.euicc_challenge()?;
+            let info1 = session.euicc_info1()?;
+            // Both of these name where to go next, and a chip that refuses
+            // one can still be reachable through the other, so neither is
+            // allowed to fail the read.
+            let (addresses, addresses_error) = match session.configured_addresses() {
+                Ok(addresses) => (addresses, None),
+                Err(error) => (ConfiguredAddresses::default(), Some(error.to_string())),
+            };
+            let (notification_addresses, notification_addresses_error) =
+                match session.list_notifications() {
+                    Ok(list) => {
+                        let mut addresses: Vec<String> = Vec::new();
+                        for entry in list {
+                            if !addresses.contains(&entry.address) {
+                                addresses.push(entry.address);
+                            }
+                        }
+                        (addresses, None)
+                    }
+                    Err(error) => (Vec::new(), Some(error.to_string())),
+                };
+            Ok(EsimAuthenticationInputs {
+                eid,
+                challenge,
+                info1,
+                addresses,
+                addresses_error,
+                notification_addresses,
+                notification_addresses_error,
+            })
+        })();
+        session.close()?;
+        outcome
+    }
+
     /// Pull one pending notification off the chip, signature and all.
     ///
     /// This is the first of the three steps in an ES9+ notification retry.
@@ -450,6 +504,26 @@ pub struct EsimLocalInfo {
     pub notifications_error: Option<String>,
     pub profiles: Vec<Profile>,
     pub profiles_error: Option<String>,
+}
+
+/// What an ES9+ session needs from the chip before it can start.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EsimAuthenticationInputs {
+    pub eid: String,
+    /// Sixteen random bytes, fresh from this read.
+    pub challenge: [u8; es10c::EUICC_CHALLENGE_BYTES],
+    pub info1: EuiccInfo1,
+    pub addresses: ConfiguredAddresses,
+    pub addresses_error: Option<String>,
+    /// The SM-DP+ addresses the chip's pending notifications name, in the
+    /// order it reported them and without repeats.
+    ///
+    /// A fallback with a real basis: a notification carries the address of the
+    /// server that has to hear about it, so a chip with anything pending knows
+    /// an SM-DP+ that has already dealt with this card even when no default
+    /// one is configured. Both bench chips are in exactly that state.
+    pub notification_addresses: Vec<String>,
+    pub notification_addresses_error: Option<String>,
 }
 
 /// An open ISD-R logical channel.
@@ -559,6 +633,30 @@ impl<T: QmiTransport> IsdrSession<'_, T> {
     pub fn euicc_info2(&mut self) -> Result<EuiccInfo2, SessionError> {
         let bytes = self.execute(&es10c::euicc_info2_payload())?;
         Ok(es10c::parse_euicc_info2(&bytes)?)
+    }
+
+    /// `GetEUICCChallenge`: sixteen random bytes, generated now.
+    ///
+    /// Never cached. Two calls returning the same value would mean the chip
+    /// was not consulted, and an ES9+ exchange built on a stale challenge
+    /// proves nothing about which card is on the other end.
+    pub fn euicc_challenge(
+        &mut self,
+    ) -> Result<[u8; es10c::EUICC_CHALLENGE_BYTES], SessionError> {
+        let bytes = self.execute(&es10c::euicc_challenge_payload())?;
+        Ok(es10c::parse_euicc_challenge(&bytes)?)
+    }
+
+    /// `GetEUICCInfo1`, decoded and kept in its encoded form.
+    pub fn euicc_info1(&mut self) -> Result<EuiccInfo1, SessionError> {
+        let bytes = self.execute(&es10c::euicc_info1_payload())?;
+        Ok(es10c::parse_euicc_info1(&bytes)?)
+    }
+
+    /// ES10a `GetEuiccConfiguredAddresses`.
+    pub fn configured_addresses(&mut self) -> Result<ConfiguredAddresses, SessionError> {
+        let bytes = self.execute(&es10c::configured_addresses_payload())?;
+        Ok(es10c::parse_configured_addresses(&bytes)?)
     }
 
     /// `ListNotification` with no filter.

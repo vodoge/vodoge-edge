@@ -44,6 +44,12 @@ const TAG_DISABLE_PROFILE: &[u8] = &[0xbf, 0x32];
 const TAG_GET_EUICC_DATA: &[u8] = &[0xbf, 0x3e];
 /// ES10b `GetEUICCInfo2`.
 const TAG_EUICC_INFO2: &[u8] = &[0xbf, 0x22];
+/// ES10b `GetEUICCInfo1`, the short form ES9+ carries.
+const TAG_EUICC_INFO1: &[u8] = &[0xbf, 0x20];
+/// ES10b `GetEUICCChallenge`.
+const TAG_EUICC_CHALLENGE: &[u8] = &[0xbf, 0x2e];
+/// ES10a `GetEuiccConfiguredAddresses`.
+const TAG_CONFIGURED_ADDRESSES: &[u8] = &[0xbf, 0x3c];
 /// ES10b `ListNotification`.
 const TAG_LIST_NOTIFICATION: &[u8] = &[0xbf, 0x28];
 /// ES10b `RetrieveNotificationsList`.
@@ -144,6 +150,12 @@ pub enum Es10cError {
     NotificationsUnavailable { code: u64 },
     /// A field SGP.22 makes mandatory was absent.
     MissingField { name: &'static str },
+    /// `GetEUICCChallenge` returned something other than sixteen bytes.
+    ///
+    /// Its own error rather than `Truncated`: the challenge is what binds an
+    /// ES9+ session to this chip, and a short one would be handed to an
+    /// SM-DP+ and echoed back looking perfectly valid.
+    ChallengeLength { actual: usize },
 }
 
 impl std::fmt::Display for Es10cError {
@@ -172,6 +184,10 @@ impl std::fmt::Display for Es10cError {
                 if *code == 127 { " (undefined error)" } else { "" }
             ),
             Self::MissingField { name } => write!(formatter, "response has no {name}"),
+            Self::ChallengeLength { actual } => write!(
+                formatter,
+                "eUICC challenge is {actual} bytes, SGP.22 requires {EUICC_CHALLENGE_BYTES}"
+            ),
         }
     }
 }
@@ -268,6 +284,39 @@ impl EuiccInfo2 {
     }
 }
 
+/// How many bytes `GetEUICCChallenge` returns (SGP.22 `Octet16`).
+pub const EUICC_CHALLENGE_BYTES: usize = 16;
+
+/// `GetEUICCInfo1`: the short chip description ES9+ carries verbatim.
+///
+/// The raw bytes are kept alongside the decoded fields because
+/// `InitiateAuthentication` transports the whole `BF20` structure base64
+/// encoded, and an SM-DP+ reads it as the chip emitted it. Re-encoding the
+/// decoded fields would produce something that means the same and is not the
+/// same, which is exactly the class of bug that only shows up at the far end.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EuiccInfo1 {
+    /// SGP.22 version the chip implements.
+    pub svn: Option<String>,
+    /// GSMA CI public key identifiers the chip verifies an SM-DP+ against.
+    pub ci_key_ids_for_verification: Vec<String>,
+    pub ci_key_ids_for_signing: Vec<String>,
+    /// The `BF20` TLV exactly as the card produced it.
+    pub raw: Vec<u8>,
+}
+
+/// The addresses ES10a `GetEuiccConfiguredAddresses` reports.
+///
+/// Both are optional and on the bench both chips answer with only the second:
+/// no default SM-DP+ is configured, and the root SM-DS is GSMA's *test* one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConfiguredAddresses {
+    /// The SM-DP+ the chip should talk to when nothing else names one.
+    pub default_dp_address: Option<String>,
+    /// The root discovery server.
+    pub root_ds_address: Option<String>,
+}
+
 /// One entry of the eUICC pending notification list.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NotificationMetadata {
@@ -354,6 +403,29 @@ pub fn get_eid_payload() -> Vec<u8> {
 /// ES10b `GetEUICCInfo2`.
 pub fn euicc_info2_payload() -> Vec<u8> {
     [TAG_EUICC_INFO2, &[0x00]].concat()
+}
+
+/// ES10b `GetEUICCInfo1`.
+///
+/// Not the same thing as `GetEUICCInfo2` with fewer fields read out of it:
+/// ES9+ `InitiateAuthentication` carries `euiccInfo1`, and an SM-DP+ handed
+/// the `BF22` structure instead rejects the request.
+pub fn euicc_info1_payload() -> Vec<u8> {
+    [TAG_EUICC_INFO1, &[0x00]].concat()
+}
+
+/// ES10b `GetEUICCChallenge`.
+///
+/// Read-only, and fresh every time: the chip generates a new random challenge
+/// per call rather than returning a stored one. That is what makes it usable
+/// as proof that an ES9+ session reached this chip and not a cache.
+pub fn euicc_challenge_payload() -> Vec<u8> {
+    [TAG_EUICC_CHALLENGE, &[0x00]].concat()
+}
+
+/// ES10a `GetEuiccConfiguredAddresses`.
+pub fn configured_addresses_payload() -> Vec<u8> {
+    [TAG_CONFIGURED_ADDRESSES, &[0x00]].concat()
 }
 
 /// ES10b `ListNotification` with no filter.
@@ -519,6 +591,82 @@ pub fn parse_euicc_info2(response: &[u8]) -> Result<EuiccInfo2, Es10cError> {
         return Err(Es10cError::MissingField { name: "svn" });
     }
     Ok(info)
+}
+
+/// Parse a `GetEUICCChallenge` response into the sixteen random bytes.
+pub fn parse_euicc_challenge(response: &[u8]) -> Result<[u8; EUICC_CHALLENGE_BYTES], Es10cError> {
+    let body = expect_tag(response, TAG_EUICC_CHALLENGE)?;
+    let (tag, value, _) = read_tlv(body)?;
+    if tag != [0x80] {
+        return Err(Es10cError::UnexpectedTag {
+            expected: vec![0x80],
+            actual: tag,
+        });
+    }
+    value
+        .try_into()
+        .map_err(|_| Es10cError::ChallengeLength {
+            actual: value.len(),
+        })
+}
+
+/// Parse a `GetEUICCInfo1` response, keeping the encoded form.
+///
+/// The response is trimmed to exactly the length the `BF20` header declares.
+/// A modem that pads its answer would otherwise put those pad bytes into the
+/// base64 an SM-DP+ receives, and a server that parses strict DER answers
+/// that with a function execution error rather than with anything that names
+/// the padding.
+pub fn parse_euicc_info1(response: &[u8]) -> Result<EuiccInfo1, Es10cError> {
+    let (tag, body, tail) = read_tlv(response)?;
+    if tag != TAG_EUICC_INFO1 {
+        return Err(Es10cError::UnexpectedTag {
+            expected: TAG_EUICC_INFO1.to_vec(),
+            actual: tag,
+        });
+    }
+    let mut info = EuiccInfo1 {
+        raw: response[..response.len() - tail.len()].to_vec(),
+        ..EuiccInfo1::default()
+    };
+    let mut rest = body;
+    while !rest.is_empty() {
+        let (tag, value, next) = read_tlv(rest)?;
+        rest = next;
+        match tag.as_slice() {
+            [0x82] => info.svn = Some(version(value)),
+            [0xa9] => info.ci_key_ids_for_verification = key_identifiers(value)?,
+            [0xaa] => info.ci_key_ids_for_signing = key_identifiers(value)?,
+            _ => {}
+        }
+    }
+    if info.svn.is_none() {
+        return Err(Es10cError::MissingField { name: "svn" });
+    }
+    if info.ci_key_ids_for_verification.is_empty() {
+        // A chip that lists no CI it will verify against cannot complete a
+        // download at all, so this is a refusal rather than a blank field.
+        return Err(Es10cError::MissingField {
+            name: "euiccCiPKIdListForVerification",
+        });
+    }
+    Ok(info)
+}
+
+/// Parse a `GetEuiccConfiguredAddresses` response.
+pub fn parse_configured_addresses(response: &[u8]) -> Result<ConfiguredAddresses, Es10cError> {
+    let mut body = expect_tag(response, TAG_CONFIGURED_ADDRESSES)?;
+    let mut addresses = ConfiguredAddresses::default();
+    while !body.is_empty() {
+        let (tag, value, tail) = read_tlv(body)?;
+        body = tail;
+        match tag.as_slice() {
+            [0x80] => addresses.default_dp_address = text(value),
+            [0x81] => addresses.root_ds_address = text(value),
+            _ => {}
+        }
+    }
+    Ok(addresses)
 }
 
 /// Parse a `ListNotification` response.

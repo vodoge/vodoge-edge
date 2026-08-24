@@ -171,6 +171,12 @@ struct FakeEuicc {
     outstanding: Vec<u8>,
     /// Commands to refuse, by their ES10 tag.
     refuse: Vec<[u8; 2]>,
+    /// How many challenges have been handed out.
+    ///
+    /// A real chip generates a fresh random per call. A fake that returned a
+    /// constant would let a cached implementation pass, so this one changes
+    /// its answer every time and the test asserts on the difference.
+    challenges: u8,
 }
 
 impl FakeEuicc {
@@ -186,19 +192,28 @@ impl FakeEuicc {
                 log: Rc::clone(&log),
                 outstanding: Vec::new(),
                 refuse,
+                challenges: 0,
             },
             log,
         )
     }
 
-    fn answer_for(&self, payload: &[u8]) -> Option<Vec<u8>> {
+    fn answer_for(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
         let tag = [*payload.first()?, *payload.get(1)?];
         if self.refuse.contains(&tag) {
             return None;
         }
+        if tag == [0xbf, 0x2e] {
+            self.challenges = self.challenges.wrapping_add(1);
+            let mut answer = from_hex(CHALLENGE_RESPONSE);
+            *answer.last_mut()? = self.challenges;
+            return Some(answer);
+        }
         let hex = match tag {
             [0xbf, 0x3e] => EID_RESPONSE,
             [0xbf, 0x22] => INFO2_RESPONSE,
+            [0xbf, 0x20] => INFO1_RESPONSE,
+            [0xbf, 0x3c] => CONFIGURED_ADDRESSES_RESPONSE,
             [0xbf, 0x28] => LIST_NOTIFICATION_RESPONSE,
             [0xbf, 0x2d] => PROFILES_RESPONSE,
             [0xbf, 0x2b] => PENDING_RESPONSE,
@@ -301,6 +316,17 @@ fn from_hex(hex: &str) -> Vec<u8> {
 
 /// Captured from 867018069514820 with AT+CGLA on its ISD-R channel.
 const EID_RESPONSE: &str = "BF3E125A1089086030202200000026000178339240";
+/// `GetEUICCChallenge` from the same chip. The last byte is overwritten per
+/// call so a cached answer cannot pass for a fresh one.
+const CHALLENGE_RESPONSE: &str = "BF2E1280108BCF1BE4ADA9C98AF062987330056103";
+/// `GetEUICCInfo1`: three fields, and the CI keys the chip verifies with.
+const INFO1_RESPONSE: &str = "BF20358203020202A916041481370F5125D0B1D408D4C3B232E6D25E795BEBFB\
+                              AA16041481370F5125D0B1D408D4C3B232E6D25E795BEBFB";
+/// `GetEuiccConfiguredAddresses`: no default SM-DP+, only GSMA's *test* root
+/// discovery server. Both bench chips answer exactly this, which is why an
+/// address has to come from somewhere else before ES9+ can start.
+const CONFIGURED_ADDRESSES_RESPONSE: &str =
+    "BF3C17811574657374726F6F74736D64732E67736D612E636F6D";
 const INFO2_RESPONSE: &str = "BF227E8103020301820302020283030402008 40D8101008204000279D083020B\
                               898505077F3E1F808603090200870302030088020490A916041481370F5125D0B1\
                               D408D4C3B232E6D25E795BEBFBAA16041481370F5125D0B1D408D4C3B232E6D25E7\
@@ -501,6 +527,108 @@ fn a_failed_command_still_closes_the_channel() {
     let log = log.borrow();
     assert_eq!(log.opens, 1);
     assert_eq!(log.closes, 1, "closed on the error path too");
+}
+
+/// Everything an ES9+ session needs, gathered on one channel.
+///
+/// The challenge and the CI key list have to come from the same card, so they
+/// are read inside one ISD-R session rather than through separate calls that
+/// could each land on a different chip.
+#[test]
+fn reading_the_authentication_inputs_opens_one_logical_channel() {
+    let (transport, log) = FakeEuicc::new();
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let inputs = client
+        .read_esim_authentication_inputs(1)
+        .expect("authentication inputs");
+
+    assert_eq!(inputs.eid, "89086030202200000026000178339240");
+    assert_eq!(inputs.challenge.len(), 16);
+    assert_eq!(inputs.info1.svn.as_deref(), Some("2.2.2"));
+    assert_eq!(
+        inputs.info1.ci_key_ids_for_verification,
+        vec!["81370F5125D0B1D408D4C3B232E6D25E795BEBFB"]
+    );
+    // The whole BF20 TLV, which is what ES9+ carries base64 encoded. Fifty-six
+    // bytes: three of header and the fifty-three the card declared.
+    assert_eq!(inputs.info1.raw.len(), 56);
+    assert_eq!(&inputs.info1.raw[..2], &[0xbf, 0x20]);
+
+    // No default SM-DP+ on this chip, so the address has to come from the
+    // pending notifications instead.
+    assert_eq!(inputs.addresses.default_dp_address, None);
+    assert_eq!(
+        inputs.addresses.root_ds_address.as_deref(),
+        Some("testrootsmds.gsma.com")
+    );
+    assert_eq!(
+        inputs.notification_addresses,
+        vec!["wbg.prod.ondemandconnectivity.com"],
+        "four notifications, one distinct address"
+    );
+
+    let log = log.borrow();
+    assert_eq!(log.opens, 1, "one ISD-R channel for the whole read");
+    assert_eq!(log.closes, 1);
+    // GetEUICCData, GetEUICCChallenge, GetEUICCInfo1,
+    // GetEuiccConfiguredAddresses, ListNotification.
+    assert_eq!(log.commands.len(), 5);
+}
+
+/// Two reads, two different challenges.
+///
+/// The whole evidential value of an ES9+ round trip rests on the challenge
+/// being generated by the card at the moment of asking. A cached one would
+/// make a replayed server answer verify perfectly.
+#[test]
+fn every_challenge_is_a_new_one() {
+    let (transport, _log) = FakeEuicc::new();
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let first = client
+        .read_esim_authentication_inputs(1)
+        .expect("first")
+        .challenge;
+    let second = client
+        .read_esim_authentication_inputs(1)
+        .expect("second")
+        .challenge;
+    assert_ne!(first, second, "the chip was asked twice, not cached once");
+}
+
+/// A chip that refuses `GetEuiccConfiguredAddresses` is still usable.
+///
+/// The addresses are one of two ways to learn where to go, and neither is
+/// mandatory, so a refusal is recorded next to the read rather than failing
+/// it. The notification addresses still arrive.
+#[test]
+fn a_refused_address_query_does_not_fail_the_read() {
+    let (transport, log) = FakeEuicc::refusing(vec![[0xbf, 0x3c]]);
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let inputs = client
+        .read_esim_authentication_inputs(1)
+        .expect("authentication inputs");
+    assert!(inputs.addresses_error.is_some(), "the refusal is reported");
+    assert_eq!(inputs.addresses.default_dp_address, None);
+    assert_eq!(
+        inputs.notification_addresses,
+        vec!["wbg.prod.ondemandconnectivity.com"]
+    );
+    assert_eq!(log.borrow().closes, 1);
+}
+
+/// A chip with no challenge has nothing to authenticate with.
+#[test]
+fn a_refused_challenge_fails_the_read_and_closes_the_channel() {
+    let (transport, log) = FakeEuicc::refusing(vec![[0xbf, 0x2e]]);
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    assert!(client.read_esim_authentication_inputs(1).is_err());
+    let log = log.borrow();
+    assert_eq!(log.opens, 1);
+    assert_eq!(log.closes, 1);
 }
 
 /// A card that is not an eUICC is a refusal, not a silent empty answer.

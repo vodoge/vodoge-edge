@@ -8,6 +8,16 @@ description = "QMUX/QMI framing, session, and DMS codecs for the Vodoge edge age
 
 [dependencies]
 edge-core = { path = "../edge-core" }
+# ES9+ is HTTPS against an SM-DP+ whose certificate chains to a GSMA CI root
+# rather than to anything a system trust store carries, so the TLS stack has
+# to take its anchors from us. rustls and ring are already in this binary for
+# the cloud uplink; reaching for a full HTTP client would have added a runtime
+# and a dependency tree for one POST.
+base64 = "0.22"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pemfile = "2"
+serde_json = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

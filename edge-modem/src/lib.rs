@@ -11,6 +11,7 @@ mod channels;
 mod discovery;
 mod dms;
 mod es10c;
+mod es9p;
 mod fake;
 mod inbox;
 mod nas;
@@ -50,11 +51,19 @@ pub use report::{
     ScannedOperator, Signal,
 };
 pub use es10c::{
+    configured_addresses_payload, euicc_challenge_payload, euicc_info1_payload,
     euicc_info2_payload, get_eid_payload, get_profiles_payload, list_notification_payload,
-    parse_eid_response, parse_euicc_info2, parse_notification_metadata_list,
-    parse_pending_notifications, retrieve_notifications_payload, store_data_chain, Es10cError,
-    EuiccInfo2, NotificationMetadata, PendingNotification, Profile, MAX_STORE_DATA_BLOCKS,
-    MAX_STORE_DATA_BYTES, STORE_DATA_BLOCK_BYTES,
+    parse_configured_addresses, parse_eid_response, parse_euicc_challenge, parse_euicc_info1,
+    parse_euicc_info2, parse_notification_metadata_list, parse_pending_notifications,
+    retrieve_notifications_payload, store_data_chain, ConfiguredAddresses, Es10cError, EuiccInfo1,
+    EuiccInfo2, NotificationMetadata, PendingNotification, Profile, EUICC_CHALLENGE_BYTES,
+    MAX_STORE_DATA_BLOCKS, MAX_STORE_DATA_BYTES, STORE_DATA_BLOCK_BYTES,
+};
+pub use es9p::{
+    initiate_authentication_request, load_trust_anchors, parse_initiate_authentication, trust_dir,
+    verify_server_credentials, AuthenticationStart, Es9pClient, Es9pError, HttpResponse,
+    TrustAnchor, Verification, ADMIN_PROTOCOL, DEFAULT_TRUST_DIR, INITIATE_AUTHENTICATION_PATH,
+    TRUST_DIR_ENV, USER_AGENT,
 };
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
@@ -83,7 +92,8 @@ pub use nas::{
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{
-    EsimLocalInfo, IsdrSession, QmiClient, QmiTransport, SessionError, SyncRequest, CTL_SYNC,
+    EsimAuthenticationInputs, EsimLocalInfo, IsdrSession, QmiClient, QmiTransport, SessionError,
+    SyncRequest, CTL_SYNC,
 };
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,
