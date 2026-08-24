@@ -266,6 +266,16 @@
       "type": "string",
       "pattern": "^[0-9]{14,16}$"
     },
+    "ActivationCode": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 1024
+    },
+    "ConfirmationCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
     "SmdpAddress": {
       "type": "string",
       "minLength": 4,
@@ -725,6 +735,7 @@
       { "$ref": "#/$defs/ReadEsimInfoCommand" },
       { "$ref": "#/$defs/RetrieveEsimNotificationCommand" },
       { "$ref": "#/$defs/InitiateEsimAuthenticationCommand" },
+      { "$ref": "#/$defs/DownloadEsimProfileCommand" },
       { "$ref": "#/$defs/RunAtCommandCommand" },
       { "$ref": "#/$defs/SendUssdCommand" },
       { "$ref": "#/$defs/SetRadioCommand" },
@@ -919,6 +930,17 @@
         "kind": { "const": "InitiateEsimAuthentication" },
         "modem_imei": { "$ref": "#/$defs/Imei" },
         "smdp_address": { "$ref": "#/$defs/SmdpAddress" }
+      }
+    },
+    "DownloadEsimProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "activation_code"],
+      "properties": {
+        "kind": { "const": "DownloadEsimProfile" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "activation_code": { "$ref": "#/$defs/ActivationCode" },
+        "confirmation_code": { "$ref": "#/$defs/ConfirmationCode" }
       }
     },
     "ConfigureProxyCommand": {

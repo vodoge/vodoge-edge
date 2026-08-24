@@ -112,6 +112,9 @@ pub enum Es9pError {
     BadBase64 { field: &'static str },
     /// The `ServerSigned1` structure did not decode.
     MalformedServerSigned { reason: String },
+    /// The activation code is not one this LPA can act on. Named separately
+    /// because it is the one failure the operator can fix by retyping.
+    MalformedActivationCode { reason: String },
     /// The server echoed a challenge that is not the one this chip produced.
     ///
     /// A replayed answer from an earlier session would pass every other check
@@ -182,6 +185,9 @@ impl fmt::Display for Es9pError {
             Self::BadBase64 { field } => write!(formatter, "{field} is not valid base64"),
             Self::MalformedServerSigned { reason } => {
                 write!(formatter, "malformed serverSigned1: {reason}")
+            }
+            Self::MalformedActivationCode { reason } => {
+                write!(formatter, "unusable activation code: {reason}")
             }
             Self::ChallengeMismatch { sent, echoed } => write!(
                 formatter,
@@ -490,7 +496,10 @@ impl Es9pClient {
             .map(|version| format!("{version:?}"));
         let mut response = HttpResponse::parse(&raw)?;
         response.tls_version = tls_version;
-        if response.status != 200 {
+        // Any 2xx. SGP.22 has an SM-DP+ answer `handleNotification` with
+        // `204 No Content`, and a client that insisted on 200 would report a
+        // delivered notification as a failure and then deliver it again.
+        if response.status / 100 != 2 {
             return Err(Es9pError::HttpStatus {
                 status: response.status,
                 body: String::from_utf8_lossy(&response.body)
@@ -644,6 +653,13 @@ pub struct AuthenticationStart {
     pub smdp_address: String,
     /// The identifier that names this RSP session at the server, uppercase hex.
     pub transaction_id: String,
+    /// The same identifier exactly as the server wrote it.
+    ///
+    /// Every later ES9+ call quotes it back, and an SM-DP+ is entitled to
+    /// compare strings rather than parse hex. Uppercasing it for display and
+    /// then sending the uppercased form is the kind of change that works
+    /// against every server until it does not.
+    pub transaction_id_raw: String,
     /// `ServerSigned1`, the signed bytes verbatim.
     pub server_signed1: Vec<u8>,
     /// `ServerSignature1` including its `5F37` wrapper.
@@ -652,6 +668,10 @@ pub struct AuthenticationStart {
     pub server_certificate: Vec<u8>,
     /// The CI key the server expects this eUICC to verify with, uppercase hex.
     pub euicc_ci_pkid_to_be_used: String,
+    /// The same field as the server sent it, DER wrapper included. This is
+    /// what `AuthenticateServer` carries to the card, and the card checks the
+    /// encoding rather than the hex.
+    pub euicc_ci_pkid_der: Vec<u8>,
     /// The address inside the signed structure.
     pub server_address: String,
     /// The server's own random, uppercase hex.
@@ -697,24 +717,7 @@ pub fn parse_initiate_authentication(body: &[u8]) -> Result<AuthenticationStart,
         serde_json::from_slice(body).map_err(|error| Es9pError::MalformedJson {
             reason: error.to_string(),
         })?;
-    if let Some(status) = value
-        .pointer("/header/functionExecutionStatus/status")
-        .and_then(|status| status.as_str())
-    {
-        if status != "Executed-Success" {
-            let error = value.pointer("/header/functionExecutionStatus/statusCodeData");
-            return Err(Es9pError::FunctionFailed {
-                status: status.to_string(),
-                subject_code: string_at(error, "subjectCode"),
-                reason_code: string_at(error, "reasonCode"),
-                message: string_at(error, "message"),
-            });
-        }
-    } else {
-        return Err(Es9pError::MissingField {
-            name: "header.functionExecutionStatus.status",
-        });
-    }
+    check_function_status(&value)?;
 
     let transaction_id = required_string(&value, "transactionId")?;
     let server_signed1 = required_base64(&value, "serverSigned1")?;
@@ -726,6 +729,7 @@ pub fn parse_initiate_authentication(body: &[u8]) -> Result<AuthenticationStart,
     Ok(AuthenticationStart {
         smdp_address: String::new(),
         transaction_id: transaction_id.to_ascii_uppercase(),
+        transaction_id_raw: transaction_id.to_string(),
         server_signed1,
         server_signature1,
         server_certificate,
@@ -733,6 +737,7 @@ pub fn parse_initiate_authentication(body: &[u8]) -> Result<AuthenticationStart,
         // identifier. Reported unwrapped so it can be compared against what
         // GetEUICCInfo1 reports without either side knowing about the wrapper.
         euicc_ci_pkid_to_be_used: unwrap_key_identifier(&ci_pkid),
+        euicc_ci_pkid_der: ci_pkid,
         server_address: signed.server_address,
         server_challenge: hex_upper(&signed.server_challenge),
         echoed_euicc_challenge: hex_upper(&signed.euicc_challenge),
@@ -1136,4 +1141,267 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+// ---------------------------------------------------------------------------
+// The rest of ES9+: everything a download needs after `InitiateAuthentication`.
+//
+// These four functions are not read-only and they are not free. `AuthenticateClient`
+// tells the SM-DP+ which order this eUICC is claiming, `GetBoundProfilePackage`
+// releases the profile, `handleNotification` changes what the operator believes
+// about a subscription, and `cancelSession` is the only way to put back a
+// profile that was claimed and must not be installed. Each one is a separate
+// call here for that reason: a single `download()` that did all of them would
+// have no place to stop between claiming a profile and installing it, and that
+// gap is where the policy rules get read.
+// ---------------------------------------------------------------------------
+
+/// SGP.22 ES9+ paths.
+pub const AUTHENTICATE_CLIENT_PATH: &str = "/gsma/rsp2/es9plus/authenticateClient";
+pub const GET_BOUND_PROFILE_PACKAGE_PATH: &str = "/gsma/rsp2/es9plus/getBoundProfilePackage";
+pub const HANDLE_NOTIFICATION_PATH: &str = "/gsma/rsp2/es9plus/handleNotification";
+pub const CANCEL_SESSION_PATH: &str = "/gsma/rsp2/es9plus/cancelSession";
+
+/// An activation code, as a QR code carries it.
+///
+/// `LPA:1$<SM-DP+ address>$<matching id>[$<SM-DP+ OID>][$1]`, where the last
+/// field means a confirmation code is required. The `LPA:` prefix is what a
+/// scanner produces and what a person retyping it usually leaves off, so both
+/// are accepted.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ActivationCode {
+    pub smdp_address: String,
+    pub matching_id: Option<String>,
+    /// The SM-DP+ object identifier, when the code pins one.
+    pub object_identifier: Option<String>,
+    /// The code's own claim that a confirmation code will be needed. The
+    /// server says so again in `SmdpSigned2`, and that second answer is the
+    /// one that decides — this one only lets us fail early.
+    pub confirmation_code_required: bool,
+}
+
+/// Read an activation code.
+///
+/// Deliberately strict about the version field. `LPA:2$...` is not a thing
+/// this LPA can carry out, and treating an unknown version as version 1 is how
+/// an activation code gets consumed by a client that then cannot finish.
+pub fn parse_activation_code(text: &str) -> Result<ActivationCode, Es9pError> {
+    let trimmed = text.trim();
+    let body = trimmed
+        .strip_prefix("LPA:")
+        .or_else(|| trimmed.strip_prefix("lpa:"))
+        .unwrap_or(trimmed);
+    let parts: Vec<&str> = body.split('$').collect();
+    if parts.len() < 3 {
+        return Err(Es9pError::MalformedActivationCode {
+            reason: "expected at least 1$<SM-DP+ address>$<matching id>".into(),
+        });
+    }
+    if parts[0] != "1" {
+        return Err(Es9pError::MalformedActivationCode {
+            reason: format!("activation code format {:?} is not supported", parts[0]),
+        });
+    }
+    let smdp_address = parts[1].trim().to_string();
+    if smdp_address.is_empty() || !smdp_address.contains('.') {
+        return Err(Es9pError::MalformedActivationCode {
+            reason: "the SM-DP+ address is not a host name".into(),
+        });
+    }
+    let matching_id = match parts[2].trim() {
+        "" => None,
+        value => Some(value.to_string()),
+    };
+    let object_identifier = parts
+        .get(3)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let confirmation_code_required = parts.get(4).map(|value| value.trim()) == Some("1");
+    Ok(ActivationCode {
+        smdp_address,
+        matching_id,
+        object_identifier,
+        confirmation_code_required,
+    })
+}
+
+/// What `AuthenticateClient` returns: the profile's description, and the
+/// credentials the eUICC needs before the profile itself will be released.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClientAuthentication {
+    /// `StoreMetadataRequest`. Read *before* anything is installed — this is
+    /// where the Profile Policy Rules are.
+    pub profile_metadata: Vec<u8>,
+    pub smdp_signed2: Vec<u8>,
+    pub smdp_signature2: Vec<u8>,
+    pub smdp_certificate: Vec<u8>,
+    pub http_status: u16,
+    pub elapsed_ms: u64,
+}
+
+/// What `GetBoundProfilePackage` returns.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BoundProfile {
+    pub package: Vec<u8>,
+    pub http_status: u16,
+    pub elapsed_ms: u64,
+}
+
+/// One ES9+ call whose answer is a status rather than a document.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Acknowledgement {
+    pub http_status: u16,
+    pub elapsed_ms: u64,
+}
+
+impl Es9pClient {
+    /// ES9+ `AuthenticateClient`.
+    ///
+    /// The first call that has an effect on anyone's account: it hands the
+    /// SM-DP+ the matching id inside the eUICC's signed answer, and the server
+    /// moves the order from released to linked. It does *not* release the
+    /// profile — that is `GetBoundProfilePackage` — and the gap between them
+    /// is where an LPA gets to read the metadata and walk away.
+    pub fn authenticate_client(
+        &self,
+        host: &str,
+        transaction_id: &str,
+        authenticate_server_response: &[u8],
+    ) -> Result<ClientAuthentication, Es9pError> {
+        let body = serde_json::json!({
+            "transactionId": transaction_id,
+            "authenticateServerResponse": BASE64.encode(authenticate_server_response),
+        })
+        .to_string();
+        let started = Instant::now();
+        let response = self.post_json(host, AUTHENTICATE_CLIENT_PATH, body.as_bytes())?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.body).map_err(|error| Es9pError::MalformedJson {
+                reason: error.to_string(),
+            })?;
+        check_function_status(&value)?;
+        Ok(ClientAuthentication {
+            profile_metadata: required_base64(&value, "profileMetadata")?,
+            smdp_signed2: required_base64(&value, "smdpSigned2")?,
+            smdp_signature2: required_base64(&value, "smdpSignature2")?,
+            smdp_certificate: required_base64(&value, "smdpCertificate")?,
+            http_status: response.status,
+            elapsed_ms,
+        })
+    }
+
+    /// ES9+ `GetBoundProfilePackage`.
+    ///
+    /// This is the point of no return at the server: the profile is bound to
+    /// this eUICC's one-time key and will not be handed out again. Everything
+    /// that could refuse the download has to have refused it before here.
+    pub fn get_bound_profile_package(
+        &self,
+        host: &str,
+        transaction_id: &str,
+        prepare_download_response: &[u8],
+    ) -> Result<BoundProfile, Es9pError> {
+        let body = serde_json::json!({
+            "transactionId": transaction_id,
+            "prepareDownloadResponse": BASE64.encode(prepare_download_response),
+        })
+        .to_string();
+        let started = Instant::now();
+        let response = self.post_json(host, GET_BOUND_PROFILE_PACKAGE_PATH, body.as_bytes())?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.body).map_err(|error| Es9pError::MalformedJson {
+                reason: error.to_string(),
+            })?;
+        check_function_status(&value)?;
+        Ok(BoundProfile {
+            package: required_base64(&value, "boundProfilePackage")?,
+            http_status: response.status,
+            elapsed_ms,
+        })
+    }
+
+    /// ES9+ `handleNotification`.
+    ///
+    /// One-way and unacknowledged by design: SGP.22 has the server answer
+    /// `204 No Content`, so there is no `functionExecutionStatus` to read and
+    /// a body, if one arrives, is not this call's business. What this does
+    /// change is the operator's view of the subscription, which is why the
+    /// caller decides *which* notifications go and this does not send a list.
+    pub fn handle_notification(
+        &self,
+        host: &str,
+        pending_notification: &[u8],
+    ) -> Result<Acknowledgement, Es9pError> {
+        let body = serde_json::json!({
+            "pendingNotification": BASE64.encode(pending_notification),
+        })
+        .to_string();
+        let started = Instant::now();
+        let response = self.post_json(host, HANDLE_NOTIFICATION_PATH, body.as_bytes())?;
+        Ok(Acknowledgement {
+            http_status: response.status,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// ES9+ `cancelSession`.
+    ///
+    /// The counterpart to `AuthenticateClient`. Without it a claimed profile
+    /// stays claimed and the activation code looks used up to anyone who tries
+    /// it again, so this runs on every path that starts a session and then
+    /// decides not to install.
+    pub fn cancel_session(
+        &self,
+        host: &str,
+        transaction_id: &str,
+        cancel_session_response: &[u8],
+    ) -> Result<Acknowledgement, Es9pError> {
+        let body = serde_json::json!({
+            "transactionId": transaction_id,
+            "cancelSessionResponse": BASE64.encode(cancel_session_response),
+        })
+        .to_string();
+        let started = Instant::now();
+        let response = self.post_json(host, CANCEL_SESSION_PATH, body.as_bytes())?;
+        Ok(Acknowledgement {
+            http_status: response.status,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+}
+
+/// `SHA256(SHA256(confirmationCode) || transactionId)`, as SGP.22 defines the
+/// `hashCc` an eUICC checks in `PrepareDownload`.
+pub fn hash_confirmation_code(confirmation_code: &str, transaction_id: &[u8]) -> [u8; 32] {
+    let first = ring::digest::digest(&ring::digest::SHA256, confirmation_code.as_bytes());
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    context.update(first.as_ref());
+    context.update(transaction_id);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(context.finish().as_ref());
+    out
+}
+
+/// Turn an ES9+ `functionExecutionStatus` other than success into an error.
+fn check_function_status(value: &serde_json::Value) -> Result<(), Es9pError> {
+    let Some(status) = value
+        .pointer("/header/functionExecutionStatus/status")
+        .and_then(|status| status.as_str())
+    else {
+        return Err(Es9pError::MissingField {
+            name: "header.functionExecutionStatus.status",
+        });
+    };
+    if status == "Executed-Success" {
+        return Ok(());
+    }
+    let error = value.pointer("/header/functionExecutionStatus/statusCodeData");
+    Err(Es9pError::FunctionFailed {
+        status: status.to_string(),
+        subject_code: string_at(error, "subjectCode"),
+        reason_code: string_at(error, "reasonCode"),
+        message: string_at(error, "message"),
+    })
 }

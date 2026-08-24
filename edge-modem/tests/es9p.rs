@@ -11,9 +11,9 @@
 use std::path::PathBuf;
 
 use edge_modem::{
-    initiate_authentication_request, load_trust_anchors, parse_initiate_authentication,
-    verify_server_credentials, AuthenticationStart, Es9pClient, Es9pError, HttpResponse,
-    TrustAnchor,
+    hash_confirmation_code, initiate_authentication_request, load_trust_anchors,
+    parse_activation_code, parse_initiate_authentication, verify_server_credentials,
+    AuthenticationStart, Es9pClient, Es9pError, HttpResponse, TrustAnchor,
 };
 
 /// GSM Association - RSP2 Root CI1.
@@ -349,3 +349,95 @@ fn write(dir: &PathBuf, name: &str, contents: &str) {
 /// the surface these tests exercise through `parse_initiate_authentication`.
 #[allow(dead_code)]
 fn _shape(_: AuthenticationStart) {}
+
+// ---------------------------------------------------------------------------
+// Activation codes.
+//
+// The one input to a download that comes from a human, and a one-time
+// credential: an activation code that this reads wrongly is not a retry, it is
+// an order somebody has to have reissued.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_qr_code_activation_string_is_read_field_by_field() {
+    let code = parse_activation_code("LPA:1$smdp.example.com$QQ111-22222-33333-44444")
+        .expect("activation code");
+    assert_eq!(code.smdp_address, "smdp.example.com");
+    assert_eq!(code.matching_id.as_deref(), Some("QQ111-22222-33333-44444"));
+    assert_eq!(code.object_identifier, None);
+    assert!(!code.confirmation_code_required);
+}
+
+/// The prefix is what a scanner emits and what a person retyping leaves off.
+#[test]
+fn the_lpa_prefix_is_optional() {
+    let with = parse_activation_code("LPA:1$smdp.example.com$AAAA").expect("with");
+    let without = parse_activation_code("1$smdp.example.com$AAAA").expect("without");
+    assert_eq!(with, without);
+}
+
+#[test]
+fn the_optional_fields_are_read_when_they_are_there() {
+    let code = parse_activation_code("LPA:1$smdp.example.com$AAAA$1.3.6.1.4.1.31746$1")
+        .expect("activation code");
+    assert_eq!(code.object_identifier.as_deref(), Some("1.3.6.1.4.1.31746"));
+    assert!(code.confirmation_code_required);
+}
+
+/// An empty fourth field with the flag after it is legal and common.
+#[test]
+fn an_empty_object_identifier_still_leaves_the_flag_readable() {
+    let code = parse_activation_code("1$smdp.example.com$AAAA$$1").expect("activation code");
+    assert_eq!(code.object_identifier, None);
+    assert!(code.confirmation_code_required);
+}
+
+/// A version this LPA cannot carry out is refused rather than assumed to be
+/// version 1. Guessing here consumes an activation code with a client that
+/// then cannot finish.
+#[test]
+fn an_unknown_activation_code_version_is_refused() {
+    assert!(matches!(
+        parse_activation_code("LPA:2$smdp.example.com$AAAA"),
+        Err(Es9pError::MalformedActivationCode { .. })
+    ));
+    assert!(matches!(
+        parse_activation_code("LPA:1$smdp.example.com"),
+        Err(Es9pError::MalformedActivationCode { .. })
+    ));
+    assert!(matches!(
+        parse_activation_code("LPA:1$notahostname$AAAA"),
+        Err(Es9pError::MalformedActivationCode { .. })
+    ));
+}
+
+/// SGP.22: `hashCc = SHA256(SHA256(CC) || transactionId)`.
+///
+/// Two hashes, not one, and the transaction id is appended to the digest
+/// rather than to the code. Getting that wrong produces a `PrepareDownload`
+/// the card refuses with a signature error, which reads like a broken
+/// certificate chain rather than like a mistyped confirmation code.
+///
+/// The expected value was computed outside this crate, with Python's
+/// `hashlib`, so the test cannot pass by agreeing with the same library the
+/// implementation uses.
+#[test]
+fn the_confirmation_code_hash_binds_the_code_to_the_transaction() {
+    let transaction = hex_bytes("AABBCCDD");
+    assert_eq!(
+        hash_confirmation_code("12345678", &transaction).to_vec(),
+        hex_bytes("fd5db44a3d887ca68a8c0ddb95617936bea5530dec7ab87c241feb0b8c4565bb")
+    );
+    // The digest of the code on its own is a different value, which is the
+    // mistake the two-round definition exists to rule out.
+    assert_ne!(
+        hash_confirmation_code("12345678", &transaction).to_vec(),
+        hex_bytes("ef797c8118f02dfb649607dd5d3f8c7623048c9c063d532cc95c5ed7a898a64f")
+    );
+    // And a different transaction gives a different hash, so the binding is
+    // real rather than decorative.
+    assert_ne!(
+        hash_confirmation_code("12345678", &transaction),
+        hash_confirmation_code("12345678", &hex_bytes("AABBCCDE"))
+    );
+}

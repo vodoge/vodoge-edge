@@ -156,6 +156,22 @@ pub enum Es10cError {
     /// ES9+ session to this chip, and a short one would be handed to an
     /// SM-DP+ and echoed back looking perfectly valid.
     ChallengeLength { actual: usize },
+    /// The eUICC would not authenticate the SM-DP+.
+    ///
+    /// Separate from `Refused` because this is the card judging a *server*,
+    /// not the card judging a request, and the two failures need different
+    /// answers: one means retry somewhere else, the other means fix the LPA.
+    AuthenticationRefused { code: u64, reason: &'static str },
+    /// The eUICC would not prepare the download.
+    DownloadRefused { code: u64, reason: &'static str },
+    /// `CancelSession` came back as an error, so an RSP session is still open
+    /// on the chip. Reported rather than swallowed: the next download will
+    /// fail with something that does not mention this one.
+    SessionNotCancelled,
+    /// An IMEI that is not fifteen or sixteen digits has no type allocation
+    /// code to take, and inventing one would put a false device identity in
+    /// front of an operator.
+    InvalidImei,
 }
 
 impl std::fmt::Display for Es10cError {
@@ -188,6 +204,20 @@ impl std::fmt::Display for Es10cError {
                 formatter,
                 "eUICC challenge is {actual} bytes, SGP.22 requires {EUICC_CHALLENGE_BYTES}"
             ),
+            Self::AuthenticationRefused { code, reason } => write!(
+                formatter,
+                "eUICC refused to authenticate the SM-DP+: {reason} ({code})"
+            ),
+            Self::DownloadRefused { code, reason } => write!(
+                formatter,
+                "eUICC refused to prepare the download: {reason} ({code})"
+            ),
+            Self::SessionNotCancelled => {
+                formatter.write_str("eUICC refused to cancel the RSP session")
+            }
+            Self::InvalidImei => {
+                formatter.write_str("IMEI is not a digit string long enough to carry a TAC")
+            }
         }
     }
 }
@@ -940,6 +970,618 @@ fn read_tlv(bytes: &[u8]) -> Result<(Vec<u8>, &[u8], &[u8]), Es10cError> {
     Ok((tag, &bytes[cursor..end], &bytes[end..]))
 }
 
+// ---------------------------------------------------------------------------
+// The download half of ES10b, plus the ES8+ metadata that decides whether a
+// download is allowed to happen at all.
+//
+// Everything above this line reads a card. Everything below it is what a
+// profile installation needs, and one of those steps is irreversible: once a
+// Bound Profile Package is loaded the profile is on the chip, and a Profile
+// Policy Rule that came with it is on the chip permanently. So the metadata is
+// decoded *before* anything is loaded, and `ppr1`/`ppr2` are named rather than
+// counted.
+// ---------------------------------------------------------------------------
+
+/// ES10b `AuthenticateServer`.
+const TAG_AUTHENTICATE_SERVER: &[u8] = &[0xbf, 0x38];
+/// ES10b `PrepareDownload`.
+const TAG_PREPARE_DOWNLOAD: &[u8] = &[0xbf, 0x21];
+/// ES10b `LoadBoundProfilePackage` carries a `BoundProfilePackage`.
+const TAG_BOUND_PROFILE_PACKAGE: &[u8] = &[0xbf, 0x36];
+/// `InitialiseSecureChannelRequest`, the first element inside a BPP.
+const TAG_INITIALISE_SECURE_CHANNEL: &[u8] = &[0xbf, 0x23];
+/// ES10b `RemoveNotificationFromList`.
+const TAG_NOTIFICATION_SENT: &[u8] = &[0xbf, 0x30];
+/// ES10b `CancelSession`.
+const TAG_CANCEL_SESSION: &[u8] = &[0xbf, 0x41];
+/// ES8+ `StoreMetadataRequest`, which an SM-DP+ hands over as `profileMetadata`
+/// before any of the profile itself is released.
+const TAG_STORE_METADATA: &[u8] = &[0xbf, 0x25];
+/// `profilePolicyRules` inside `StoreMetadataRequest`.
+const TAG_PROFILE_POLICY_RULES: u8 = 0x99;
+/// The `[0]` alternative of a CHOICE: the success case in every ES10b response
+/// below.
+const TAG_CHOICE_OK: u8 = 0xa0;
+/// The `[1]` alternative: the error case.
+const TAG_CHOICE_ERROR: u8 = 0xa1;
+/// `finalResult` inside `ProfileInstallationResultData`.
+const TAG_FINAL_RESULT: u8 = 0xa2;
+
+/// SGP.22 `CancelSessionReason`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancelSessionReason {
+    EndUserRejection = 0,
+    Postponed = 1,
+    Timeout = 2,
+    /// The profile arrived carrying a Profile Policy Rule this device will not
+    /// install. The one reason code that exists so an LPA can walk away
+    /// *before* the package is released.
+    PprNotAllowed = 3,
+    MetadataMismatch = 4,
+    LoadBppExecutionError = 5,
+    UndefinedReason = 16,
+}
+
+impl CancelSessionReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EndUserRejection => "endUserRejection",
+            Self::Postponed => "postponed",
+            Self::Timeout => "timeout",
+            Self::PprNotAllowed => "pprNotAllowed",
+            Self::MetadataMismatch => "metadataMismatch",
+            Self::LoadBppExecutionError => "loadBppExecutionError",
+            Self::UndefinedReason => "undefinedReason",
+        }
+    }
+}
+
+/// What an SM-DP+ says a profile is, before the profile itself is released.
+///
+/// This is the whole reason `AuthenticateClient` and `PrepareDownload` are two
+/// steps rather than one: between them the LPA holds the metadata and nothing
+/// has been installed yet.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProfileMetadata {
+    pub iccid: Option<String>,
+    pub service_provider_name: Option<String>,
+    pub profile_name: Option<String>,
+    /// 0 test, 1 provisioning, 2 operational.
+    pub class: Option<u8>,
+    /// The policy rules that would be installed with the profile:
+    /// `pprUpdateControl`, `ppr1`, `ppr2`.
+    pub policy_rules: Vec<String>,
+    /// The raw `BF25` bytes, so what was decided on can be shown verbatim.
+    pub raw: Vec<u8>,
+}
+
+impl ProfileMetadata {
+    /// `ppr1` forbids disabling the profile, `ppr2` forbids deleting it.
+    ///
+    /// Either one is permanent once the profile is installed, and on hardware
+    /// nobody can physically reach, a profile that cannot be disabled or
+    /// deleted is a slot that is gone. Returned as a list rather than a
+    /// boolean so a refusal can say which rule it refused.
+    pub fn irreversible_policy_rules(&self) -> Vec<String> {
+        self.policy_rules
+            .iter()
+            .filter(|rule| rule.as_str() == "ppr1" || rule.as_str() == "ppr2")
+            .cloned()
+            .collect()
+    }
+}
+
+/// One piece of a Bound Profile Package as it has to reach the eUICC.
+///
+/// A BPP is not sent as one blob. SGP.22 section 5.7.5 splits it at fixed
+/// points — the header plus the secure channel request, then each sequence
+/// header, then each encrypted element on its own — and each piece is its own
+/// `STORE DATA` chain with its own block counter. A correctly formed BPP cut
+/// in the wrong places fails inside the secure channel, and the card reports
+/// that as a security error rather than as a framing one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BppSegment {
+    /// What this piece is, for a log that has to be read after the fact.
+    pub label: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What the eUICC reports after the last BPP segment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InstallationResult {
+    pub success: bool,
+    /// The notification the card now owes the SM-DP+.
+    pub sequence_number: Option<u64>,
+    pub iccid: Option<String>,
+    /// Which BPP command failed, when one did.
+    pub bpp_command: Option<String>,
+    pub error_reason: Option<String>,
+    /// The whole `BF37` structure, which is also the notification to deliver.
+    pub notification: Vec<u8>,
+}
+
+/// Encode a DER length.
+fn der_length(length: usize) -> Vec<u8> {
+    if length < 0x80 {
+        vec![length as u8]
+    } else if length <= 0xff {
+        vec![0x81, length as u8]
+    } else if length <= 0xffff {
+        vec![0x82, (length >> 8) as u8, length as u8]
+    } else {
+        vec![0x83, (length >> 16) as u8, (length >> 8) as u8, length as u8]
+    }
+}
+
+/// Wrap `value` in one BER-TLV.
+fn tlv(tag: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tag.len() + 4 + value.len());
+    out.extend_from_slice(tag);
+    out.extend_from_slice(&der_length(value.len()));
+    out.extend_from_slice(value);
+    out
+}
+
+/// The first complete TLV in `bytes`, tag and length included.
+///
+/// A modem is free to pad its answer, and a trailing zero byte handed to an
+/// SM-DP+ inside base64 is rejected by a strict DER parser with a message that
+/// says nothing about padding.
+pub fn first_tlv(bytes: &[u8]) -> Result<&[u8], Es10cError> {
+    let (_, _, tail) = read_tlv(bytes)?;
+    Ok(&bytes[..bytes.len() - tail.len()])
+}
+
+/// The value of the first child carrying `tag`, one level down.
+fn find_tag<'a>(mut body: &'a [u8], tag: &[u8]) -> Option<&'a [u8]> {
+    while !body.is_empty() {
+        let (found, value, tail) = read_tlv(body).ok()?;
+        body = tail;
+        if found == tag {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// The shortest big-endian encoding of `value`, at least one byte.
+fn minimal_integer(value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(7);
+    bytes[first..].to_vec()
+}
+
+/// Build ES10b `AuthenticateServer`.
+///
+/// The four credentials go in exactly as the SM-DP+ sent them. They are signed
+/// structures: anything re-encoded here, even into something that means the
+/// same, no longer matches the signature the eUICC is about to check.
+pub fn authenticate_server_payload(
+    server_signed1: &[u8],
+    server_signature1: &[u8],
+    euicc_ci_pkid: &[u8],
+    server_certificate: &[u8],
+    matching_id: Option<&str>,
+    tac: [u8; 4],
+) -> Result<Vec<u8>, Es10cError> {
+    let mut context = Vec::new();
+    if let Some(matching_id) = matching_id {
+        context.extend_from_slice(&tlv(&[0x80], matching_id.as_bytes()));
+    }
+    // DeviceInfo: the type allocation code, then an empty DeviceCapabilities.
+    //
+    // No `imei` field. It is optional in SGP.22 and an LPA that omits it is
+    // ordinary; the TAC is taken from the module's own IMEI rather than from
+    // a borrowed handset one, because a type allocation code is how an
+    // operator decides what this device is and answering that with someone
+    // else's is a lie with consequences for whoever owns the real one.
+    let device_info = tlv(&[0xa1], &[tlv(&[0x80], &tac), tlv(&[0xa1], &[])].concat());
+    context.extend_from_slice(&device_info);
+
+    let body = [
+        first_tlv(server_signed1)?,
+        first_tlv(server_signature1)?,
+        first_tlv(euicc_ci_pkid)?,
+        first_tlv(server_certificate)?,
+        &tlv(&[TAG_CHOICE_OK], &context),
+    ]
+    .concat();
+    Ok(tlv(TAG_AUTHENTICATE_SERVER, &body))
+}
+
+/// The type allocation code of an IMEI: its first eight digits, packed BCD.
+pub fn tac_from_imei(imei: &str) -> Result<[u8; 4], Es10cError> {
+    let digits: Vec<u8> = imei
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .map(|character| character.to_digit(10).map(|digit| digit as u8))
+        .collect::<Option<Vec<u8>>>()
+        .ok_or(Es10cError::InvalidImei)?;
+    if digits.len() < 8 {
+        return Err(Es10cError::InvalidImei);
+    }
+    let mut tac = [0u8; 4];
+    for (index, pair) in digits[..8].chunks(2).enumerate() {
+        tac[index] = (pair[0] << 4) | pair[1];
+    }
+    Ok(tac)
+}
+
+/// SGP.22 `AuthenticateErrorCode`.
+fn authenticate_error(code: u64) -> &'static str {
+    match code {
+        1 => "invalidCertificate",
+        2 => "invalidSignature",
+        3 => "unsupportedCurve",
+        4 => "noSessionContext",
+        5 => "invalidOid",
+        6 => "euiccChallengeMismatch",
+        7 => "ciPKUnknown",
+        127 => "undefinedError",
+        _ => "unknown error code",
+    }
+}
+
+/// SGP.22 `DownloadErrorCode`.
+fn download_error(code: u64) -> &'static str {
+    match code {
+        1 => "invalidCertificate",
+        2 => "invalidSignature",
+        3 => "unsupportedCurve",
+        4 => "noSessionContext",
+        5 => "invalidTransactionId",
+        127 => "undefinedError",
+        _ => "unknown error code",
+    }
+}
+
+/// SGP.22 `BppCommandId`.
+fn bpp_command(code: u64) -> &'static str {
+    match code {
+        0 => "initialiseSecureChannel",
+        1 => "configureISDP",
+        2 => "storeMetadata",
+        3 => "storeMetadata2",
+        4 => "replaceSessionKeys",
+        5 => "loadProfileElements",
+        _ => "unknown BPP command",
+    }
+}
+
+/// SGP.22 `ErrorReason` from a `ProfileInstallationResult`.
+fn installation_error(code: u64) -> &'static str {
+    match code {
+        1 => "incorrectInputValues",
+        2 => "invalidSignature",
+        3 => "invalidTransactionId",
+        4 => "unsupportedCrtValues",
+        5 => "unsupportedRemoteOperationType",
+        6 => "unsupportedProfileClass",
+        7 => "scp03tStructureError",
+        8 => "scp03tSecurityError",
+        9 => "installFailedDueToIccidAlreadyExistsOnEuicc",
+        10 => "installFailedDueToInsufficientMemoryForProfile",
+        11 => "installFailedDueToInterruption",
+        12 => "installFailedDueToPEProcessingError",
+        13 => "installFailedDueToDataMismatch",
+        14 => "testProfileInstallFailedDueToInvalidNaaKey",
+        15 => "pprNotAllowed",
+        127 => "installFailedDueToUnknownError",
+        _ => "unknown error reason",
+    }
+}
+
+/// Read an `AuthenticateServer` response and return it verbatim.
+///
+/// The bytes are what `AuthenticateClient` carries to the SM-DP+, so they are
+/// returned rather than rebuilt. The parse exists to notice a refusal: an
+/// error response is a well formed answer that would otherwise be base64'd and
+/// posted, and the server would then reject it with a message about *its*
+/// input rather than about this card.
+pub fn parse_authenticate_server_response(response: &[u8]) -> Result<Vec<u8>, Es10cError> {
+    let whole = first_tlv(response)?;
+    let body = expect_tag(whole, TAG_AUTHENTICATE_SERVER)?;
+    let (tag, value, _) = read_tlv(body)?;
+    match tag.as_slice() {
+        [TAG_CHOICE_OK] => Ok(whole.to_vec()),
+        [TAG_CHOICE_ERROR] => {
+            let code = find_tag(value, &[0x81])
+                .map(integer)
+                .transpose()?
+                .unwrap_or(127);
+            Err(Es10cError::AuthenticationRefused {
+                code,
+                reason: authenticate_error(code),
+            })
+        }
+        _ => Err(Es10cError::UnexpectedTag {
+            expected: vec![TAG_CHOICE_OK],
+            actual: tag,
+        }),
+    }
+}
+
+/// `ccRequiredFlag` inside `SmdpSigned2`.
+///
+/// A confirmation code the operator did not supply turns into a
+/// `PrepareDownload` the card refuses, so the question is asked before the
+/// card is involved.
+pub fn confirmation_code_required(smdp_signed2: &[u8]) -> Result<bool, Es10cError> {
+    let whole = first_tlv(smdp_signed2)?;
+    let (_, body, _) = read_tlv(whole)?;
+    match find_tag(body, &[0x01]) {
+        Some(value) => Ok(value.first().copied().unwrap_or(0) != 0),
+        None => Ok(false),
+    }
+}
+
+/// The `transactionId` an SM-DP+ signed into `SmdpSigned2`.
+pub fn smdp_signed2_transaction_id(smdp_signed2: &[u8]) -> Result<Vec<u8>, Es10cError> {
+    let whole = first_tlv(smdp_signed2)?;
+    let (_, body, _) = read_tlv(whole)?;
+    find_tag(body, &[0x80])
+        .map(<[u8]>::to_vec)
+        .ok_or(Es10cError::MissingField {
+            name: "smdpSigned2.transactionId",
+        })
+}
+
+/// Build ES10b `PrepareDownload`.
+pub fn prepare_download_payload(
+    smdp_signed2: &[u8],
+    smdp_signature2: &[u8],
+    smdp_certificate: &[u8],
+    hash_cc: Option<&[u8]>,
+) -> Result<Vec<u8>, Es10cError> {
+    let mut body = Vec::new();
+    body.extend_from_slice(first_tlv(smdp_signed2)?);
+    body.extend_from_slice(first_tlv(smdp_signature2)?);
+    if let Some(hash) = hash_cc {
+        body.extend_from_slice(&tlv(&[TAG_OCTET_STRING], hash));
+    }
+    body.extend_from_slice(first_tlv(smdp_certificate)?);
+    Ok(tlv(TAG_PREPARE_DOWNLOAD, &body))
+}
+
+/// Read a `PrepareDownload` response and return it verbatim.
+pub fn parse_prepare_download_response(response: &[u8]) -> Result<Vec<u8>, Es10cError> {
+    let whole = first_tlv(response)?;
+    let body = expect_tag(whole, TAG_PREPARE_DOWNLOAD)?;
+    let (tag, value, _) = read_tlv(body)?;
+    match tag.as_slice() {
+        [TAG_CHOICE_OK] => Ok(whole.to_vec()),
+        [TAG_CHOICE_ERROR] => {
+            let code = find_tag(value, &[0x81])
+                .map(integer)
+                .transpose()?
+                .unwrap_or(127);
+            Err(Es10cError::DownloadRefused {
+                code,
+                reason: download_error(code),
+            })
+        }
+        _ => Err(Es10cError::UnexpectedTag {
+            expected: vec![TAG_CHOICE_OK],
+            actual: tag,
+        }),
+    }
+}
+
+/// Decode the `profileMetadata` an SM-DP+ returns from `AuthenticateClient`.
+pub fn parse_profile_metadata(bytes: &[u8]) -> Result<ProfileMetadata, Es10cError> {
+    let whole = first_tlv(bytes)?;
+    let mut body = expect_tag(whole, TAG_STORE_METADATA)?;
+    let mut metadata = ProfileMetadata {
+        raw: whole.to_vec(),
+        ..ProfileMetadata::default()
+    };
+    while !body.is_empty() {
+        let (tag, value, tail) = read_tlv(body)?;
+        body = tail;
+        match tag.as_slice() {
+            [TAG_ICCID] => metadata.iccid = decode_iccid(value).ok(),
+            [TAG_PROVIDER] => metadata.service_provider_name = text(value),
+            [TAG_PROFILE_NAME] => metadata.profile_name = text(value),
+            [TAG_PROFILE_CLASS] => metadata.class = value.first().copied(),
+            [TAG_PROFILE_POLICY_RULES] => metadata.policy_rules = named_bits(value, PPR_IDS),
+            _ => {}
+        }
+    }
+    Ok(metadata)
+}
+
+/// Split a Bound Profile Package the way SGP.22 section 5.7.5 requires.
+///
+/// The order is fixed by the specification and by what the eUICC's secure
+/// channel expects next, so this walks the structure rather than searching it:
+/// the header and `BF23`, then the whole `A0`, then `A1`'s header followed by
+/// each `88` on its own, then `A2` whole if it is there, then `A3`'s header
+/// followed by each `86` on its own.
+pub fn bound_profile_package_segments(bpp: &[u8]) -> Result<Vec<BppSegment>, Es10cError> {
+    let whole = first_tlv(bpp)?;
+    let (tag, body, _) = read_tlv(whole)?;
+    if tag != TAG_BOUND_PROFILE_PACKAGE {
+        return Err(Es10cError::UnexpectedTag {
+            expected: TAG_BOUND_PROFILE_PACKAGE.to_vec(),
+            actual: tag,
+        });
+    }
+    let header_length = whole.len() - body.len();
+
+    let mut segments = Vec::new();
+    let mut rest = body;
+
+    // The header plus the complete InitialiseSecureChannelRequest. The eUICC
+    // needs the outer length before it will accept anything else.
+    let (tag, _, tail) = read_tlv(rest)?;
+    if tag != TAG_INITIALISE_SECURE_CHANNEL {
+        return Err(Es10cError::UnexpectedTag {
+            expected: TAG_INITIALISE_SECURE_CHANNEL.to_vec(),
+            actual: tag,
+        });
+    }
+    let secure_channel = &rest[..rest.len() - tail.len()];
+    segments.push(BppSegment {
+        label: "header+initialiseSecureChannelRequest".into(),
+        bytes: [&whole[..header_length], secure_channel].concat(),
+    });
+    rest = tail;
+
+    let mut seen_first_87 = false;
+    let mut seen_88 = false;
+    let mut seen_86 = false;
+    while !rest.is_empty() {
+        let (tag, value, tail) = read_tlv(rest)?;
+        let element = &rest[..rest.len() - tail.len()];
+        let element_header = element.len() - value.len();
+        rest = tail;
+        match tag.as_slice() {
+            // firstSequenceOf87 and secondSequenceOf87 travel whole.
+            [0xa0] | [0xa2] => {
+                let label = if seen_first_87 {
+                    "secondSequenceOf87"
+                } else {
+                    seen_first_87 = true;
+                    "firstSequenceOf87"
+                };
+                segments.push(BppSegment {
+                    label: label.into(),
+                    bytes: element.to_vec(),
+                });
+            }
+            // sequenceOf88 and sequenceOf86 travel as a header followed by one
+            // segment per element: each element is separately encrypted and
+            // the card processes them one at a time.
+            [0xa1] | [0xa3] => {
+                let (name, member) = if tag == [0xa1] {
+                    seen_88 = true;
+                    ("sequenceOf88", "88")
+                } else {
+                    seen_86 = true;
+                    ("sequenceOf86", "86")
+                };
+                segments.push(BppSegment {
+                    label: format!("{name} header"),
+                    bytes: element[..element_header].to_vec(),
+                });
+                let mut inner = value;
+                let mut index = 0;
+                while !inner.is_empty() {
+                    let (_, _, next) = read_tlv(inner)?;
+                    let child = &inner[..inner.len() - next.len()];
+                    segments.push(BppSegment {
+                        label: format!("{member}[{index}]"),
+                        bytes: child.to_vec(),
+                    });
+                    inner = next;
+                    index += 1;
+                }
+            }
+            _ => {
+                return Err(Es10cError::UnexpectedTag {
+                    expected: vec![0xa0, 0xa1, 0xa2, 0xa3],
+                    actual: tag,
+                })
+            }
+        }
+    }
+    if !seen_first_87 || !seen_88 || !seen_86 {
+        return Err(Es10cError::MissingField {
+            name: "boundProfilePackage element",
+        });
+    }
+    Ok(segments)
+}
+
+/// Decode the `ProfileInstallationResult` the last BPP segment returns.
+pub fn parse_installation_result(response: &[u8]) -> Result<InstallationResult, Es10cError> {
+    let whole = first_tlv(response)?;
+    let body = expect_tag(whole, TAG_INSTALLATION_RESULT)?;
+    let data = expect_tag(body, TAG_INSTALLATION_RESULT_DATA)?;
+    let metadata = find_tag(data, TAG_NOTIFICATION_METADATA).ok_or(Es10cError::MissingField {
+        name: "notificationMetadata",
+    })?;
+    let final_result =
+        find_tag(data, &[TAG_FINAL_RESULT]).ok_or(Es10cError::MissingField {
+            name: "finalResult",
+        })?;
+
+    let mut result = InstallationResult {
+        sequence_number: find_tag(metadata, &[0x80]).map(integer).transpose()?,
+        iccid: find_tag(metadata, &[TAG_ICCID]).and_then(|value| decode_iccid(value).ok()),
+        notification: whole.to_vec(),
+        ..InstallationResult::default()
+    };
+
+    let (tag, value, _) = read_tlv(final_result)?;
+    match tag.as_slice() {
+        [TAG_CHOICE_OK] => result.success = true,
+        [TAG_CHOICE_ERROR] => {
+            result.bpp_command = find_tag(value, &[0x80])
+                .map(integer)
+                .transpose()?
+                .map(|code| bpp_command(code).to_string());
+            result.error_reason = find_tag(value, &[0x81])
+                .map(integer)
+                .transpose()?
+                .map(|code| installation_error(code).to_string());
+        }
+        _ => {
+            return Err(Es10cError::UnexpectedTag {
+                expected: vec![TAG_CHOICE_OK],
+                actual: tag,
+            })
+        }
+    }
+    Ok(result)
+}
+
+/// ES10b `RemoveNotificationFromList` by sequence number.
+pub fn remove_notification_payload(sequence_number: u64) -> Vec<u8> {
+    tlv(
+        TAG_NOTIFICATION_SENT,
+        &tlv(&[0x80], &minimal_integer(sequence_number)),
+    )
+}
+
+/// Read a `RemoveNotificationFromList` response: 0 means it is gone.
+pub fn parse_remove_notification_response(response: &[u8]) -> Result<u64, Es10cError> {
+    let body = expect_tag(first_tlv(response)?, TAG_NOTIFICATION_SENT)?;
+    let (tag, value, _) = read_tlv(body)?;
+    if tag != [0x80] {
+        return Err(Es10cError::UnexpectedTag {
+            expected: vec![0x80],
+            actual: tag,
+        });
+    }
+    integer(value)
+}
+
+/// ES10b `CancelSession`.
+///
+/// The way out of a session that has been started and must not be finished.
+/// Without it a refused download leaves the SM-DP+ holding a profile in a
+/// state it will not hand out again for hours.
+pub fn cancel_session_payload(transaction_id: &[u8], reason: CancelSessionReason) -> Vec<u8> {
+    let body = [tlv(&[0x80], transaction_id), tlv(&[0x81], &[reason as u8])].concat();
+    tlv(TAG_CANCEL_SESSION, &body)
+}
+
+/// Read a `CancelSession` response and return it verbatim for ES9+.
+pub fn parse_cancel_session_response(response: &[u8]) -> Result<Vec<u8>, Es10cError> {
+    let whole = first_tlv(response)?;
+    let body = expect_tag(whole, TAG_CANCEL_SESSION)?;
+    let (tag, _, _) = read_tlv(body)?;
+    match tag.as_slice() {
+        [TAG_CHOICE_OK] => Ok(whole.to_vec()),
+        [TAG_CHOICE_ERROR] => Err(Es10cError::SessionNotCancelled),
+        _ => Err(Es10cError::UnexpectedTag {
+            expected: vec![TAG_CHOICE_OK],
+            actual: tag,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,5 +2069,359 @@ mod tests {
         }
         assert!(pending[0].payload.starts_with(&[0xbf, 0x37]));
         assert!(pending[1].payload.starts_with(&[0x30]));
+    }
+
+    // ---- the download half ---------------------------------------------
+    //
+    // Nothing here can be captured off the bench beforehand: a real
+    // BoundProfilePackage only exists once an SM-DP+ has released one, and
+    // releasing one is the irreversible act these tests exist to make safe.
+    // So the fixtures are built to the SGP.22 structure, and the assertions
+    // are about the shape the eUICC is entitled to expect.
+
+    /// A `StoreMetadataRequest` whose `profilePolicyRules` asserts ppr1.
+    ///
+    /// BIT STRING `03 02 06 40` — two bytes, six unused bits, and `0100 0000`
+    /// sets bit 1, which is `ppr1`: "disabling of this profile is not
+    /// allowed". On hardware nobody can reach, that bit costs a slot forever.
+    const METADATA_WITH_PPR1: &str = "BF252A \
+                                      5A0A 98882119002200140268 \
+                                      910B 542D4D6F62696C65205553 \
+                                      9208 545F4D6F62696C65 \
+                                      950102 \
+                                      99020640";
+
+    #[test]
+    fn metadata_names_the_policy_rules_that_would_be_installed() {
+        let metadata =
+            parse_profile_metadata(&bytes(&clean(METADATA_WITH_PPR1))).expect("metadata");
+        assert_eq!(metadata.policy_rules, vec!["ppr1".to_string()]);
+        assert_eq!(metadata.irreversible_policy_rules(), vec!["ppr1".to_string()]);
+        assert_eq!(metadata.service_provider_name.as_deref(), Some("T-Mobile US"));
+        assert_eq!(metadata.profile_name.as_deref(), Some("T_Mobile"));
+        assert_eq!(metadata.class, Some(2));
+    }
+
+    /// Metadata with no `99` at all is the ordinary case, and it has to read
+    /// as "no rules" rather than as a decode failure. A parser that errored
+    /// here would refuse every profile that is safe to install.
+    #[test]
+    fn metadata_without_policy_rules_is_not_an_error() {
+        let raw = clean(METADATA_WITH_PPR1)
+            .replace("99020640", "")
+            .replacen("BF252A", "BF2526", 1);
+        let metadata = parse_profile_metadata(&bytes(&raw)).expect("metadata");
+        assert!(metadata.policy_rules.is_empty());
+        assert!(metadata.irreversible_policy_rules().is_empty());
+    }
+
+    /// `pprUpdateControl` is bit 0 and is not one of the two that pin a
+    /// profile permanently, so it must not trip the refusal.
+    #[test]
+    fn ppr_update_control_alone_is_not_irreversible() {
+        let raw = clean(METADATA_WITH_PPR1).replace("99020640", "99020680");
+        let metadata = parse_profile_metadata(&bytes(&raw)).expect("metadata");
+        assert_eq!(metadata.policy_rules, vec!["pprUpdateControl".to_string()]);
+        assert!(metadata.irreversible_policy_rules().is_empty());
+    }
+
+    /// Five unused bits rather than six: bit 2 only counts as set when the
+    /// BIT STRING says three of its bits are significant.
+    #[test]
+    fn ppr2_is_refused_as_well() {
+        let raw = clean(METADATA_WITH_PPR1).replace("99020640", "99020520");
+        let metadata = parse_profile_metadata(&bytes(&raw)).expect("metadata");
+        assert_eq!(metadata.irreversible_policy_rules(), vec!["ppr2".to_string()]);
+    }
+
+    /// A Bound Profile Package with two `88` elements and three `86` ones,
+    /// which is the shape of every real one: a secure channel request, the
+    /// ISD-P configuration, the metadata, then the profile itself.
+    fn bound_profile_package(second_87: bool) -> Vec<u8> {
+        fn wrap(tag: &[u8], value: &[u8]) -> Vec<u8> {
+            let mut out = tag.to_vec();
+            out.extend_from_slice(&der_length(value.len()));
+            out.extend_from_slice(value);
+            out
+        }
+        let secure_channel = wrap(&[0xbf, 0x23], &filler(90));
+        let first_87 = wrap(&[0xa0], &wrap(&[0x87], &filler(16)));
+        let sequence_88 = wrap(
+            &[0xa1],
+            &[wrap(&[0x88], &filler(40)), wrap(&[0x88], &filler(300))].concat(),
+        );
+        let second = if second_87 {
+            wrap(&[0xa2], &wrap(&[0x87], &filler(16)))
+        } else {
+            Vec::new()
+        };
+        let sequence_86 = wrap(
+            &[0xa3],
+            &[
+                wrap(&[0x86], &filler(700)),
+                wrap(&[0x86], &filler(1024)),
+                wrap(&[0x86], &filler(33)),
+            ]
+            .concat(),
+        );
+        wrap(
+            &[0xbf, 0x36],
+            &[secure_channel, first_87, sequence_88, second, sequence_86].concat(),
+        )
+    }
+
+    #[test]
+    fn a_bound_profile_package_splits_the_way_the_card_expects() {
+        let bpp = bound_profile_package(false);
+        let segments = bound_profile_package_segments(&bpp).expect("segments");
+        let labels: Vec<&str> = segments.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "header+initialiseSecureChannelRequest",
+                "firstSequenceOf87",
+                "sequenceOf88 header",
+                "88[0]",
+                "88[1]",
+                "sequenceOf86 header",
+                "86[0]",
+                "86[1]",
+                "86[2]",
+            ]
+        );
+        // Concatenating the segments back has to reproduce the package byte
+        // for byte. Anything else means a byte was dropped or sent twice, and
+        // inside a secure channel either one reads as a security error.
+        let rebuilt: Vec<u8> = segments.iter().flat_map(|s| s.bytes.clone()).collect();
+        assert_eq!(rebuilt, bpp);
+    }
+
+    #[test]
+    fn the_optional_second_sequence_of_87_is_carried_when_present() {
+        let bpp = bound_profile_package(true);
+        let segments = bound_profile_package_segments(&bpp).expect("segments");
+        assert!(segments.iter().any(|s| s.label == "secondSequenceOf87"));
+        let rebuilt: Vec<u8> = segments.iter().flat_map(|s| s.bytes.clone()).collect();
+        assert_eq!(rebuilt, bpp);
+    }
+
+    /// Every segment then goes through the `STORE DATA` chain, and this is the
+    /// first thing in the project that produces one longer than a block. The
+    /// big `86` elements are what make it a chain rather than a single APDU.
+    #[test]
+    fn the_segments_of_a_package_need_a_multi_block_store_data_chain() {
+        let bpp = bound_profile_package(false);
+        let segments = bound_profile_package_segments(&bpp).expect("segments");
+        let chains: Vec<usize> = segments
+            .iter()
+            .map(|segment| store_data_chain(&segment.bytes).expect("chain").len())
+            .collect();
+        let blocks: usize = chains.iter().sum();
+        assert!(blocks > segments.len(), "at least one segment spans blocks");
+        let longest = chains.iter().copied().max().unwrap_or(0);
+        assert!(
+            longest >= 5,
+            "the 1024-byte element needs five blocks, got {longest}"
+        );
+    }
+
+    /// A package missing the mandatory `sequenceOf86` is refused before a
+    /// single byte reaches the card. Half a package installs nothing and
+    /// leaves the chip holding an open secure channel.
+    #[test]
+    fn an_incomplete_package_is_refused_before_anything_is_sent() {
+        let bpp = bound_profile_package(false);
+        let truncated = &bpp[..bpp.len() - 1800];
+        assert!(bound_profile_package_segments(truncated).is_err());
+    }
+
+    #[test]
+    fn authenticate_server_carries_the_credentials_verbatim() {
+        let signed1 = bytes("300C 8004 AABBCCDD 8104 11223344");
+        let signature1 = bytes("5F3708 0102030405060708");
+        let ci_pkid = bytes("0403 AABBCC");
+        let certificate = bytes("3006 0201 07 0201 08");
+        let payload = authenticate_server_payload(
+            &signed1,
+            &signature1,
+            &ci_pkid,
+            &certificate,
+            Some("QQ111-22222"),
+            [0x86, 0x94, 0x27, 0x04],
+        )
+        .expect("payload");
+        assert_eq!(&payload[..2], &[0xbf, 0x38]);
+        for part in [&signed1, &signature1, &ci_pkid, &certificate] {
+            assert!(
+                payload.windows(part.len()).any(|window| window == &part[..]),
+                "credential must travel byte for byte"
+            );
+        }
+        // ctxParams1: A0 { 80 matchingId, A1 { 80 tac, A1 (empty) } }
+        let expected_context =
+            bytes("A017 800B 51513131312D3232323232 A108 800486942704 A100");
+        assert!(payload
+            .windows(expected_context.len())
+            .any(|window| window == expected_context.as_slice()));
+    }
+
+    #[test]
+    fn a_matching_id_is_optional_in_the_context() {
+        let payload = authenticate_server_payload(
+            &bytes("3003 800100"),
+            &bytes("5F3701 00"),
+            &bytes("040100"),
+            &bytes("3003 020100"),
+            None,
+            [0x86, 0x94, 0x27, 0x04],
+        )
+        .expect("payload");
+        let expected_context = bytes("A00A A108 800486942704 A100");
+        assert!(payload
+            .windows(expected_context.len())
+            .any(|window| window == expected_context.as_slice()));
+    }
+
+    #[test]
+    fn the_tac_is_the_first_eight_digits_of_the_modules_own_imei() {
+        assert_eq!(
+            tac_from_imei("867018069514820").expect("tac"),
+            [0x86, 0x70, 0x18, 0x06]
+        );
+        assert_eq!(tac_from_imei("86701"), Err(Es10cError::InvalidImei));
+        assert_eq!(tac_from_imei("86701806951482x"), Err(Es10cError::InvalidImei));
+    }
+
+    /// A refusal by the card is a well formed response. Left unread it would
+    /// be base64'd and posted, and the SM-DP+ would answer with a complaint
+    /// about its own input rather than about this chip.
+    #[test]
+    fn an_authenticate_server_refusal_is_read_as_a_refusal() {
+        assert_eq!(
+            parse_authenticate_server_response(&bytes("BF3805 A103 810101")),
+            Err(Es10cError::AuthenticationRefused {
+                code: 1,
+                reason: "invalidCertificate",
+            })
+        );
+    }
+
+    #[test]
+    fn an_authenticate_server_success_is_returned_byte_for_byte() {
+        let response = bytes("BF3806 A004 80020102 FFFF");
+        let carried = parse_authenticate_server_response(&response).expect("ok");
+        // Trailing padding a modem added is not part of the answer.
+        assert_eq!(carried, bytes("BF3806 A004 80020102"));
+    }
+
+    #[test]
+    fn a_prepare_download_refusal_names_its_code() {
+        assert_eq!(
+            parse_prepare_download_response(&bytes("BF2105 A103 810105")),
+            Err(Es10cError::DownloadRefused {
+                code: 5,
+                reason: "invalidTransactionId",
+            })
+        );
+    }
+
+    #[test]
+    fn a_confirmation_code_is_only_required_when_the_server_says_so() {
+        // SmdpSigned2 ::= SEQUENCE { transactionId [0], ccRequiredFlag BOOLEAN }
+        assert_eq!(
+            confirmation_code_required(&bytes("3009 8004 AABBCCDD 0101FF")),
+            Ok(true)
+        );
+        assert_eq!(
+            confirmation_code_required(&bytes("3009 8004 AABBCCDD 010100")),
+            Ok(false)
+        );
+        assert_eq!(
+            smdp_signed2_transaction_id(&bytes("3009 8004 AABBCCDD 010100")),
+            Ok(vec![0xaa, 0xbb, 0xcc, 0xdd])
+        );
+    }
+
+    #[test]
+    fn prepare_download_carries_the_hash_only_when_there_is_one() {
+        let without = prepare_download_payload(
+            &bytes("3003 800100"),
+            &bytes("5F3701 00"),
+            &bytes("3003 020100"),
+            None,
+        )
+        .expect("payload");
+        let with = prepare_download_payload(
+            &bytes("3003 800100"),
+            &bytes("5F3701 00"),
+            &bytes("3003 020100"),
+            Some(&[0x11; 32]),
+        )
+        .expect("payload");
+        assert_eq!(with.len(), without.len() + 34);
+        assert!(with
+            .windows(34)
+            .any(|window| window[0] == 0x04 && window[1] == 0x20));
+    }
+
+    /// The success case. `finalResult` is `A2 { A0 ... }`, and the whole
+    /// `BF37` is also the notification the SM-DP+ has to be told about.
+    #[test]
+    fn an_installation_result_reports_success_and_the_notification_to_deliver() {
+        let response = bytes(
+            "BF372B BF2728 \
+             8004AABBCCDD \
+             BF2F19 800103 81020780 0C10 736D64702E6578616D706C652E636F6D \
+             A204 A0020500",
+        );
+        let result = parse_installation_result(&response).expect("result");
+        assert!(result.success);
+        assert_eq!(result.sequence_number, Some(3));
+        assert_eq!(result.notification, response);
+        assert!(result.error_reason.is_none());
+    }
+
+    #[test]
+    fn a_failed_installation_names_the_command_and_the_reason() {
+        let response = bytes(
+            "BF372F BF272C \
+             8004AABBCCDD \
+             BF2F19 800104 81020780 0C10 736D64702E6578616D706C652E636F6D \
+             A208 A106 800105 81010A",
+        );
+        let result = parse_installation_result(&response).expect("result");
+        assert!(!result.success);
+        assert_eq!(result.bpp_command.as_deref(), Some("loadProfileElements"));
+        assert_eq!(
+            result.error_reason.as_deref(),
+            Some("installFailedDueToInsufficientMemoryForProfile")
+        );
+    }
+
+    #[test]
+    fn removing_a_notification_asks_for_it_by_sequence_number() {
+        assert_eq!(remove_notification_payload(3), bytes("BF3003 800103"));
+        assert_eq!(remove_notification_payload(300), bytes("BF3004 8002012C"));
+        assert_eq!(
+            parse_remove_notification_response(&bytes("BF3003 800100")),
+            Ok(0)
+        );
+        // 1 is "nothing to delete", which is not the same as removed.
+        assert_eq!(
+            parse_remove_notification_response(&bytes("BF3003 800101")),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn cancelling_a_session_states_why() {
+        let payload =
+            cancel_session_payload(&[0xaa, 0xbb, 0xcc, 0xdd], CancelSessionReason::PprNotAllowed);
+        assert_eq!(payload, bytes("BF4109 8004AABBCCDD 810103"));
+        assert_eq!(CancelSessionReason::PprNotAllowed.label(), "pprNotAllowed");
+        assert_eq!(
+            parse_cancel_session_response(&bytes("BF410B A009 8004AABBCCDD 810100")),
+            Ok(bytes("BF410B A009 8004AABBCCDD 810100"))
+        );
     }
 }

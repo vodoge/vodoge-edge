@@ -737,3 +737,365 @@ fn a_card_that_answers_nothing_is_reported_not_hidden() {
     assert!(client.read_esim_local_info(1).is_err());
     assert_eq!(log.borrow().closes, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Loading a Bound Profile Package.
+//
+// Up to here every ES10 request in this project fitted in one `STORE DATA`
+// APDU, so the chaining T030 added has only ever been exercised by unit tests
+// that call `store_data_chain` directly. A profile package does not fit: it is
+// tens of kilobytes, it arrives as a structure that has to be cut at specific
+// points, and each piece is its own chain. The fake below reassembles chains
+// the way a card does, so the assertions can be about what the card received
+// rather than about what the encoder produced.
+// ---------------------------------------------------------------------------
+
+/// What the fake eUICC saw while a package was loaded.
+#[derive(Default)]
+struct LoadLog {
+    /// One entry per reassembled ES10 command: the bytes, and how many
+    /// `STORE DATA` APDUs carried them.
+    commands: Vec<(Vec<u8>, usize)>,
+    /// Every `(P1, P2)` pair, in order.
+    framing: Vec<(u8, u8)>,
+    opens: usize,
+    closes: usize,
+}
+
+/// An eUICC that reassembles `STORE DATA` chains.
+///
+/// A block with `P1 = 0x11` is acknowledged with `9000` and no data, which is
+/// what makes the chain a chain: only the block with `0x91` gets an answer.
+struct FakeLoader {
+    uim_client: u8,
+    log: Rc<RefCell<LoadLog>>,
+    assembling: Vec<u8>,
+    blocks: usize,
+    outstanding: Vec<u8>,
+    /// The `ProfileInstallationResult` to return after the final segment.
+    installation: Vec<u8>,
+    /// How many ES10 commands have been completed.
+    completed: usize,
+    /// Fail the chain at this command index, as a card that ran out of memory
+    /// halfway through a profile would.
+    fail_at: Option<usize>,
+    /// How many ES10 commands the package is expected to produce.
+    ///
+    /// Set by the test rather than worked out here: a fake that parsed the
+    /// package to find its own end would be agreeing with the code under test
+    /// instead of checking it.
+    expected: usize,
+}
+
+impl FakeLoader {
+    fn new(installation: Vec<u8>) -> (Self, Rc<RefCell<LoadLog>>) {
+        Self::failing_at(installation, None)
+    }
+
+    fn failing_at(installation: Vec<u8>, fail_at: Option<usize>) -> (Self, Rc<RefCell<LoadLog>>) {
+        let log = Rc::new(RefCell::new(LoadLog::default()));
+        (
+            Self {
+                uim_client: 0x08,
+                log: Rc::clone(&log),
+                assembling: Vec::new(),
+                blocks: 0,
+                outstanding: Vec::new(),
+                installation,
+                completed: 0,
+                fail_at,
+                expected: 0,
+            },
+            log,
+        )
+    }
+
+    /// What to answer a completed ES10 command with.
+    fn answer_for(&mut self, command: &[u8]) -> Vec<u8> {
+        let index = self.completed;
+        self.completed += 1;
+        if self.fail_at == Some(index) {
+            return self.installation.clone();
+        }
+        match command.first().copied() {
+            // A BF36 header, a sequence header or an element: acknowledged
+            // with nothing until the package is complete.
+            Some(0xbf) | Some(0xa0) | Some(0xa1) | Some(0xa2) | Some(0xa3) | Some(0x86)
+            | Some(0x87) | Some(0x88) => {
+                if self.fail_at.is_none() && index + 1 == self.expected {
+                    self.installation.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+}
+
+impl QmiTransport for FakeLoader {
+    fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let service = request[4];
+        let client = request[5];
+        let (transaction, message) = decode_header(request);
+        let payload = match (service, message) {
+            (0x00, 0x0027) => success_result_tlv(),
+            (0x00, 0x0022) => allocation_payload(ServiceId::UIM.as_u8(), self.uim_client),
+            (0x0b, 0x0042) => {
+                self.log.borrow_mut().opens += 1;
+                let mut payload = success_result_tlv();
+                payload.extend_from_slice(&[0x10, 0x01, 0x00, 0x01]);
+                payload
+            }
+            (0x0b, 0x003f) => {
+                self.log.borrow_mut().closes += 1;
+                success_result_tlv()
+            }
+            (0x0b, 0x003b) => {
+                let apdu = apdu_from(request);
+                let rapdu = if apdu.len() >= 2 && apdu[1] == 0xc0 {
+                    let wanted = match apdu.get(4).copied() {
+                        Some(0) | None => 256,
+                        Some(le) => usize::from(le),
+                    };
+                    let take = wanted.min(self.outstanding.len());
+                    let mut chunk: Vec<u8> = self.outstanding.drain(..take).collect();
+                    chunk.extend_from_slice(&remaining_status(self.outstanding.len()));
+                    chunk
+                } else {
+                    let p1 = apdu[2];
+                    let p2 = apdu[3];
+                    self.log.borrow_mut().framing.push((p1, p2));
+                    self.assembling.extend_from_slice(&apdu[5..]);
+                    self.blocks += 1;
+                    if p1 == 0x91 {
+                        let command = std::mem::take(&mut self.assembling);
+                        let blocks = std::mem::take(&mut self.blocks);
+                        self.log.borrow_mut().commands.push((command.clone(), blocks));
+                        self.outstanding = self.answer_for(&command);
+                        remaining_status(self.outstanding.len()).to_vec()
+                    } else {
+                        vec![0x90, 0x00]
+                    }
+                };
+                wrap_apdu(&rapdu)
+            }
+            _ => {
+                return Err(SessionError::transport(format!(
+                    "unexpected service=0x{service:02x} message=0x{message:04x}"
+                )))
+            }
+        };
+        Ok(response_frame(service, client, transaction, message, &payload))
+    }
+}
+
+/// One `ProfileInstallationResult` reporting success, sequence number 4.
+fn installation_success() -> Vec<u8> {
+    from_hex(
+        "BF372B BF2728 8004AABBCCDD \
+         BF2F19 800104 81020780 0C10 736D64702E6578616D706C652E636F6D \
+         A204 A0020500",
+    )
+}
+
+/// One reporting that the card ran out of room for the profile.
+fn installation_out_of_memory() -> Vec<u8> {
+    from_hex(
+        "BF372F BF272C 8004AABBCCDD \
+         BF2F19 800104 81020780 0C10 736D64702E6578616D706C652E636F6D \
+         A208 A106 800105 81010A",
+    )
+}
+
+fn der_wrap(tag: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = tag.to_vec();
+    let length = value.len();
+    if length < 0x80 {
+        out.push(length as u8);
+    } else if length <= 0xff {
+        out.extend_from_slice(&[0x81, length as u8]);
+    } else {
+        out.extend_from_slice(&[0x82, (length >> 8) as u8, length as u8]);
+    }
+    out.extend_from_slice(value);
+    out
+}
+
+fn pattern(length: usize, seed: u8) -> Vec<u8> {
+    (0..length)
+        .map(|index| ((index as u8).wrapping_mul(31)).wrapping_add(seed))
+        .collect()
+}
+
+/// A package shaped like a real one: a secure channel request, ISD-P
+/// configuration, two metadata blocks and three profile-element blocks.
+fn test_package() -> Vec<u8> {
+    der_wrap(
+        &[0xbf, 0x36],
+        &[
+            der_wrap(&[0xbf, 0x23], &pattern(96, 1)),
+            der_wrap(&[0xa0], &der_wrap(&[0x87], &pattern(16, 2))),
+            der_wrap(
+                &[0xa1],
+                &[
+                    der_wrap(&[0x88], &pattern(48, 3)),
+                    der_wrap(&[0x88], &pattern(512, 4)),
+                ]
+                .concat(),
+            ),
+            der_wrap(
+                &[0xa3],
+                &[
+                    der_wrap(&[0x86], &pattern(1100, 5)),
+                    der_wrap(&[0x86], &pattern(2048, 6)),
+                    der_wrap(&[0x86], &pattern(64, 7)),
+                ]
+                .concat(),
+            ),
+        ]
+        .concat(),
+    )
+}
+
+/// Nine segments: header, A0, A1 header, two 88s, A3 header, three 86s.
+const PACKAGE_SEGMENTS: usize = 9;
+
+#[test]
+fn a_profile_package_reaches_the_card_segment_by_segment() {
+    let package = test_package();
+    let (mut transport, log) = FakeLoader::new(installation_success());
+    transport.expected = PACKAGE_SEGMENTS;
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let mut session = client.isdr_session(1).expect("session");
+    let (result, transfers) = session
+        .load_bound_profile_package(&package)
+        .expect("load");
+    session.close().expect("close");
+
+    assert!(result.success);
+    assert_eq!(result.sequence_number, Some(4));
+    assert_eq!(transfers.len(), PACKAGE_SEGMENTS);
+
+    let log = log.borrow();
+    assert_eq!(log.opens, 1, "one ISD-R channel for the whole package");
+    assert_eq!(log.closes, 1);
+    assert_eq!(log.commands.len(), PACKAGE_SEGMENTS);
+
+    // What the card reassembled has to be the package, in order and whole.
+    let received: Vec<u8> = log
+        .commands
+        .iter()
+        .flat_map(|(bytes, _)| bytes.clone())
+        .collect();
+    assert_eq!(received, package, "the card must see the package verbatim");
+
+    // And the block counts the caller reports have to be the ones the card
+    // actually saw, because those are the numbers that end up in a receipt.
+    let seen: Vec<usize> = log.commands.iter().map(|(_, blocks)| *blocks).collect();
+    let reported: Vec<usize> = transfers.iter().map(|transfer| transfer.blocks).collect();
+    assert_eq!(seen, reported);
+    assert!(
+        reported.iter().sum::<usize>() > PACKAGE_SEGMENTS,
+        "a real package cannot fit one block per segment"
+    );
+    // The 2048-byte element is nine blocks of 255 and one of 8.
+    assert_eq!(reported.iter().copied().max(), Some(9));
+}
+
+/// The framing is what the card enforces: every block but the last of a
+/// segment says "more follows", and the block number restarts at zero for each
+/// segment because each segment is its own ES10 command.
+#[test]
+fn every_chain_is_framed_the_way_sgp22_requires() {
+    let package = test_package();
+    let (mut transport, log) = FakeLoader::new(installation_success());
+    transport.expected = PACKAGE_SEGMENTS;
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let mut session = client.isdr_session(1).expect("session");
+    session.load_bound_profile_package(&package).expect("load");
+    session.close().expect("close");
+
+    let log = log.borrow();
+    let mut expected_block = 0u8;
+    let mut chains = 0;
+    for (p1, p2) in &log.framing {
+        assert_eq!(*p2, expected_block, "block numbers count from zero");
+        match *p1 {
+            0x11 => expected_block += 1,
+            0x91 => {
+                expected_block = 0;
+                chains += 1;
+            }
+            other => panic!("unexpected P1 0x{other:02x}"),
+        }
+    }
+    assert_eq!(chains, PACKAGE_SEGMENTS);
+}
+
+/// A card that refuses partway through says so with a
+/// `ProfileInstallationResult`, and the loader has to stop there. Pushing the
+/// rest of a profile at a card that has already closed its secure channel
+/// turns one named failure into a pile of unnamed ones.
+#[test]
+fn a_refusal_partway_through_stops_the_transfer() {
+    let package = test_package();
+    let (mut transport, log) = FakeLoader::failing_at(installation_out_of_memory(), Some(4));
+    transport.expected = PACKAGE_SEGMENTS;
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let mut session = client.isdr_session(1).expect("session");
+    let (result, transfers) = session
+        .load_bound_profile_package(&package)
+        .expect("load reports the card's answer rather than erroring");
+    session.close().expect("close");
+
+    assert!(!result.success);
+    assert_eq!(
+        result.error_reason.as_deref(),
+        Some("installFailedDueToInsufficientMemoryForProfile")
+    );
+    assert_eq!(result.bpp_command.as_deref(), Some("loadProfileElements"));
+    assert_eq!(transfers.len(), 5, "stopped after the segment that failed");
+    assert_eq!(log.borrow().commands.len(), 5);
+    assert_eq!(log.borrow().closes, 1, "the channel still closes");
+}
+
+/// `AuthenticateServer` is the first request in this project big enough to
+/// need a chain against a card, and it happens before anything is written.
+#[test]
+fn authenticate_server_travels_as_a_chain_and_comes_back_whole() {
+    let mut answer = from_hex("BF3806 A004 80020102");
+    let (mut transport, log) = FakeLoader::new(answer.clone());
+    transport.expected = 1;
+    let mut client = QmiClient::new(transport);
+    client.sync().expect("sync");
+    let mut session = client.isdr_session(1).expect("session");
+
+    // A server certificate on its own is six hundred bytes, so the request is
+    // built at that scale rather than at a size that would fit in one APDU.
+    let payload = edge_modem::authenticate_server_payload(
+        &der_wrap(&[0x30], &pattern(120, 1)),
+        &der_wrap(&[0x5f, 0x37], &pattern(64, 2)),
+        &der_wrap(&[0x04], &pattern(20, 3)),
+        &der_wrap(&[0x30], &pattern(620, 4)),
+        Some("QQ111-22222-33333-44444"),
+        [0x86, 0x70, 0x18, 0x06],
+    )
+    .expect("payload");
+    let (bytes, blocks) = session.execute_counted(&payload).expect("execute");
+    session.close().expect("close");
+
+    assert!(blocks >= 4, "a real AuthenticateServer spans blocks, got {blocks}");
+    assert_eq!(
+        edge_modem::parse_authenticate_server_response(&bytes).expect("response"),
+        answer.drain(..).collect::<Vec<u8>>()
+    );
+    let log = log.borrow();
+    assert_eq!(log.commands.len(), 1);
+    assert_eq!(log.commands[0].0, payload, "the card sees the whole request");
+    assert_eq!(log.opens, 1);
+}

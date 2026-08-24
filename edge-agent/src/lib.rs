@@ -210,6 +210,24 @@ pub trait SendPort {
         Err(unsupported("initiate_esim_authentication"))
     }
 
+    /// Download one profile from an SM-DP+ and install it on the eUICC.
+    ///
+    /// The one action in this trait that cannot be undone from here. It
+    /// installs and it does not enable: SGP.22 keeps those apart, and a module
+    /// whose only working profile was replaced by an untested one is a module
+    /// that is off the network with nobody able to reach it.
+    ///
+    /// The activation code is a one-time credential. It is a parameter and
+    /// never a field of the result.
+    fn download_esim_profile(
+        &mut self,
+        _imei: &str,
+        _activation_code: &str,
+        _confirmation_code: Option<&str>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("download_esim_profile"))
+    }
+
     // The proxy actions. These are device-level rather than modem-level: a
     // configuration names the modems it wants, so applying it is one operation
     // over the whole set.
@@ -872,6 +890,22 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 let outcome = self
                     .port
                     .initiate_esim_authentication(modem_imei, smdp_address.as_deref());
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::DownloadEsimProfile {
+                modem_imei,
+                activation_code,
+                confirmation_code,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.download_esim_profile(
+                    modem_imei,
+                    activation_code,
+                    confirmation_code.as_deref(),
+                );
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

@@ -63,18 +63,26 @@ pub use report::{
     ScannedOperator, Signal,
 };
 pub use es10c::{
-    configured_addresses_payload, euicc_challenge_payload, euicc_info1_payload,
-    euicc_info2_payload, get_eid_payload, get_profiles_payload, list_notification_payload,
+    authenticate_server_payload, bound_profile_package_segments, cancel_session_payload,
+    configured_addresses_payload, confirmation_code_required, euicc_challenge_payload,
+    euicc_info1_payload, euicc_info2_payload, get_eid_payload, get_profiles_payload,
+    list_notification_payload, parse_authenticate_server_response, parse_cancel_session_response,
     parse_configured_addresses, parse_eid_response, parse_euicc_challenge, parse_euicc_info1,
-    parse_euicc_info2, parse_notification_metadata_list, parse_pending_notifications,
-    retrieve_notifications_payload, store_data_chain, ConfiguredAddresses, Es10cError, EuiccInfo1,
-    EuiccInfo2, NotificationMetadata, PendingNotification, Profile, EUICC_CHALLENGE_BYTES,
-    MAX_STORE_DATA_BLOCKS, MAX_STORE_DATA_BYTES, STORE_DATA_BLOCK_BYTES,
+    parse_euicc_info2, parse_installation_result, parse_notification_metadata_list,
+    parse_pending_notifications, parse_prepare_download_response, parse_profile_metadata,
+    parse_remove_notification_response, prepare_download_payload, remove_notification_payload,
+    retrieve_notifications_payload, smdp_signed2_transaction_id, store_data_chain, tac_from_imei,
+    BppSegment, CancelSessionReason, ConfiguredAddresses, Es10cError, EuiccInfo1, EuiccInfo2,
+    InstallationResult, NotificationMetadata, PendingNotification, Profile, ProfileMetadata,
+    EUICC_CHALLENGE_BYTES, MAX_STORE_DATA_BLOCKS, MAX_STORE_DATA_BYTES, STORE_DATA_BLOCK_BYTES,
 };
 pub use es9p::{
-    initiate_authentication_request, load_trust_anchors, parse_initiate_authentication, trust_dir,
-    verify_server_credentials, AuthenticationStart, Es9pClient, Es9pError, HttpResponse,
-    TrustAnchor, Verification, ADMIN_PROTOCOL, DEFAULT_TRUST_DIR, INITIATE_AUTHENTICATION_PATH,
+    hash_confirmation_code, initiate_authentication_request, load_trust_anchors,
+    parse_activation_code, parse_initiate_authentication, trust_dir, verify_server_credentials,
+    ActivationCode, Acknowledgement, AuthenticationStart, BoundProfile, ClientAuthentication,
+    Es9pClient, Es9pError, HttpResponse, TrustAnchor, Verification, ADMIN_PROTOCOL,
+    AUTHENTICATE_CLIENT_PATH, CANCEL_SESSION_PATH, DEFAULT_TRUST_DIR,
+    GET_BOUND_PROFILE_PACKAGE_PATH, HANDLE_NOTIFICATION_PATH, INITIATE_AUTHENTICATION_PATH,
     TRUST_DIR_ENV, USER_AGENT,
 };
 #[cfg(target_os = "linux")]
@@ -104,8 +112,9 @@ pub use nas::{
 };
 pub use result::{QmiResult, ResultError};
 pub use session::{
-    EsimAuthenticationInputs, EsimLocalInfo, IsdrSession, QmiClient, QmiTransport, SessionError,
-    SyncRequest, CTL_SYNC,
+    DownloadOutcome, DownloadRequest, EsimAuthenticationInputs, EsimLocalInfo, EuiccSnapshot,
+    HttpStep, IsdrSession, QmiClient, QmiTransport, SegmentTransfer, SessionError, SyncRequest,
+    CTL_SYNC,
 };
 pub use uim::{
     decode_imsi, EF_IMSI_FILE_ID, EF_IMSI_PATH,

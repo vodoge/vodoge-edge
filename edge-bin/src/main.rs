@@ -1336,6 +1336,62 @@ mod linux {
             })
         }
 
+        /// Download one profile from an SM-DP+ and install it on the eUICC.
+        ///
+        /// The whole exchange happens while this thread holds the module, and
+        /// it has to: between `AuthenticateServer` and the last block of the
+        /// profile package the card is holding an RSP session, and anything
+        /// else that opened a logical channel in the middle would end it.
+        ///
+        /// Two things this deliberately does not do. It does not enable the
+        /// profile — SGP.22 makes install and enable separate operations, and
+        /// the module on this bench has exactly one working profile whose
+        /// network somebody is using. And it does not deliver the older
+        /// notifications the chip has been carrying around; only the one this
+        /// download produced goes to the server, because the others describe
+        /// profiles nobody asked us to act on.
+        fn download_esim_profile(
+            &mut self,
+            imei: &str,
+            activation_code: &str,
+            confirmation_code: Option<&str>,
+        ) -> Result<JsonValue, SendError> {
+            let code = edge_modem::parse_activation_code(activation_code)
+                .map_err(|error| SendError::new("esim_activation_code_invalid", error.to_string()))?;
+            if code.matching_id.is_none() {
+                return Err(SendError::new(
+                    "esim_activation_code_invalid",
+                    "the activation code names no matching id, so the SM-DP+ has no \
+                     way to know which order this is",
+                ));
+            }
+            if code.confirmation_code_required && confirmation_code.is_none() {
+                return Err(SendError::new(
+                    "esim_confirmation_code_required",
+                    "the activation code says a confirmation code is required and none \
+                     was supplied",
+                ));
+            }
+
+            let directory = edge_modem::trust_dir();
+            let client = Es9pClient::from_trust_dir(&directory).map_err(|error| {
+                SendError::new("esim_trust_anchors_unavailable", error.to_string())
+            })?;
+            let request = edge_modem::DownloadRequest {
+                activation_code: &code,
+                confirmation_code,
+                imei,
+            };
+
+            let outcome = self.radio.with_client(Some(imei), |modem| {
+                modem
+                    .download_esim_profile(ESIM_SLOT, &client, &request)
+                    .map_err(|error| SendError::new("esim_download_failed", error.to_string()))
+            })?;
+
+            json_details(&download_body(imei, &directory, &client, outcome))
+        }
+
         fn configure_proxy(
             &mut self,
             instances: &JsonValue,
@@ -1645,6 +1701,261 @@ mod linux {
             operations: metadata.operations.clone(),
             address: metadata.address.clone(),
             iccid: metadata.iccid.clone(),
+        }
+    }
+
+    /// `download_esim_profile` as the console receives it.
+    ///
+    /// Two snapshots rather than one summary. "A profile was downloaded" is a
+    /// claim; a second entry in the profile list, a free-memory figure that
+    /// dropped by about the size of the package, and one fewer notification
+    /// owed to the SM-DP+ are three independent facts, and they are what an
+    /// operator should be reading. The activation code and the matching id
+    /// appear nowhere: they are one-time credentials, and a command result is
+    /// stored, logged and copied into receipts.
+    #[derive(serde::Serialize)]
+    struct EsimDownloadBody {
+        imei: String,
+        eid: String,
+        smdp_address: String,
+        transaction_id: String,
+        /// That the code carried one. Not which one.
+        matching_id_supplied: bool,
+        confirmation_code_required: bool,
+
+        /// What the SM-DP+ said the profile is, read before anything was
+        /// written to the chip.
+        profile: Option<ProfileMetadataBody>,
+        /// The rules that stopped this download. Empty on the ordinary path.
+        refused_policy_rules: Vec<String>,
+
+        before: EuiccSnapshotBody,
+        after: Option<EuiccSnapshotBody>,
+        /// Bytes of non-volatile memory the install consumed, when both
+        /// readings are available.
+        free_memory_consumed: Option<i64>,
+        profiles_added: Option<i64>,
+
+        /// The `STORE DATA` chain, on real silicon for the first time.
+        authenticate_server_blocks: usize,
+        prepare_download_blocks: usize,
+        bound_profile_package_bytes: usize,
+        bound_profile_package_segments: Vec<BppSegmentBody>,
+        bound_profile_package_blocks: usize,
+
+        installed: bool,
+        /// True only because nothing here ever calls `ES10c.EnableProfile`.
+        enabled: bool,
+        installation_iccid: Option<String>,
+        installation_error: Option<String>,
+        failed_bpp_command: Option<String>,
+
+        notification_sequence_number: Option<u64>,
+        notification_bytes: usize,
+        notification_delivered: bool,
+        notification_delivery_error: Option<String>,
+        /// The card's own answer to `RemoveNotificationFromList`: 0 is gone.
+        notification_removed_code: Option<u64>,
+        notifications_pending_before: usize,
+        notifications_pending_after: Option<usize>,
+
+        session_cancelled: Option<&'static str>,
+        cancel_error: Option<String>,
+        stopped_after: Option<String>,
+
+        // The ES9+ session, on the same terms initiate_esim_authentication
+        // reports it, so the two results can be compared field by field.
+        euicc_challenge: String,
+        echoed_euicc_challenge: String,
+        server_challenge: String,
+        euicc_ci_pkid_to_be_used: String,
+        chip_ci_key_ids: Vec<String>,
+        ci_key_accepted_by_chip: bool,
+        certificate_key_id: String,
+        certificate_authority_key_id: String,
+        certificate_sha256: String,
+        certificate_not_after: String,
+        certificate_signed_by_ci: bool,
+        server_signature_valid: bool,
+        challenge_echoed: bool,
+        trust_anchor_label: String,
+        trust_anchor_key_id: String,
+        trust_directory: String,
+        trust_anchors: Vec<TrustAnchorBody>,
+        negotiated_tls: Option<String>,
+        admin_protocol: Option<String>,
+        http: Vec<HttpStepBody>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct ProfileMetadataBody {
+        iccid: Option<String>,
+        service_provider_name: Option<String>,
+        profile_name: Option<String>,
+        class: Option<u8>,
+        /// Every rule the SM-DP+ attached, named. `ppr1` forbids disabling the
+        /// profile and `ppr2` forbids deleting it, and both are permanent from
+        /// the moment it is installed.
+        policy_rules: Vec<String>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct EuiccSnapshotBody {
+        free_non_volatile_memory: Option<u64>,
+        profiles: Vec<ProfileBody>,
+        notifications: Vec<NotificationBody>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct BppSegmentBody {
+        label: String,
+        bytes: usize,
+        /// How many `STORE DATA` blocks this segment took. Anything above one
+        /// is a payload the pre-T030 single-APDU code would have silently
+        /// wrapped.
+        blocks: usize,
+    }
+
+    #[derive(serde::Serialize)]
+    struct HttpStepBody {
+        step: &'static str,
+        http_status: u16,
+        elapsed_ms: u64,
+    }
+
+    fn snapshot_body(snapshot: &edge_modem::EuiccSnapshot) -> EuiccSnapshotBody {
+        EuiccSnapshotBody {
+            free_non_volatile_memory: snapshot.free_non_volatile_memory,
+            profiles: snapshot
+                .profiles
+                .iter()
+                .map(|profile| ProfileBody {
+                    label: profile.label(),
+                    iccid: profile.iccid.clone(),
+                    enabled: profile.enabled,
+                    provider: profile.provider.clone(),
+                    name: profile.name.clone(),
+                    nickname: profile.nickname.clone(),
+                    class: profile.class,
+                    isdp_aid: profile.isdp_aid.clone(),
+                })
+                .collect(),
+            notifications: snapshot.notifications.iter().map(notification_body).collect(),
+        }
+    }
+
+    fn download_body(
+        imei: &str,
+        directory: &std::path::Path,
+        client: &Es9pClient,
+        outcome: edge_modem::DownloadOutcome,
+    ) -> EsimDownloadBody {
+        let after = outcome.after.as_ref().map(snapshot_body);
+        let free_memory_consumed = match (
+            outcome.before.free_non_volatile_memory,
+            outcome
+                .after
+                .as_ref()
+                .and_then(|snapshot| snapshot.free_non_volatile_memory),
+        ) {
+            (Some(before), Some(after)) => Some(before as i64 - after as i64),
+            _ => None,
+        };
+        let profiles_added = outcome
+            .after
+            .as_ref()
+            .map(|snapshot| snapshot.profiles.len() as i64 - outcome.before.profiles.len() as i64);
+        let installation = outcome.installation.as_ref();
+        EsimDownloadBody {
+            imei: imei.to_string(),
+            eid: outcome.eid.clone(),
+            smdp_address: outcome.smdp_address.clone(),
+            transaction_id: outcome.transaction_id.clone(),
+            matching_id_supplied: outcome.matching_id_present,
+            confirmation_code_required: outcome.confirmation_code_required,
+            profile: outcome.metadata.as_ref().map(|metadata| ProfileMetadataBody {
+                iccid: metadata.iccid.clone(),
+                service_provider_name: metadata.service_provider_name.clone(),
+                profile_name: metadata.profile_name.clone(),
+                class: metadata.class,
+                policy_rules: metadata.policy_rules.clone(),
+            }),
+            refused_policy_rules: outcome.refused_policy_rules.clone(),
+            notifications_pending_before: outcome.before.notifications.len(),
+            notifications_pending_after: outcome
+                .after
+                .as_ref()
+                .map(|snapshot| snapshot.notifications.len()),
+            before: snapshot_body(&outcome.before),
+            after,
+            free_memory_consumed,
+            profiles_added,
+            authenticate_server_blocks: outcome.authenticate_server_blocks,
+            prepare_download_blocks: outcome.prepare_download_blocks,
+            bound_profile_package_bytes: outcome.bpp_bytes,
+            bound_profile_package_segments: outcome
+                .bpp_segments
+                .iter()
+                .map(|segment| BppSegmentBody {
+                    label: segment.label.clone(),
+                    bytes: segment.bytes,
+                    blocks: segment.blocks,
+                })
+                .collect(),
+            bound_profile_package_blocks: outcome.bpp_blocks,
+            installed: outcome.installed,
+            // Stated rather than left to be assumed. Nothing on this path
+            // calls EnableProfile, so a downloaded profile sits disabled next
+            // to the one that is carrying traffic.
+            enabled: false,
+            installation_iccid: installation.and_then(|result| result.iccid.clone()),
+            installation_error: installation.and_then(|result| result.error_reason.clone()),
+            failed_bpp_command: installation.and_then(|result| result.bpp_command.clone()),
+            notification_sequence_number: installation.and_then(|result| result.sequence_number),
+            notification_bytes: outcome.notification_bytes,
+            notification_delivered: outcome.notification_delivered,
+            notification_delivery_error: outcome.notification_delivery_error.clone(),
+            notification_removed_code: outcome.notification_removed,
+            session_cancelled: outcome.session_cancelled,
+            cancel_error: outcome.cancel_error.clone(),
+            stopped_after: outcome.stopped_after.clone(),
+            euicc_challenge: hex_string(&outcome.euicc_challenge),
+            echoed_euicc_challenge: outcome.echoed_euicc_challenge.clone(),
+            server_challenge: outcome.server_challenge.clone(),
+            euicc_ci_pkid_to_be_used: outcome.euicc_ci_pkid_to_be_used.clone(),
+            chip_ci_key_ids: outcome.chip_ci_key_ids.clone(),
+            ci_key_accepted_by_chip: outcome.ci_key_accepted_by_chip,
+            certificate_key_id: outcome.verification.certificate_key_id.clone(),
+            certificate_authority_key_id: outcome.verification.certificate_authority_key_id.clone(),
+            certificate_sha256: outcome.verification.certificate_sha256.clone(),
+            certificate_not_after: outcome.verification.certificate_not_after.clone(),
+            certificate_signed_by_ci: outcome.verification.certificate_signed_by_ci,
+            server_signature_valid: outcome.verification.server_signature_valid,
+            challenge_echoed: outcome.verification.challenge_echoed,
+            trust_anchor_label: outcome.verification.trust_anchor_label.clone(),
+            trust_anchor_key_id: outcome.verification.trust_anchor_key_id.clone(),
+            trust_directory: directory.display().to_string(),
+            trust_anchors: client
+                .anchors()
+                .iter()
+                .map(|anchor| TrustAnchorBody {
+                    label: anchor.label.clone(),
+                    key_id: anchor.key_id.clone(),
+                    sha256: anchor.sha256.clone(),
+                    not_after: anchor.not_after.clone(),
+                })
+                .collect(),
+            negotiated_tls: outcome.negotiated_tls.clone(),
+            admin_protocol: outcome.admin_protocol.clone(),
+            http: outcome
+                .http
+                .iter()
+                .map(|step| HttpStepBody {
+                    step: step.step,
+                    http_status: step.http_status,
+                    elapsed_ms: step.elapsed_ms,
+                })
+                .collect(),
         }
     }
 

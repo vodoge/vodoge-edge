@@ -1,14 +1,15 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    dms, es10c, nas, uim, unique_tlv, wms, AllocationError, ApduResponse, CellLocationInfo,
-    ClientAllocationRequest, ClientAssignment, ClientId, ClientRegistry, ClientRegistryError,
-    ConfiguredAddresses, CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError,
-    EuiccInfo1, EuiccInfo2, ListedMessage,
+    dms, es10c, es9p, nas, uim, unique_tlv, wms, ActivationCode, AllocationError, ApduResponse,
+    AuthenticationStart, CellLocationInfo, ClientAllocationRequest, ClientAssignment,
+    ClientAuthentication, ClientId, ClientRegistry, ClientRegistryError, ConfiguredAddresses,
+    CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, Es9pClient, Es9pError,
+    EuiccInfo1, EuiccInfo2, InstallationResult, ListedMessage,
     MessageId, MessageMode, MessageTag, NasError, NotificationMetadata, OperatingMode,
-    PendingNotification, PendingTransactions, Profile, QmiRequest, QmiResponse, QmiResult,
-    RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError, TransactionId,
-    UimError, WireError, WmsError,
+    PendingNotification, PendingTransactions, Profile, ProfileMetadata, QmiRequest, QmiResponse,
+    QmiResult, RawMessage, ResultError, ServiceId, ServingSystem, StorageType, TlvLookupError,
+    TransactionId, UimError, Verification, WireError, WmsError,
 };
 
 /// CTL message that asks the modem to resynchronize control state.
@@ -816,6 +817,12 @@ pub enum SessionError {
     Wms(WmsError),
     Uim(UimError),
     Es10c(crate::Es10cError),
+    /// An ES9+ exchange with an SM-DP+ failed.
+    ///
+    /// Carried through rather than flattened into `Transport`: a download runs
+    /// over two very different links, and "the server refused the matching
+    /// id" and "the modem stopped answering" need different next steps.
+    Es9p(Es9pError),
     UnexpectedSyncResponse {
         service: ServiceId,
         client: ClientId,
@@ -873,6 +880,7 @@ impl fmt::Display for SessionError {
             Self::Wms(error) => error.fmt(formatter),
             Self::Uim(error) => error.fmt(formatter),
             Self::Es10c(error) => error.fmt(formatter),
+            Self::Es9p(error) => error.fmt(formatter),
             Self::UnexpectedSyncResponse {
                 service,
                 client,
@@ -964,8 +972,485 @@ impl From<UimError> for SessionError {
     }
 }
 
+impl From<Es9pError> for SessionError {
+    fn from(error: Es9pError) -> Self {
+        Self::Es9p(error)
+    }
+}
+
 impl From<crate::Es10cError> for SessionError {
     fn from(value: crate::Es10cError) -> Self {
         Self::Es10c(value)
     }
+}
+
+/// What one eUICC held at a moment in time.
+///
+/// Taken twice, before and after a download, because the evidence that a
+/// profile arrived is not the command saying so. It is a second profile in the
+/// list, a smaller free memory figure, and one more notification the card owes
+/// its SM-DP+.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EuiccSnapshot {
+    pub free_non_volatile_memory: Option<u64>,
+    pub profiles: Vec<Profile>,
+    pub notifications: Vec<NotificationMetadata>,
+}
+
+/// One `STORE DATA` chain that carried a piece of a Bound Profile Package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegmentTransfer {
+    pub label: String,
+    pub bytes: usize,
+    pub blocks: usize,
+}
+
+/// One ES9+ round trip, for a record that can be read after the fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpStep {
+    pub step: &'static str,
+    pub http_status: u16,
+    pub elapsed_ms: u64,
+}
+
+/// What the operator asked for.
+///
+/// The activation code is borrowed rather than owned and is never copied into
+/// the outcome: it is a one-time credential, and a value that ends up in a
+/// command result ends up in a database, a log and a receipt.
+pub struct DownloadRequest<'a> {
+    pub activation_code: &'a ActivationCode,
+    pub confirmation_code: Option<&'a str>,
+    /// The module's own IMEI. Only its first eight digits travel, as the type
+    /// allocation code inside `DeviceInfo`.
+    pub imei: &'a str,
+}
+
+/// Everything that happened, in enough detail to tell a download that worked
+/// from one that merely returned.
+#[derive(Clone, Debug, Default)]
+pub struct DownloadOutcome {
+    pub eid: String,
+    pub smdp_address: String,
+    pub transaction_id: String,
+    /// True when the activation code named a matching id. The id itself is
+    /// deliberately absent.
+    pub matching_id_present: bool,
+    pub before: EuiccSnapshot,
+    pub after: Option<EuiccSnapshot>,
+
+    // The ES9+ session, from `InitiateAuthentication`.
+    pub euicc_challenge: [u8; es10c::EUICC_CHALLENGE_BYTES],
+    pub echoed_euicc_challenge: String,
+    pub server_challenge: String,
+    pub euicc_ci_pkid_to_be_used: String,
+    pub chip_ci_key_ids: Vec<String>,
+    pub ci_key_accepted_by_chip: bool,
+    pub verification: Verification,
+    pub negotiated_tls: Option<String>,
+    pub admin_protocol: Option<String>,
+    pub http: Vec<HttpStep>,
+
+    /// What the SM-DP+ said the profile is, read before anything was written.
+    pub metadata: Option<ProfileMetadata>,
+    /// The policy rules that stopped this download, when they did.
+    pub refused_policy_rules: Vec<String>,
+    /// Whether the server asked for a confirmation code.
+    pub confirmation_code_required: bool,
+
+    /// Blocks in the `STORE DATA` chain each card-side step needed. These are
+    /// the numbers that say the chain works on real hardware: every one of
+    /// them above 1 is a payload the old single-APDU code would have wrapped.
+    pub authenticate_server_blocks: usize,
+    pub prepare_download_blocks: usize,
+    pub bpp_bytes: usize,
+    pub bpp_segments: Vec<SegmentTransfer>,
+    pub bpp_blocks: usize,
+
+    pub installed: bool,
+    pub installation: Option<InstallationResult>,
+    /// The notification produced by *this* download, and only that one.
+    pub notification_delivered: bool,
+    pub notification_bytes: usize,
+    pub notification_delivery_error: Option<String>,
+    /// 0 when the card confirmed the notification is gone.
+    pub notification_removed: Option<u64>,
+    /// Set when the RSP session was deliberately cancelled instead of
+    /// finished, with the SGP.22 reason.
+    pub session_cancelled: Option<&'static str>,
+    pub cancel_error: Option<String>,
+    /// Where this stopped, when it stopped short of installing.
+    pub stopped_after: Option<String>,
+}
+
+impl<T: QmiTransport> QmiClient<T> {
+    /// Download one profile onto the eUICC and tell its SM-DP+ it arrived.
+    ///
+    /// One ISD-R channel for the whole thing, and it has to be: an RSP session
+    /// is state the card holds between `AuthenticateServer` and the last block
+    /// of the profile package, and a channel that closed in the middle would
+    /// take the session with it.
+    ///
+    /// Installs. Does not enable. SGP.22 keeps those apart and so does this:
+    /// the module on the bench has exactly one working profile and enabling a
+    /// new one would take the network away from whoever is using it.
+    pub fn download_esim_profile(
+        &mut self,
+        slot: u8,
+        client: &Es9pClient,
+        request: &DownloadRequest<'_>,
+    ) -> Result<DownloadOutcome, SessionError> {
+        let mut session = self.isdr_session(slot)?;
+        let outcome = session.run_download(client, request);
+        session.close()?;
+        outcome
+    }
+}
+
+impl<T: QmiTransport> IsdrSession<'_, T> {
+    /// Run one ES10 request and say how many `STORE DATA` blocks it took.
+    pub fn execute_counted(&mut self, payload: &[u8]) -> Result<(Vec<u8>, usize), SessionError> {
+        let chain = es10c::store_data_chain(payload)?;
+        let blocks = chain.len();
+        let last = blocks - 1;
+        let mut answer = Vec::new();
+        for (index, apdu) in chain.iter().enumerate() {
+            let response = self.transmit(apdu)?;
+            if !response.is_success() {
+                return Err(SessionError::Uim(UimError::ApduFailed {
+                    sw1: response.sw1,
+                    sw2: response.sw2,
+                }));
+            }
+            if index == last {
+                answer = response.data;
+            }
+        }
+        Ok((answer, blocks))
+    }
+
+    /// ES10b `AuthenticateServer`: the card judges the SM-DP+.
+    ///
+    /// The first request in this project large enough to need more than one
+    /// `STORE DATA` block against a real card. A server certificate alone is
+    /// six hundred bytes.
+    pub fn authenticate_server(
+        &mut self,
+        start: &AuthenticationStart,
+        matching_id: Option<&str>,
+        imei: &str,
+    ) -> Result<(Vec<u8>, usize), SessionError> {
+        let payload = es10c::authenticate_server_payload(
+            &start.server_signed1,
+            &start.server_signature1,
+            &start.euicc_ci_pkid_der,
+            &start.server_certificate,
+            matching_id,
+            es10c::tac_from_imei(imei)?,
+        )?;
+        let (bytes, blocks) = self.execute_counted(&payload)?;
+        Ok((es10c::parse_authenticate_server_response(&bytes)?, blocks))
+    }
+
+    /// ES10b `PrepareDownload`: the card accepts the profile's key material.
+    pub fn prepare_download(
+        &mut self,
+        authentication: &ClientAuthentication,
+        confirmation_code: Option<&str>,
+    ) -> Result<(Vec<u8>, usize), SessionError> {
+        let required = es10c::confirmation_code_required(&authentication.smdp_signed2)?;
+        let hash = if required {
+            let code = confirmation_code.ok_or_else(|| {
+                SessionError::transport(
+                    "the SM-DP+ requires a confirmation code and none was supplied",
+                )
+            })?;
+            let transaction_id = es10c::smdp_signed2_transaction_id(&authentication.smdp_signed2)?;
+            Some(es9p::hash_confirmation_code(code, &transaction_id))
+        } else {
+            None
+        };
+        let payload = es10c::prepare_download_payload(
+            &authentication.smdp_signed2,
+            &authentication.smdp_signature2,
+            &authentication.smdp_certificate,
+            hash.as_ref().map(|value| &value[..]),
+        )?;
+        let (bytes, blocks) = self.execute_counted(&payload)?;
+        Ok((es10c::parse_prepare_download_response(&bytes)?, blocks))
+    }
+
+    /// Feed a Bound Profile Package to the eUICC, segment by segment.
+    ///
+    /// The card answers most segments with nothing at all. The moment it
+    /// answers with bytes, that is a `ProfileInstallationResult` and the
+    /// transfer is over — successfully if it is the last segment, and as a
+    /// named failure if it is not. Carrying on after that would push the rest
+    /// of a profile at a card that has already closed the channel.
+    pub fn load_bound_profile_package(
+        &mut self,
+        package: &[u8],
+    ) -> Result<(InstallationResult, Vec<SegmentTransfer>), SessionError> {
+        let segments = es10c::bound_profile_package_segments(package)?;
+        let mut transfers = Vec::with_capacity(segments.len());
+        let mut result = None;
+        for segment in &segments {
+            let (answer, blocks) = self.execute_counted(&segment.bytes)?;
+            transfers.push(SegmentTransfer {
+                label: segment.label.clone(),
+                bytes: segment.bytes.len(),
+                blocks,
+            });
+            if !answer.is_empty() {
+                result = Some(es10c::parse_installation_result(&answer)?);
+                break;
+            }
+        }
+        match result {
+            Some(result) => Ok((result, transfers)),
+            None => Err(SessionError::transport(
+                "the eUICC accepted every segment of the profile package without \
+                 returning a ProfileInstallationResult",
+            )),
+        }
+    }
+
+    /// ES10b `RemoveNotificationFromList`. Returns the card's own code: 0 is
+    /// removed, 1 is "there was nothing there".
+    pub fn remove_notification(&mut self, sequence_number: u64) -> Result<u64, SessionError> {
+        let bytes = self.execute(&es10c::remove_notification_payload(sequence_number))?;
+        Ok(es10c::parse_remove_notification_response(&bytes)?)
+    }
+
+    /// ES10b `CancelSession`, returning the signed answer ES9+ has to relay.
+    pub fn cancel_session(
+        &mut self,
+        transaction_id: &[u8],
+        reason: es10c::CancelSessionReason,
+    ) -> Result<Vec<u8>, SessionError> {
+        let bytes = self.execute(&es10c::cancel_session_payload(transaction_id, reason))?;
+        Ok(es10c::parse_cancel_session_response(&bytes)?)
+    }
+
+    /// Read what the chip holds right now.
+    fn snapshot(&mut self) -> Result<EuiccSnapshot, SessionError> {
+        Ok(EuiccSnapshot {
+            free_non_volatile_memory: self.euicc_info2()?.free_non_volatile_memory,
+            profiles: self.list_profiles()?,
+            notifications: self.list_notifications()?,
+        })
+    }
+
+    /// The whole download, on one channel.
+    fn run_download(
+        &mut self,
+        client: &Es9pClient,
+        request: &DownloadRequest<'_>,
+    ) -> Result<DownloadOutcome, SessionError> {
+        let mut outcome = DownloadOutcome {
+            eid: self.read_eid()?,
+            smdp_address: request.activation_code.smdp_address.clone(),
+            matching_id_present: request.activation_code.matching_id.is_some(),
+            before: self.snapshot()?,
+            ..DownloadOutcome::default()
+        };
+
+        let challenge = self.euicc_challenge()?;
+        let info1 = self.euicc_info1()?;
+        outcome.euicc_challenge = challenge;
+        outcome.chip_ci_key_ids = info1.ci_key_ids_for_verification.clone();
+
+        let start = client
+            .initiate_authentication(&outcome.smdp_address, &challenge, &info1.raw)
+            .map_err(SessionError::from)?;
+        outcome.transaction_id = start.transaction_id.clone();
+        outcome.echoed_euicc_challenge = start.echoed_euicc_challenge.clone();
+        outcome.server_challenge = start.server_challenge.clone();
+        outcome.euicc_ci_pkid_to_be_used = start.euicc_ci_pkid_to_be_used.clone();
+        outcome.ci_key_accepted_by_chip = outcome
+            .chip_ci_key_ids
+            .iter()
+            .any(|key| key == &start.euicc_ci_pkid_to_be_used);
+        outcome.verification = start.verification.clone();
+        outcome.negotiated_tls = start.negotiated_tls.clone();
+        outcome.admin_protocol = start.admin_protocol.clone();
+        outcome.http.push(HttpStep {
+            step: "initiateAuthentication",
+            http_status: start.http_status,
+            elapsed_ms: start.elapsed_ms,
+        });
+
+        // The card is asked to judge the server before the server is told
+        // anything about the order. A chip that will not authenticate this
+        // SM-DP+ ends the session here, with the activation code untouched.
+        let (server_response, blocks) = self.authenticate_server(
+            &start,
+            request.activation_code.matching_id.as_deref(),
+            request.imei,
+        )?;
+        outcome.authenticate_server_blocks = blocks;
+
+        // From here the SM-DP+ knows which order this is, so every exit runs
+        // `cancelSession` rather than walking away.
+        let transaction_bytes = hex_bytes(&start.transaction_id_raw);
+        let authentication = match client.authenticate_client(
+            &outcome.smdp_address,
+            &start.transaction_id_raw,
+            &server_response,
+        ) {
+            Ok(authentication) => authentication,
+            Err(error) => {
+                // Nothing was claimed if the server refused, so there is no
+                // session to give back — and a cancel for a transaction the
+                // server has already dropped is answered with an error that
+                // hides the real one.
+                return Err(SessionError::from(error));
+            }
+        };
+        outcome.http.push(HttpStep {
+            step: "authenticateClient",
+            http_status: authentication.http_status,
+            elapsed_ms: authentication.elapsed_ms,
+        });
+
+        let metadata = es10c::parse_profile_metadata(&authentication.profile_metadata)?;
+        outcome.confirmation_code_required =
+            es10c::confirmation_code_required(&authentication.smdp_signed2)?;
+        let refused = metadata.irreversible_policy_rules();
+        outcome.metadata = Some(metadata);
+
+        // The gate. `ppr1` forbids ever disabling this profile and `ppr2`
+        // forbids ever deleting it, and both are permanent from the moment the
+        // package is installed. There are two eUICCs on this bench and nobody
+        // can physically reach either one, so a profile that cannot be removed
+        // is a slot that is gone. The profile is handed back rather than
+        // installed.
+        if !refused.is_empty() {
+            outcome.refused_policy_rules = refused.clone();
+            outcome.stopped_after = Some(format!(
+                "the profile carries {}, which cannot be removed once installed",
+                refused.join(" and ")
+            ));
+            self.give_back_session(
+                client,
+                &mut outcome,
+                &transaction_bytes,
+                &start.transaction_id_raw,
+                es10c::CancelSessionReason::PprNotAllowed,
+            );
+            outcome.after = Some(self.snapshot()?);
+            return Ok(outcome);
+        }
+
+        let (prepared, blocks) = self.prepare_download(&authentication, request.confirmation_code)?;
+        outcome.prepare_download_blocks = blocks;
+
+        // The point of no return at the server.
+        let bound = client
+            .get_bound_profile_package(
+                &outcome.smdp_address,
+                &start.transaction_id_raw,
+                &prepared,
+            )
+            .map_err(SessionError::from)?;
+        outcome.http.push(HttpStep {
+            step: "getBoundProfilePackage",
+            http_status: bound.http_status,
+            elapsed_ms: bound.elapsed_ms,
+        });
+        outcome.bpp_bytes = bound.package.len();
+
+        let (installation, transfers) = self.load_bound_profile_package(&bound.package)?;
+        outcome.bpp_blocks = transfers.iter().map(|transfer| transfer.blocks).sum();
+        outcome.bpp_segments = transfers;
+        outcome.installed = installation.success;
+        let notification = installation.notification.clone();
+        let sequence_number = installation.sequence_number;
+        outcome.notification_bytes = notification.len();
+        outcome.installation = Some(installation);
+
+        // The notification is delivered whether the installation succeeded or
+        // failed: SGP.22 requires the SM-DP+ to be told either way, and a
+        // failure it never hears about leaves the profile stuck at its end.
+        // Only this one notification goes. The chip is also holding older ones
+        // from a previous life, and delivering those would tell an operator to
+        // act on profiles nobody asked about.
+        match client.handle_notification(&outcome.smdp_address, &notification) {
+            Ok(acknowledgement) => {
+                outcome.notification_delivered = true;
+                outcome.http.push(HttpStep {
+                    step: "handleNotification",
+                    http_status: acknowledgement.http_status,
+                    elapsed_ms: acknowledgement.elapsed_ms,
+                });
+                // Removed only once the server has it. The other order loses
+                // the notification if the delivery fails, and the card will
+                // not produce it again.
+                if let Some(sequence_number) = sequence_number {
+                    match self.remove_notification(sequence_number) {
+                        Ok(code) => outcome.notification_removed = Some(code),
+                        Err(error) => {
+                            outcome.notification_delivery_error = Some(format!(
+                                "delivered, but the card would not remove it: {error}"
+                            ))
+                        }
+                    }
+                }
+            }
+            Err(error) => outcome.notification_delivery_error = Some(error.to_string()),
+        }
+
+        outcome.after = Some(self.snapshot()?);
+        if !outcome.installed {
+            outcome.stopped_after = Some("the eUICC refused the profile package".into());
+        }
+        Ok(outcome)
+    }
+
+    /// Hand a claimed profile back to its SM-DP+.
+    ///
+    /// Best effort and recorded rather than raised: this runs on a path that
+    /// already has a reason to report, and replacing that reason with "the
+    /// cancel failed" would hide why the download was abandoned.
+    fn give_back_session(
+        &mut self,
+        client: &Es9pClient,
+        outcome: &mut DownloadOutcome,
+        transaction_bytes: &[u8],
+        transaction_id: &str,
+        reason: es10c::CancelSessionReason,
+    ) {
+        outcome.session_cancelled = Some(reason.label());
+        match self.cancel_session(transaction_bytes, reason) {
+            Ok(response) => {
+                match client.cancel_session(&outcome.smdp_address, transaction_id, &response) {
+                    Ok(acknowledgement) => outcome.http.push(HttpStep {
+                        step: "cancelSession",
+                        http_status: acknowledgement.http_status,
+                        elapsed_ms: acknowledgement.elapsed_ms,
+                    }),
+                    Err(error) => outcome.cancel_error = Some(error.to_string()),
+                }
+            }
+            Err(error) => outcome.cancel_error = Some(error.to_string()),
+        }
+    }
+}
+
+/// Decode an even-length hex string, ignoring anything that is not hex.
+///
+/// The transaction id arrives as text and the card wants the bytes. A
+/// permissive reader is right here: the string came from a server that has
+/// already been authenticated, and the alternative is a download that fails at
+/// the cancel step because of a separator.
+fn hex_bytes(text: &str) -> Vec<u8> {
+    let digits: Vec<u8> = text
+        .chars()
+        .filter_map(|character| character.to_digit(16).map(|digit| digit as u8))
+        .collect();
+    digits.chunks(2).map(|pair| match pair {
+        [high, low] => (high << 4) | low,
+        [high] => high << 4,
+        _ => 0,
+    }).collect()
 }

@@ -411,6 +411,22 @@ impl edge_agent::SendPort for RecordingPort {
         ));
         Ok(serde_json::json!({"transaction_id": "E4F6996D64A543FC8A7F6F8F97F9428D"}))
     }
+
+    fn download_esim_profile(
+        &mut self,
+        _imei: &str,
+        activation_code: &str,
+        confirmation_code: Option<&str>,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        // The activation code is recorded here, and only here, because this
+        // is a fake whose whole job is to prove the field arrived. Nothing on
+        // the real path puts it anywhere.
+        self.calls.push(format!(
+            "download_esim_profile {activation_code} cc={}",
+            confirmation_code.unwrap_or("none")
+        ));
+        Ok(serde_json::json!({"installed": true, "enabled": false}))
+    }
 }
 
 fn deliver(command: Command, port: RecordingPort) -> (CommandResultPayload, Vec<String>) {
@@ -554,6 +570,22 @@ fn every_relayed_command_reaches_the_port() {
             },
             "initiate_esim_authentication wbg.prod.ondemandconnectivity.com",
         ),
+        (
+            Command::DownloadEsimProfile {
+                modem_imei: IMEI.into(),
+                activation_code: "LPA:1$smdp.example.com$AAAA-BBBB".into(),
+                confirmation_code: None,
+            },
+            "download_esim_profile LPA:1$smdp.example.com$AAAA-BBBB cc=none",
+        ),
+        (
+            Command::DownloadEsimProfile {
+                modem_imei: IMEI.into(),
+                activation_code: "1$smdp.example.com$AAAA-BBBB".into(),
+                confirmation_code: Some("13572468".into()),
+            },
+            "download_esim_profile 1$smdp.example.com$AAAA-BBBB cc=13572468",
+        ),
     ];
 
     for (command, expected_call) in cases {
@@ -647,4 +679,23 @@ fn an_unimplemented_action_fails_with_its_name() {
         "the reason must name the action: {:?}",
         outcome.result.reason,
     );
+}
+
+/// Downloading a profile installs it and leaves it disabled, and the result
+/// has to say both. "Installed" on its own reads as "in use", and on a module
+/// whose one working profile is carrying traffic that is the difference
+/// between a spare and an outage.
+#[test]
+fn a_downloaded_profile_reports_that_it_was_not_enabled() {
+    let (result, _) = deliver(
+        Command::DownloadEsimProfile {
+            modem_imei: IMEI.into(),
+            activation_code: "LPA:1$smdp.example.com$AAAA-BBBB".into(),
+            confirmation_code: None,
+        },
+        RecordingPort::default(),
+    );
+    let details = result_json(&result);
+    assert_eq!(details["details"]["installed"], true);
+    assert_eq!(details["details"]["enabled"], false);
 }
