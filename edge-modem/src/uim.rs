@@ -30,6 +30,14 @@ const READ_RESULT_TLV: u8 = 0x11;
 pub const EF_IMSI_FILE_ID: u16 = 0x6f07;
 pub const EF_IMSI_PATH: &[u16] = &[0x3f00, 0x7fff];
 
+/// `EF_AD` sits beside `EF_IMSI` inside the USIM application, and is what
+/// says where the MNC ends inside that IMSI (byte 4, low nibble). It is
+/// read-only and reachable on the basic channel, so it costs one more
+/// READ TRANSPARENT on a poll that already reads `EF_IMSI` -- no logical
+/// channel, nothing to contend with an eUICC session over.
+pub const EF_AD_FILE_ID: u16 = 0x6fad;
+pub const EF_AD_PATH: &[u16] = &[0x3f00, 0x7fff];
+
 /// `EF_ICCID` sits directly under the MF, outside any application.
 pub const EF_ICCID_FILE_ID: u16 = 0x2fe2;
 pub const EF_ICCID_PATH: &[u16] = &[0x3f00];

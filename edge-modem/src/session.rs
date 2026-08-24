@@ -235,6 +235,30 @@ impl<T: QmiTransport> QmiClient<T> {
         Ok(uim::decode_imsi(&bytes)?)
     }
 
+    /// Read `EF_AD`, whose fourth byte says how many digits of the IMSI are
+    /// the MNC.
+    ///
+    /// Returned raw rather than decoded: the AT-only probe reads the same
+    /// file over `AT+CRSM` and both hand the bytes to the one decoder in
+    /// `edge-core`, so there is a single statement of what byte 4 means. A
+    /// second copy of that rule is how the two operator tables in this
+    /// product came to disagree.
+    ///
+    /// Basic channel, like `read_imsi`: session type 0x00 with an empty AID.
+    /// Opening a logical channel for a read-only file would put this poll in
+    /// contention with the eUICC's ISD-R session for nothing.
+    pub fn read_ef_ad(&mut self) -> Result<Vec<u8>, SessionError> {
+        let assignment = self.assignment(ServiceId::UIM)?;
+        let request = uim::read_transparent_request(
+            assignment,
+            self.allocate_service_transaction(),
+            uim::EF_AD_FILE_ID,
+            uim::EF_AD_PATH,
+        )?;
+        let response = self.round_trip(&request)?;
+        Ok(uim::parse_read_transparent(&response)?)
+    }
+
     /// Read `EF_ICCID` from the active profile. On an eUICC this changes when
     /// a different profile is enabled, so it identifies the SIM in use rather
     /// than the chip.

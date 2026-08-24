@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use edge_modem::{
     parse_eid, ApduResponse, QmiClient, QmiTransport, ServiceId, SessionError, GET_EID_APDU,
     ISD_R_AID,
@@ -55,6 +57,98 @@ fn session_opens_isd_r_and_reads_eid() {
     let eid = client.read_eid(1).expect("read EID");
     assert_eq!(eid, expected_eid());
     assert_eq!(eid.len(), 32);
+}
+
+/// A card that answers READ TRANSPARENT and keeps every request it was sent.
+///
+/// The bytes matter as much as the answer here: `EF_AD` is only worth reading
+/// if it is read off the card the same way `EF_IMSI` is, on the basic channel,
+/// without opening a logical channel the eUICC session would then contend
+/// with.
+struct FakeFiles {
+    uim_client: u8,
+    contents: Vec<u8>,
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl QmiTransport for FakeFiles {
+    fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>, SessionError> {
+        self.requests.lock().expect("requests").push(request.to_vec());
+        let service = request[4];
+        let client = request[5];
+        let (transaction, message) = decode_header(request);
+        let payload = match (service, message) {
+            (0x00, 0x0027) => success_result_tlv(),
+            (0x00, 0x0022) => allocation_payload(ServiceId::UIM.as_u8(), self.uim_client),
+            (0x0b, 0x0020) => {
+                let mut payload = success_result_tlv();
+                let mut value = (self.contents.len() as u16).to_le_bytes().to_vec();
+                value.extend_from_slice(&self.contents);
+                payload.push(0x11);
+                payload.extend_from_slice(&(value.len() as u16).to_le_bytes());
+                payload.extend_from_slice(&value);
+                payload
+            }
+            _ => {
+                return Err(SessionError::transport(format!(
+                    "unexpected service=0x{service:02x} message=0x{message:04x} client=0x{client:02x}"
+                )))
+            }
+        };
+        Ok(response_frame(service, client, transaction, message, &payload))
+    }
+}
+
+/// The `EF_AD` every card on the bench answers with: MS operation mode 00,
+/// two bytes of additional information, and a two-digit MNC.
+const BENCH_EF_AD: [u8; 4] = [0x00, 0x00, 0x00, 0x02];
+
+#[test]
+fn read_ef_ad_returns_the_file_the_card_holds() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut client = QmiClient::new(FakeFiles {
+        uim_client: 0x08,
+        contents: BENCH_EF_AD.to_vec(),
+        requests: Arc::clone(&requests),
+    });
+    client.sync().expect("sync");
+    assert_eq!(client.read_ef_ad().expect("EF_AD"), BENCH_EF_AD.to_vec());
+
+    let sent = requests.lock().expect("requests");
+    let read = sent.last().expect("a read was sent");
+    // File TLV: id 6FAD little-endian, then a four-byte path 3F00/7FFF, each
+    // entry little-endian. Reading the wrong file would still decode.
+    let file_tlv = [0x02, 0x07, 0x00, 0xad, 0x6f, 0x04, 0x00, 0x3f, 0xff, 0x7f];
+    assert!(
+        read.windows(file_tlv.len()).any(|window| window == file_tlv),
+        "6FAD under 3F00/7FFF was not what was asked for: {read:02x?}"
+    );
+    // Session TLV: type 0x00 is primary GW provisioning with a zero-length
+    // AID -- the basic channel. Anything else here means a logical channel.
+    let session_tlv = [0x01, 0x02, 0x00, 0x00, 0x00];
+    assert!(
+        read.windows(session_tlv.len()).any(|window| window == session_tlv),
+        "EF_AD was not read on the basic channel: {read:02x?}"
+    );
+    // 0x0042 is OPEN LOGICAL CHANNEL. Not one may have been sent.
+    assert!(
+        !sent.iter().any(|request| decode_header(request).1 == 0x0042),
+        "a logical channel was opened to read a read-only file"
+    );
+}
+
+/// A card that answers a short file must not be turned into a plausible one.
+/// Three bytes is a real shape -- older cards stop before the MNC length --
+/// and reading past it is what a decoder that trusts its input would do.
+#[test]
+fn a_short_ef_ad_comes_back_short_rather_than_padded() {
+    let mut client = QmiClient::new(FakeFiles {
+        uim_client: 0x08,
+        contents: vec![0x00, 0x00, 0x00],
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    client.sync().expect("sync");
+    assert_eq!(client.read_ef_ad().expect("EF_AD"), vec![0x00, 0x00, 0x00]);
 }
 
 fn apdu_payload(request: &[u8]) -> Vec<u8> {
