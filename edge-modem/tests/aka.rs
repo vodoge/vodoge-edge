@@ -27,6 +27,34 @@ const USIM_FCP: &str = "621A8202782183027FD08410A0000000871002FFFFFFFF8907090000
 /// keys that the ePDG will reject for reasons nothing in our logs explains.
 const ISIM_FCP: &str = "621A8202782183027FD08410A0000000871004FFFFFFFF8907090000";
 
+/// What `867018069514820` answered to `AT+CSIM=10,"00F2000000"` after a
+/// profile switch (T072) — tag `83` = `3F00`, the MF, and no tag `84` at all.
+/// This is the state in which AUTHENTICATE answers `6985`.
+const MF_FCP: &str = "62208202782183023F00A5068001718701018A01058B032F0602C606900100830101";
+
+/// The same MF state re-measured on 2026-08-25, reached with nothing more
+/// exotic than `AT+CFUN=0` / `AT+CFUN=1`. The profile switch is *a* way into
+/// this state, not the only one, which is why the repair cannot be left to
+/// whoever remembers to switch profiles carefully.
+const MF_FCP_AFTER_CFUN_CYCLE: &str =
+    "62238202782183023F00A5068001718701018A01058B032F0602C60990014083010183010A";
+
+/// The FCP `867018069514820` answers to the SELECT below: tag `84` carrying
+/// the full, card-specific USIM AID whose first seven bytes are the prefix we
+/// asked for.
+const SELECTED_USIM_FCP: &str = "62308202782183027FD08410A0000000871002FFFFF00189000001FF\
+8A01058B032F0602C60C9001A083018183010183010A";
+
+/// The same, from `867018069509705` — a plain USIM, not an eUICC (`AT+CCHO`
+/// against the ISD-R AID is a bare `ERROR` there). Different AID bytes after
+/// the prefix, which is exactly why the SELECT asks for a partial name.
+const NON_EUICC_USIM_FCP: &str =
+    "6229820278218410A0000000871002FF86FFFF89FFFFFFFF8A01058B032F0603C609900140830101830181";
+
+/// The repair APDU: SELECT by DF name, first or only occurrence, answer with
+/// the FCP, data = the seven-byte USIM RID+PIX.
+const SELECT_USIM_ADF: &str = "00A4040407A000000087100200";
+
 struct Card {
     answers: Mutex<Vec<ApduResponse>>,
     sent: Mutex<Vec<Vec<u8>>>,
@@ -118,19 +146,144 @@ fn the_selected_application_is_checked_before_authenticate() {
 }
 
 #[test]
-fn a_card_with_isim_selected_is_refused_without_authenticating() {
-    let card = Card::new(vec![fcp_answer(ISIM_FCP)]);
+fn a_card_that_stays_on_isim_is_refused_without_authenticating() {
+    // The repair is allowed to try; the gate is not allowed to give in. A
+    // card that answers the SELECT with an ISIM FCP has said "no USIM here",
+    // and no challenge may be sent to it.
+    let card = Card::new(vec![fcp_answer(ISIM_FCP), fcp_answer(ISIM_FCP)]);
     let error = usim_authenticate(&mut &card, &rand16(), &autn16()).unwrap_err();
     assert_eq!(error.code(), "not_usim_adf");
+    let sent = card.sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(hex_upper(&sent[1]), SELECT_USIM_ADF);
+    assert!(!sent.iter().any(|apdu| apdu[1] == 0x88), "{sent:?}");
+}
+
+#[test]
+fn an_fcp_that_still_has_no_tag_84_after_the_select_is_refused() {
+    let bare = "62088202782183027FD0";
+    let card = Card::new(vec![fcp_answer(bare), fcp_answer(bare)]);
+    let error = usim_authenticate(&mut &card, &rand16(), &autn16()).unwrap_err();
+    assert_eq!(error.code(), "no_selected_application");
+    let sent = card.sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(!sent.iter().any(|apdu| apdu[1] == 0x88), "{sent:?}");
+}
+
+#[test]
+fn a_card_sitting_at_the_mf_is_selected_rather_than_refused() {
+    // T079's regression: after a profile switch the basic channel is on the
+    // MF, and every challenge died at the gate with `no_selected_application`
+    // even though the card was perfectly able to answer it.
+    for mf in [MF_FCP, MF_FCP_AFTER_CFUN_CYCLE] {
+        let card = Card::new(vec![
+            fcp_answer(mf),
+            fcp_answer(SELECTED_USIM_FCP),
+            answer("", 0x98, 0x62),
+        ]);
+        let outcome = usim_authenticate(&mut &card, &rand16(), &autn16()).expect("outcome");
+        assert!(
+            matches!(outcome, AkaOutcome::AuthenticationFailure { .. }),
+            "{outcome:?}"
+        );
+        let sent = card.sent();
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert_eq!(sent[0], STATUS_FCP_APDU.to_vec());
+        assert_eq!(hex_upper(&sent[1]), SELECT_USIM_ADF);
+        assert_eq!(&sent[2][..5], &[0x00, 0x88, 0x00, 0x81, 0x22]);
+    }
+}
+
+#[test]
+fn the_select_never_reaches_a_card_that_is_already_on_the_usim() {
+    // A card that is already on the USIM must not be re-selected: the repair
+    // has to be free once it has run. Two runs in a row therefore cost two
+    // APDUs each, and neither of them may be a SELECT. Measured on
+    // 867018069514820 as 39.1 ms for the round that repairs and 29.6 / 30.0 ms
+    // for the two after it.
+    let card = Card::new(vec![
+        fcp_answer(SELECTED_USIM_FCP),
+        answer("", 0x98, 0x62),
+        fcp_answer(SELECTED_USIM_FCP),
+        answer("", 0x98, 0x62),
+    ]);
+    for _ in 0..2 {
+        usim_authenticate(&mut &card, &rand16(), &autn16()).expect("outcome");
+    }
+    let sent = card.sent();
+    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert!(!sent.iter().any(|apdu| apdu[1] == 0xa4), "{sent:?}");
+}
+
+#[test]
+fn a_card_that_refuses_the_select_says_so_instead_of_authenticating() {
+    let card = Card::new(vec![fcp_answer(MF_FCP), answer("", 0x6a, 0x82)]);
+    let error = usim_authenticate(&mut &card, &rand16(), &autn16()).unwrap_err();
+    assert_eq!(error.code(), "usim_select_refused");
+    assert!(error.to_string().contains("6A82"), "{error}");
+    let sent = card.sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(!sent.iter().any(|apdu| apdu[1] == 0x88), "{sent:?}");
+}
+
+#[test]
+fn a_card_that_will_not_answer_status_is_reached_through_the_select() {
+    // 867018069509705 answers 6E00 to STATUS with P2 00, 01 and 0C alike,
+    // while answering SELECT and AUTHENTICATE normally. Treating an unhelpful
+    // STATUS as a dead end would refuse a card that can prove what it is.
+    let card = Card::new(vec![
+        answer("", 0x6e, 0x00),
+        fcp_answer(NON_EUICC_USIM_FCP),
+        answer("", 0x98, 0x62),
+    ]);
+    let outcome = usim_authenticate(&mut &card, &rand16(), &autn16()).expect("outcome");
+    assert!(matches!(outcome, AkaOutcome::AuthenticationFailure { .. }));
+    let sent = card.sent();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(hex_upper(&sent[1]), SELECT_USIM_ADF);
+}
+
+#[test]
+fn a_dead_pipe_is_not_answered_with_a_select() {
+    // Nothing came back at all, so nothing is known about the card. Sending a
+    // repair down a pipe that just failed adds a second failure and no
+    // information.
+    let card = Card::new(Vec::new());
+    let error = usim_authenticate(&mut &card, &rand16(), &autn16()).unwrap_err();
+    assert_eq!(error.code(), "at_transport_failed");
     assert_eq!(card.sent(), vec![STATUS_FCP_APDU.to_vec()]);
 }
 
 #[test]
-fn an_fcp_without_tag_84_is_refused_without_authenticating() {
-    let card = Card::new(vec![fcp_answer("62088202782183027FD0")]);
-    let error = usim_authenticate(&mut &card, &rand16(), &autn16()).unwrap_err();
-    assert_eq!(error.code(), "no_selected_application");
-    assert_eq!(card.sent().len(), 1);
+fn the_bench_transcript_from_mf_to_a_verdict_replays() {
+    // 2026-08-25 on 867018069514820, every byte measured through /api/at:
+    // STATUS -> MF; AUTHENTICATE there answered 6985; SELECT -> 6132;
+    // GET RESPONSE -> the USIM FCP; AUTHENTICATE -> 9862, the card running
+    // Milenage. The 61xx round is part of the transcript because the SELECT
+    // is the APDU that produces it.
+    let card = Card::new(vec![
+        fcp_answer(MF_FCP_AFTER_CFUN_CYCLE),
+        answer("", 0x61, 0x32),
+        fcp_answer(SELECTED_USIM_FCP),
+        answer("", 0x98, 0x62),
+    ]);
+    let outcome = usim_authenticate(&mut &card, &rand16(), &autn16()).expect("outcome");
+    match outcome {
+        AkaOutcome::AuthenticationFailure { sw1, sw2, .. } => assert_eq!((sw1, sw2), (0x98, 0x62)),
+        other => panic!("bench transcript became {other:?}"),
+    }
+    let sent = card.sent();
+    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert_eq!(hex_upper(&sent[1]), SELECT_USIM_ADF);
+    assert_eq!(sent[2], vec![0x00, 0xc0, 0x00, 0x00, 0x32]);
+    assert_eq!(&sent[3][..5], &[0x00, 0x88, 0x00, 0x81, 0x22]);
+}
+
+#[test]
+fn the_selected_aid_is_read_out_of_a_real_select_answer() {
+    let aid = selected_aid(&decode_hex(NON_EUICC_USIM_FCP).expect("fcp")).expect("aid");
+    assert!(aid.starts_with(&USIM_ADF_AID_PREFIX), "{}", hex_upper(&aid));
+    assert_eq!(hex_upper(&aid), "A0000000871002FF86FFFF89FFFFFFFF");
 }
 
 #[test]

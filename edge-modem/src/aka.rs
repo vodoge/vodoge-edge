@@ -19,6 +19,29 @@
 //!   `SELECT` can change it, and an AUTHENTICATE sent to the wrong application
 //!   is answered by the wrong keys. So every authentication re-reads the FCP
 //!   and refuses to continue unless the USIM ADF is what is selected.
+//! * **The wrong selection is repaired, never tolerated.** After a profile
+//!   switch — or, as measured on 2026-08-25, after a plain `AT+CFUN=0/1` SIM
+//!   re-init — the module leaves the basic channel on the MF (FCP tag `83` =
+//!   `3F00`, no tag `84`) and AUTHENTICATE answers `6985`. So a failed check
+//!   is followed by one `SELECT` of the USIM ADF and the *same* check applied
+//!   to the FCP that `SELECT` returns. The gate never widens: what changes is
+//!   that the file gets selected, not what counts as selected.
+//!
+//!   **The `SELECT` is sent only when the check has already failed.** That
+//!   keeps the repair idempotent for free — the happy path still costs
+//!   exactly the two APDUs it always did, measured at 29.6 / 30.0 ms against
+//!   31.7 ms before this change — and it also keeps a `SELECT` away from a
+//!   card that does not need one, which on this bench is not a purely
+//!   theoretical courtesy. Selecting the USIM ADF on `867018069514820` while
+//!   it was *already* selected was followed by the card leaving: `AT+CPIN?`
+//!   became `+CME ERROR: 13`, `AT+QSIMSTAT?` became `0,0`, every `AT+CSIM`
+//!   became `+CME ERROR: 0`, and the modem sat in `searching` until an
+//!   `AT+CFUN=0/1` cycle re-initialised it. **That is one observation and
+//!   the mechanism is not established**: `867018069509705` re-selects on
+//!   every single challenge, because it never answers `STATUS`, and it has
+//!   done so repeatedly with no ill effect. The dangling `61 32` that the
+//!   probe left unread across a lease boundary is at least as good a
+//!   suspect. Either way the ordering costs nothing and avoids the question.
 //!
 //! Status words are classified here rather than left to the caller, because
 //! the distinction between "the card rejected this challenge" and "the pipe is
@@ -56,6 +79,33 @@ pub const STATUS_FCP_APDU: [u8; 5] = [0x00, 0xf2, 0x00, 0x00, 0x00];
 /// `1004` under the same RID, which is why the PIX is part of the check —
 /// authenticating against ISIM would use a different security context.
 pub const USIM_ADF_AID_PREFIX: [u8; 7] = [0xa0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02];
+
+/// `SELECT` by DF name, first or only occurrence, answer with the FCP.
+///
+/// `P1 = 04` is "select by DF name" and `P2 = 04` is "first or only
+/// occurrence, return the FCP template". The data is
+/// [`USIM_ADF_AID_PREFIX`] rather than a full AID, because the rest of the
+/// AID is card specific: `867018069514820` answers
+/// `A0000000871002FFFFF00189000001FF` and `867018069509705` answers
+/// `A0000000871002FF86FFFF89FFFFFFFF`, and neither is knowable in advance.
+/// Partial DF-name matching is how a terminal finds an application it can
+/// only name by its RID and PIX.
+///
+/// **Why not walk `EF_DIR`.** `EF_DIR` would cost a `SELECT` of the MF, a
+/// `SELECT` of `2F00` and a `READ RECORD` per entry, on a path that is
+/// already inside a timed IKE_AUTH exchange — and it would buy nothing,
+/// because the AID it produced would still have to be checked against this
+/// same prefix before anything was authenticated. The check is what makes a
+/// selection trustworthy, so the cheaper discovery is the better one.
+/// `EF_DIR` is also card *data*: it can list an application that is not
+/// installed. Asking the file system directly cannot.
+fn select_usim_adf_apdu() -> Vec<u8> {
+    let mut apdu = Vec::with_capacity(6 + USIM_ADF_AID_PREFIX.len());
+    apdu.extend_from_slice(&[0x00, 0xa4, 0x04, 0x04, USIM_ADF_AID_PREFIX.len() as u8]);
+    apdu.extend_from_slice(&USIM_ADF_AID_PREFIX);
+    apdu.push(0x00);
+    apdu
+}
 
 /// FCP template tag, and the FCI template some cards answer with instead.
 const FCP_TEMPLATE_TAG: u8 = 0x62;
@@ -138,12 +188,20 @@ pub enum AkaError {
     StatusRefused { sw1: u8, sw2: u8 },
     /// The FCP carried no tag `84`, so what is selected cannot be established.
     NoSelectedApplication { fcp: String },
-    /// Something other than the USIM ADF is selected on the basic channel.
+    /// Something other than the USIM ADF is selected on the basic channel,
+    /// and a `SELECT` of the USIM ADF did not change that.
     ///
-    /// Deliberately not repaired here: repairing it means `SELECT`, and this
-    /// module's whole reason to exist is that it must not touch application
-    /// selection while eUICC sessions are in flight.
+    /// Reaching this means the card answered `9000` to the `SELECT` and then
+    /// described a different application, which is the one case where giving
+    /// up is the only honest move.
     NotUsimAdf { aid: String },
+    /// The `SELECT` of the USIM ADF was refused with a status word.
+    ///
+    /// Separate from [`Self::NotUsimAdf`] because the two say different
+    /// things: this one is "the card would not go there" — no USIM
+    /// application, or no partial-AID matching — the other is "the card went
+    /// somewhere else".
+    UsimSelectRefused { sw1: u8, sw2: u8 },
     /// A status word with no mapping. Carries the raw bytes so the next
     /// person has the evidence rather than our guess.
     UnknownStatusWord { sw1: u8, sw2: u8, body: String },
@@ -175,6 +233,10 @@ impl fmt::Display for AkaError {
                 "basic channel has AID {aid} selected, not the USIM ADF; refusing to \
                  AUTHENTICATE against the wrong application"
             ),
+            Self::UsimSelectRefused { sw1, sw2 } => write!(
+                formatter,
+                "card refused SELECT of the USIM ADF with SW {sw1:02X}{sw2:02X}"
+            ),
             Self::UnknownStatusWord { sw1, sw2, body } => write!(
                 formatter,
                 "unmapped status word {sw1:02X}{sw2:02X} (body {body})"
@@ -201,6 +263,7 @@ impl AkaError {
             Self::StatusRefused { .. } => "status_refused",
             Self::NoSelectedApplication { .. } => "no_selected_application",
             Self::NotUsimAdf { .. } => "not_usim_adf",
+            Self::UsimSelectRefused { .. } => "usim_select_refused",
             Self::UnknownStatusWord { .. } => "unknown_status_word",
             Self::MalformedResponse { .. } => "malformed_response",
             Self::TooManyGetResponseRounds { .. } => "too_many_get_response_rounds",
@@ -302,27 +365,78 @@ pub fn authenticate_apdu(rand16: &[u8], autn16: &[u8], include_le: bool) -> Resu
     Ok(apdu)
 }
 
-/// Run one AKA challenge against whatever is selected on the basic channel.
+/// Run one AKA challenge against the USIM on the basic channel.
 ///
-/// Order matters: the FCP check comes first and a failure there stops the
-/// sequence. Sending AUTHENTICATE blind to an unknown application is not a
-/// smaller risk than not sending it — the answer would be indistinguishable
-/// from a real one.
+/// Order matters: the FCP check comes first and nothing is authenticated
+/// until it passes. Sending AUTHENTICATE blind to an unknown application is
+/// not a smaller risk than not sending it — the answer would be
+/// indistinguishable from a real one, and on a card sitting at the MF it is
+/// `6985`, which carries neither keys nor a verdict.
 pub fn usim_authenticate(
     channel: &mut impl BasicChannel,
     rand16: &[u8],
     autn16: &[u8],
 ) -> Result<AkaOutcome, AkaError> {
     let apdu = authenticate_apdu(rand16, autn16, true)?;
-    verify_usim_selected(channel)?;
+    ensure_usim_selected(channel)?;
     let response = exchange(channel, &apdu)?;
     classify_authenticate(&response)
 }
 
+/// Require the USIM ADF on the basic channel, selecting it if it is missing.
+///
+/// One `STATUS` always; one `SELECT` only when that `STATUS` produced a
+/// verdict about *selection*. Transport failures and unreadable answers stay
+/// fatal: a pipe that just failed is not a pipe to send a repair down, and a
+/// card whose FCP cannot be parsed is not a card to guess about.
+fn ensure_usim_selected(channel: &mut impl BasicChannel) -> Result<Vec<u8>, AkaError> {
+    match verify_usim_selected(channel) {
+        Ok(aid) => Ok(aid),
+        Err(verdict) if is_selection_verdict(&verdict) => select_usim_adf(channel),
+        Err(fatal) => Err(fatal),
+    }
+}
+
+/// Whether the card told us *what* is selected — or that it will not say —
+/// as opposed to the exchange itself having failed.
+///
+/// `StatusRefused` belongs here on evidence: `867018069509705` answers
+/// `6E00` to `STATUS` in every form tried, `P2` `00`, `01` and `0C`, while
+/// answering `SELECT` and AUTHENTICATE normally. On that card the FCP that
+/// `SELECT` returns is the only way to establish what is selected, and
+/// refusing to authenticate a card that can prove it is on its USIM would be
+/// the gate rejecting the wrong thing.
+fn is_selection_verdict(error: &AkaError) -> bool {
+    matches!(
+        error,
+        AkaError::NoSelectedApplication { .. }
+            | AkaError::NotUsimAdf { .. }
+            | AkaError::StatusRefused { .. }
+    )
+}
+
+/// `SELECT` the USIM ADF and hold its own FCP to the same standard.
+///
+/// The FCP a `SELECT` answers with describes the file the card just moved
+/// to, so it is checked instead of spending another round trip on a second
+/// `STATUS` — and checking it is what turns "we asked for a USIM" into "the
+/// card says it is on one".
+fn select_usim_adf(channel: &mut impl BasicChannel) -> Result<Vec<u8>, AkaError> {
+    let response = exchange(channel, &select_usim_adf_apdu())?;
+    if !response.is_success() {
+        return Err(AkaError::UsimSelectRefused {
+            sw1: response.sw1,
+            sw2: response.sw2,
+        });
+    }
+    usim_aid_of(&response.data)
+}
+
 /// Read the FCP of the current application and require it to be the USIM ADF.
 ///
-/// Returns the AID, so a caller can put the actual bytes in a receipt instead
-/// of "it looked right".
+/// Read-only: this is the gate, and it repairs nothing. Returns the AID, so
+/// a caller can put the actual bytes in a receipt instead of "it looked
+/// right".
 pub fn verify_usim_selected(channel: &mut impl BasicChannel) -> Result<Vec<u8>, AkaError> {
     let response = exchange(channel, &STATUS_FCP_APDU)?;
     if !response.is_success() {
@@ -331,7 +445,15 @@ pub fn verify_usim_selected(channel: &mut impl BasicChannel) -> Result<Vec<u8>, 
             sw2: response.sw2,
         });
     }
-    let aid = selected_aid(&response.data)?;
+    usim_aid_of(&response.data)
+}
+
+/// The one place an FCP is turned into "yes, that is the USIM ADF".
+///
+/// Shared by the check and by the repair on purpose: two copies of this
+/// would be two chances for one of them to become lenient.
+fn usim_aid_of(fcp: &[u8]) -> Result<Vec<u8>, AkaError> {
+    let aid = selected_aid(fcp)?;
     if !aid.starts_with(&USIM_ADF_AID_PREFIX) {
         return Err(AkaError::NotUsimAdf {
             aid: hex_upper(&aid),
@@ -690,6 +812,15 @@ mod tests {
     fn selected_aid_reads_tag_84() {
         let aid = selected_aid(&fcp()).expect("aid");
         assert!(aid.starts_with(&USIM_ADF_AID_PREFIX), "{}", hex_upper(&aid));
+    }
+
+    #[test]
+    fn the_select_asks_for_the_same_aid_the_gate_accepts() {
+        let apdu = select_usim_adf_apdu();
+        assert_eq!(hex_upper(&apdu), "00A4040407A000000087100200");
+        assert_eq!(&apdu[5..5 + USIM_ADF_AID_PREFIX.len()], &USIM_ADF_AID_PREFIX);
+        // P1 04 selects by DF name, P2 04 asks for the FCP back.
+        assert_eq!(&apdu[..4], &[0x00, 0xa4, 0x04, 0x04]);
     }
 
     #[test]
