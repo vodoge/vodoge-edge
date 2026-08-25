@@ -429,10 +429,15 @@
        box floating above dead space. */
     .main > .pane-body { align-content:stretch; }
     .tabpanel { display:grid; gap:var(--s3); align-content:start; min-width:0; min-height:0; }
-    .tabpanel.fill { align-content:stretch; grid-template-rows:auto minmax(0,1fr); }
-    .tabpanel.fill > .block { display:grid; grid-template-rows:auto minmax(0,1fr); min-height:0; }
-    .tabpanel.fill > .block > .block-body { min-height:0; grid-template-rows:auto auto minmax(0,1fr); }
-    .tabpanel.fill .stream { max-height:none; height:100%; min-height:6rem; }
+    /* Flex rather than a fixed list of grid tracks: the console body gains and
+       loses a row as a USSD session opens and closes, and an explicit track
+       list quietly drops the transcript into the wrong one when the count
+       changes (a hidden `x-show` element is not a grid item at all). */
+    .tabpanel.fill { align-content:stretch; display:flex; flex-direction:column; }
+    .tabpanel.fill > .block { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+    .tabpanel.fill > .block > .block-body { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+    .tabpanel.fill > .block > .block-body > * { flex:0 0 auto; }
+    .tabpanel.fill .stream { flex:1 1 auto; max-height:none; min-height:6rem; }
 
     .panel-note {
       margin:0; padding:var(--s2) var(--s3); border-radius:var(--radius);
@@ -478,7 +483,60 @@
 
     .empty { color:var(--fg-muted); font-size:var(--text-xs); text-align:center; padding:var(--s4); margin:0; }
     .empty b { display:block; color:var(--fg); font-size:var(--text-sm); }
-    .quick { display:flex; flex-wrap:wrap; gap:var(--s1); }
+    .quick { display:flex; flex-wrap:wrap; gap:var(--s1); align-items:center; }
+
+    /* ── Console tab ─────────────────────────────────────────────────────
+       One command, one block. The old panel printed AT replies, USSD replies
+       and the panel's own remarks into a single ribbon, so reading a reply
+       meant first finding where the previous one stopped — and "copy this
+       exchange" could not exist at all, because nothing marked where an
+       exchange began. */
+    .con-aim { font-size:var(--text-xs); font-family:var(--font-mono); color:var(--fg-muted); white-space:nowrap; }
+    .con-aim.is-loose { color:var(--warn); font-family:var(--font-ui); }
+    .con-keys { color:var(--fg-faint); white-space:nowrap; display:inline-flex; align-items:center; gap:3px; }
+
+    .con-ussd {
+      margin:0; padding:var(--s1) var(--s2); border-radius:var(--radius);
+      background:var(--warn-wash); border:1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+      color:var(--warn); font-size:var(--text-xs);
+    }
+    /* The one command in this box that takes the module away is named before
+       anybody types it, rather than only in the dialog that appears too late
+       to be a warning. */
+    .con-guard { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .con-guard b { color:var(--warn); font-weight:600; }
+
+    .quick-label { font-size:10px; color:var(--fg-faint); padding-right:var(--s1); white-space:nowrap; }
+    .quick-btn { display:inline-flex; align-items:baseline; gap:4px; }
+    .quick-btn b { font-family:var(--font-mono); font-size:10px; font-weight:400; color:var(--fg-faint); }
+    .quick-btn:hover:not(:disabled) b { color:var(--accent); }
+
+    /* pre-wrap belongs to the lines here, not to the container: left on the
+       container, every newline between two elements in the markup renders as
+       a blank row of its own. */
+    .con-stream { white-space:normal; padding:var(--s2); display:flex; flex-direction:column; gap:var(--s2); }
+    .con-entry { border-left:2px solid var(--line-strong); padding-left:var(--s2); }
+    .con-entry.is-ok { border-left-color:var(--accent); }
+    .con-entry.is-warn { border-left-color:var(--warn); }
+    .con-entry.is-fail { border-left-color:var(--bad); }
+    .con-head { display:flex; align-items:center; gap:var(--s2); min-width:0; }
+    .con-time { color:var(--fg-faint); flex:0 0 auto; -webkit-user-select:all; user-select:all; }
+    .con-title { color:var(--fg); font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .con-title.out-cmd { color:var(--accent); }
+    .con-title.out-warn { color:var(--warn); }
+    .con-title.out-meta { color:var(--fg-faint); font-weight:400; }
+    .con-note { color:var(--fg-faint); font-size:10px; white-space:nowrap; flex:0 0 auto; }
+    .con-act {
+      font:inherit; font-size:10px; line-height:1; width:auto; min-height:0; margin:0;
+      padding:0 4px; box-shadow:none; cursor:pointer; flex:0 0 auto;
+      border:1px solid var(--line-strong); border-radius:4px;
+      background:var(--surface-raised); color:var(--fg-faint); visibility:hidden;
+    }
+    .con-entry:hover .con-act, .con-act:focus-visible { visibility:visible; }
+    .con-act:hover { color:var(--accent); border-color:var(--accent); }
+    .con-lines { display:flex; flex-direction:column; }
+    .con-line { white-space:pre-wrap; word-break:break-word; color:var(--fg-muted); }
+    .con-dropped { margin:0; color:var(--fg-faint); font-size:10px; }
 
     /* ── Log column ──────────────────────────────────────────────────────
        This is the column the operator actually watches, so it is permanent
@@ -744,40 +802,97 @@
 
         <!-- 控制台 -->
         <div x-show="tab === 'console'" class="tabpanel fill">
-          <p class="panel-note">这一块的外观打磨在 <b>T004</b> 卡；下面是原面板「控制台」分区，功能与请求形状原样迁入。</p>
           <div class="block">
             <div class="block-head">
               <span>AT 与 USSD 共用一条时间线</span>
-              <span class="push"><kbd class="key">/</kbd> 聚焦输入 · <kbd class="key">Esc</kbd> 取消</span>
-              <button type="button" class="btn" @click="consoleOut = []">清空</button>
+              <!-- Where an unaimed command lands is neither obvious nor
+                   harmless: with no IMEI the daemon takes the first AT control
+                   port it finds (`at_port_by_imei`), so the reply can come
+                   back from a stick nobody was looking at. -->
+              <span class="con-aim" :class="activeImei ? '' : 'is-loose'"
+                    :title="activeImei
+                      ? '命令会发到 ' + activeImei + ' 的 AT 控制口'
+                      : '没选模组时，边缘取它找到的第一个 AT 控制口，回复可能来自另一根'"
+                    x-text="activeImei ? '目标 ' + activeImei : '未选模组 · 命令交给第一个应答的控制口'"></span>
+              <span class="con-keys push">
+                <kbd class="key">/</kbd> 聚焦 <kbd class="key">↑</kbd><kbd class="key">↓</kbd> 历史 <kbd class="key">Esc</kbd> 清输入
+              </span>
+              <button type="button" class="btn" @click="copyConsole($event.currentTarget)"
+                      :disabled="!consoleLog.length">复制全部</button>
+              <button type="button" class="btn" @click="clearConsole()"
+                      :disabled="!consoleLog.length">清空</button>
             </div>
             <div class="block-body">
               <form class="row" @submit.prevent="runCommand()">
-                <select class="field" x-model="consoleMode" @change="ussdOpen = false" aria-label="命令类型">
+                <select class="field" x-model="consoleMode" aria-label="命令类型">
                   <option value="at">AT</option>
                   <option value="ussd">USSD</option>
                 </select>
                 <input class="field mono grow" x-ref="cmd" x-model="consoleInput" required
-                       autocomplete="off" spellcheck="false"
+                       autocomplete="off" spellcheck="false" aria-label="命令"
+                       @keydown.arrow-up.prevent="historyBack()"
+                       @keydown.arrow-down.prevent="historyForward()"
                        :placeholder="consoleMode === 'ussd' ? '*100#' : 'AT+CSQ'">
                 <button type="submit" class="btn go" :aria-busy="consoleBusy">执行</button>
-                <button type="button" class="btn" x-show="ussdOpen" @click="cancelUssd()">取消会话</button>
+                <!-- The cancel button follows the session, not the dropdown.
+                     Both the old panel and the first pass of this one hid it
+                     whenever the mode select changed, which left a session
+                     open on the network with nothing here able to close it —
+                     and `lib.rs` is explicit that an abandoned session keeps
+                     the network waiting and blocks the next request. -->
+                <button type="button" class="btn risk" x-show="ussdOpen" @click="cancelUssd()">取消会话</button>
               </form>
-              <!-- Read-only probes only. A one-click AT+CFUN=1,1 is how a
-                   module ends up wedged with its data session gone, which
-                   happened here during development; anything that changes
-                   state has to be typed. -->
+
+              <p class="con-ussd" x-show="ussdOpen">
+                USSD 会话开着 —— 运营商在等回复。把菜单选项直接填进输入框再发一次；
+                切到 AT 不会关掉它，只有「取消会话」会。
+              </p>
+
               <div class="quick">
+                <!-- Read-only probes only. A one-click AT+CFUN=1,1 is how a
+                     module ends up wedged with its data session gone, which
+                     happened here during development; anything that changes
+                     state has to be typed. -->
+                <span class="quick-label" title="这一排全是只读查询，不会改模组状态">只读探针</span>
                 <template x-for="q in QUICK" :key="q[1]">
-                  <button type="button" class="btn" :title="q[1]" x-text="q[0]"
-                          @click="runAt(q[1])"></button>
+                  <button type="button" class="btn quick-btn" :title="q[1]" :aria-label="q[0] + ' ' + q[1]"
+                          @click="runAt(q[1])"><span x-text="q[0]"></span><b x-text="q[1]"></b></button>
                 </template>
               </div>
-              <div class="stream">
-                <span class="out-meta" x-show="!consoleOut.length">尚未执行命令</span>
-                <template x-for="(line, i) in consoleOut" :key="i">
-                  <span :class="line.cls" x-text="line.text + '\n'"></span>
+
+              <p class="con-guard">
+                改状态的命令一律手输。其中 <b>AT+QCFG="usbnet",N</b> 发出前会先问一次 ——
+                它在这批 EC20 上<b>立即生效</b>、当场<b>重新枚举</b>，rmnet(0) 以外会拿掉
+                <b>cdc-wdm</b> 这个 QMI 控制口，代理正是靠它找模组，所以这一根会立刻
+                <b>从机队里消失</b>。
+              </p>
+
+              <div class="stream con-stream" x-ref="conStream" @scroll="onConsoleScroll()">
+                <p class="empty" x-show="!consoleLog.length">
+                  <b>尚未执行命令</b>
+                  <kbd class="key">/</kbd> 聚焦输入框，<kbd class="key">↑</kbd> 翻回上一条。
+                  <kbd class="key">Esc</kbd> 只清输入框 —— 已经发出的命令收不回来。
+                </p>
+                <template x-for="entry in consoleLog" :key="entry.id">
+                  <div class="con-entry" :class="entry.tone">
+                    <div class="con-head">
+                      <time class="con-time" x-text="clock(entry.at)"></time>
+                      <span class="con-title" :class="entry.titleCls" x-text="entry.title"></span>
+                      <span class="con-note push" x-text="entry.meta"></span>
+                      <button type="button" class="con-act" x-show="entry.recall" @click="recall(entry)"
+                              title="把这条放回输入框（不会自己重发）">填回</button>
+                      <button type="button" class="con-act"
+                              @click="copyEntry(entry, $event.currentTarget)">复制</button>
+                    </div>
+                    <div class="con-lines" x-show="entry.lines.length">
+                      <template x-for="(line, i) in entry.lines" :key="i">
+                        <span class="con-line" :class="line.cls" x-text="line.text"></span>
+                      </template>
+                    </div>
+                  </div>
                 </template>
+                <p class="con-dropped" x-show="consoleDropped"
+                   x-text="'已丢弃最旧 ' + consoleDropped + ' 条（只留最近 ' + CONSOLE_KEEP + ' 条）'"></p>
               </div>
             </div>
           </div>
@@ -992,6 +1107,71 @@
       ["短信中心", "AT+CSCA?"], ["IMS", 'AT+QCFG="ims"'],
     ];
 
+    /* ── The console transcript ───────────────────────────────────────────
+       One entry per command instead of one flat ribbon. The cap is on entries
+       rather than lines because an entry is the unit anybody reads, copies or
+       scrolls past; eviction is reported rather than swallowed, the same way
+       the log column reports it. History is kept in memory only — this box is
+       where `AT+CPIN=1234` gets typed, and a transcript that outlived the tab
+       would be storing that. */
+    const CONSOLE_KEEP = 200;
+    const CONSOLE_HISTORY = 100;
+    let CONSOLE_SEQ = 0;
+
+    /* ── Commands that take away the port you would need to undo them ─────
+       The panel passes typed commands to the modem untouched, which is the
+       point of this box: `lib.rs` says so, and the read-only quick row exists
+       precisely so that a state change has to be deliberate. Typing is the
+       guard for `AT+CFUN=0` — the module stays enumerated, so the next
+       command can put it back.
+
+       `AT+QCFG="usbnet"` is not like that. On these EC20s it applies on the
+       spot rather than at the next restart (edge-bin measured a write of 1 at
+       03:57:33 taking the USB device down in the same second), and every mode
+       but rmnet has no QMI control port. The agent finds a module *through*
+       that port, so the stick leaves the inventory immediately and the panel
+       cannot reach it to change its mind. That is the distinguishing property
+       worth a dialog: it removes the channel the undo would travel on.
+
+       There is no `/api` route for usbnet — the daemon's `set_usbnet_mode` is
+       a cloud-dispatched command, not a panel endpoint — so the only way to
+       reach it from here is to type it, and the only place a guard can sit is
+       on the command itself.
+
+       Which *other* commands deserve an entry here is a product call rather
+       than a styling one, so this table ships with the one the card names. */
+    const USBNET_MODES = { 0: "rmnet", 1: "ecm", 2: "mbim", 3: "rndis" };
+    const GUARDED = [
+      {
+        match: /^at\+qcfg\s*=\s*"usbnet"\s*,\s*(\d+)/i,
+        ask(command, imei, found) {
+          const value = Number(found[1]);
+          const name = USBNET_MODES[value] || "未知模式";
+          const aim = imei || "未选模组 —— 第一个应答的控制口";
+          const tail = value === 0
+            ? "rmnet 保留 cdc-wdm 这个 QMI 控制口，所以它会自己回到机队，\n但仍然会消失几十秒。"
+            : name + " 没有 cdc-wdm 这个 QMI 控制口，而代理正是靠它找模组：\n"
+              + "这一根会立刻从机队里消失，面板上看不到，\n"
+              + "直到有人把模式设回 rmnet(0) —— 而那条命令只能从别的口发。";
+          return "切换 USBNET 模式\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + aim + "\n"
+            + "改成：" + value + " = " + name + "\n\n"
+            + "这批 EC20 上它立即生效，不等重启 —— 模组当场重新枚举。\n"
+            + tail + "\n\n确定要发出去吗？";
+        },
+      },
+    ];
+
+    /** The first guard a typed command trips, or null. */
+    function guardFor(command) {
+      for (const guard of GUARDED) {
+        const found = guard.match.exec(String(command).trim());
+        if (found) return { guard, found };
+      }
+      return null;
+    }
+
     const REG_LABEL = {
       home: "已注册(本网)", roaming: "已注册(漫游)", searching: "搜网中",
       denied: "被拒绝", not_registered: "未注册", unknown: "未知",
@@ -1200,7 +1380,7 @@
 
     document.addEventListener("alpine:init", () => {
       Alpine.data("panel", () => ({
-        QUICK, STATUS_EVERY, LOG_EVERY, LOG_KEEP, LOG_RENDER, LOG_LEVELS,
+        QUICK, STATUS_EVERY, LOG_EVERY, LOG_KEEP, LOG_RENDER, LOG_LEVELS, CONSOLE_KEEP,
 
         /* ---- fleet ---- */
         mode: "local",
@@ -1221,7 +1401,16 @@
         consoleMode: "at",
         consoleInput: "",
         consoleBusy: false,
-        consoleOut: [],
+        consoleLog: [],
+        consoleDropped: 0,
+        consoleTail: true,
+        consoleHistory: [],
+        consoleHistoryAt: -1,
+        consoleDraft: "",
+        // Which entry `out()` is currently writing into, by id. An id rather
+        // than a reference: a raw object held outside `consoleLog` is not the
+        // one Alpine proxies, so mutating it would render nothing.
+        sinkId: 0,
         ussdOpen: false,
         report: null,
         reportFacts: [],
@@ -1309,9 +1498,156 @@
           return this.now - this.lastLoadAt > STATUS_EVERY * 2.5 ? "is-stale" : "";
         },
 
+        /** Open a new transcript entry and hand back the reactive view of it. */
+        newEntry(kind, title, titleCls) {
+          this.consoleLog.push({
+            id: ++CONSOLE_SEQ, at: Date.now(), kind,
+            title, titleCls: titleCls || "", meta: "", tone: "", recall: null, lines: [],
+          });
+          const over = this.consoleLog.length - CONSOLE_KEEP;
+          if (over > 0) {
+            this.consoleDropped += over;
+            this.consoleLog.splice(0, over);
+          }
+          this.scrollConsole();
+          return this.consoleLog[this.consoleLog.length - 1];
+        },
+
+        entryById(id) {
+          for (let i = this.consoleLog.length - 1; i >= 0; i--) {
+            if (this.consoleLog[i].id === id) return this.consoleLog[i];
+          }
+          return null;
+        },
+
+        /* Lines that are not a reply to a typed command still need somewhere
+           to go: the health check, eSIM, scan, radio and USB actions all
+           report here. They collect under one "面板" entry rather than opening
+           one apiece, which is what keeps a run of them from burying the
+           command above it. */
         out(text, cls) {
-          this.consoleOut.push({ text, cls: cls || "" });
-          if (this.consoleOut.length > 500) this.consoleOut.splice(0, this.consoleOut.length - 500);
+          let entry = this.sinkId ? this.entryById(this.sinkId) : null;
+          if (!entry) {
+            const last = this.consoleLog[this.consoleLog.length - 1];
+            entry = last && last.kind === "note" ? last : this.newEntry("note", "面板", "out-meta");
+          }
+          entry.lines.push({ text, cls: cls || "" });
+          this.scrollConsole();
+        },
+
+        clearConsole() {
+          this.consoleLog = [];
+          this.consoleDropped = 0;
+          this.sinkId = 0;
+        },
+
+        /* Follows the tail unless the operator has scrolled up to read
+           something, in which case new output must not yank the view away. */
+        scrollConsole() {
+          if (!this.consoleTail) return;
+          this.$nextTick(() => {
+            const pane = this.$refs.conStream;
+            if (pane) pane.scrollTop = pane.scrollHeight;
+          });
+        },
+        onConsoleScroll() {
+          const pane = this.$refs.conStream;
+          if (!pane) return;
+          this.consoleTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+        },
+
+        /* A full date on the copied text, not the HH:MM:SS the column shows:
+           pasted into a ticket next to a log line, a bare clock is ambiguous. */
+        entryText(entry) {
+          const head = stamp(entry.at) + "  " + entry.title + (entry.meta ? "    [" + entry.meta + "]" : "");
+          return [head].concat(entry.lines.map((line) => "    " + line.text)).join("\n");
+        },
+
+        async flash(button, ok) {
+          if (!button) return;
+          const original = button.textContent;
+          button.textContent = ok ? "已复制" : "复制失败";
+          setTimeout(() => { button.textContent = original; }, 1200);
+        },
+
+        async copyEntry(entry, button) {
+          this.flash(button, await this.copyText(this.entryText(entry)));
+        },
+
+        async copyConsole(button) {
+          const text = this.consoleLog.map((entry) => this.entryText(entry)).join("\n\n");
+          this.flash(button, await this.copyText(text));
+        },
+
+        /* Up and down walk what has already been typed. The half-written line
+           is put aside on the first step back and handed over again when
+           walking forward past the newest, so browsing never eats it. */
+        remember(mode, text) {
+          const last = this.consoleHistory[this.consoleHistory.length - 1];
+          if (!last || last.text !== text || last.mode !== mode) {
+            this.consoleHistory.push({ mode, text });
+          }
+          const over = this.consoleHistory.length - CONSOLE_HISTORY;
+          if (over > 0) this.consoleHistory.splice(0, over);
+        },
+        historyBack() {
+          if (!this.consoleHistory.length) return;
+          if (this.consoleHistoryAt === -1) {
+            this.consoleDraft = this.consoleInput;
+            this.consoleHistoryAt = this.consoleHistory.length;
+          }
+          if (this.consoleHistoryAt <= 0) return;
+          this.consoleHistoryAt -= 1;
+          this.applyHistory();
+        },
+        historyForward() {
+          if (this.consoleHistoryAt === -1) return;
+          if (this.consoleHistoryAt >= this.consoleHistory.length - 1) {
+            this.consoleHistoryAt = -1;
+            this.consoleInput = this.consoleDraft;
+            return;
+          }
+          this.consoleHistoryAt += 1;
+          this.applyHistory();
+        },
+        applyHistory() {
+          const item = this.consoleHistory[this.consoleHistoryAt];
+          if (!item) return;
+          this.consoleMode = item.mode;
+          this.consoleInput = item.text;
+        },
+
+        /** Put a past command back in the box. It deliberately does not re-send. */
+        recall(entry) {
+          if (!entry.recall) return;
+          this.consoleMode = entry.recall.mode;
+          this.consoleInput = entry.recall.text;
+          this.consoleHistoryAt = -1;
+          this.focusCommand();
+        },
+
+        focusCommand() {
+          this.tab = "console";
+          this.$nextTick(() => {
+            const box = this.$refs.cmd;
+            if (!box) return;
+            box.focus();
+            // Caret at the end rather than a full selection: `/` pressed while
+            // a half-typed command is sitting there must not arm the next
+            // keystroke to wipe it.
+            const end = box.value.length;
+            try { box.setSelectionRange(end, end); } catch { /* not a text input */ }
+          });
+        },
+
+        /* Esc cancels what is being typed. It deliberately does not cancel a
+           command that is already out: the modem has it either way, and
+           dropping this end of the request would only hide the reply. */
+        cancelInput() {
+          this.consoleHistoryAt = -1;
+          this.consoleDraft = "";
+          if (this.consoleInput) { this.consoleInput = ""; return; }
+          if (this.$refs.cmd) this.$refs.cmd.blur();
         },
 
         async post(path, body) {
@@ -1514,7 +1850,10 @@
         async runCommand() {
           const value = this.consoleInput.trim();
           if (!value) return;
+          this.remember(this.consoleMode, value);
           this.consoleInput = "";
+          this.consoleHistoryAt = -1;
+          this.consoleDraft = "";
           this.consoleBusy = true;
           try {
             if (this.consoleMode === "ussd") await this.runUssd(value);
@@ -1527,29 +1866,62 @@
         },
 
         async runAt(command) {
-          this.out("> " + command, "out-cmd");
+          // The guard sits on the command rather than on a button because a
+          // button is not how this is reached: there is no endpoint for it,
+          // only this box. Refusing has to leave a trace, or the operator is
+          // left unsure whether it went out.
+          const tripped = guardFor(command);
+          if (tripped && !confirm(tripped.guard.ask(command, this.activeImei, tripped.found))) {
+            const refused = this.newEntry("note", "已取消 " + command, "out-warn");
+            refused.meta = "没有发出";
+            refused.tone = "is-warn";
+            return;
+          }
+          const entry = this.newEntry("at", "> " + command, "out-cmd");
+          entry.recall = { mode: "at", text: command };
+          entry.meta = this.activeImei ? "→ " + this.shortImei(this.activeImei) : "→ 未选模组";
+          this.sinkId = entry.id;
           try {
             const r = await this.post("/api/at", { command, imei: this.activeImei || null });
             for (const line of r.lines || []) this.out(line);
+            // The modem's own last word stays a line — OK and +CME ERROR are
+            // what an operator reads. Port and elapsed move into the entry's
+            // header: same numbers, one row less per command.
             this.out(r.terminator, r.ok ? "out-meta" : "out-fail");
-            this.out("  " + r.port + " · " + r.elapsed_ms + "ms", "out-meta");
+            entry.meta = r.port + " · " + r.elapsed_ms + "ms";
+            entry.tone = r.ok ? "is-ok" : "is-fail";
           } catch (error) {
             this.out("  " + reason(error), "out-fail");
+            entry.meta = "没有回复";
+            entry.tone = "is-fail";
+          } finally {
+            this.sinkId = 0;
           }
         },
 
         async runUssd(code) {
-          this.out("> USSD " + code, "out-cmd");
-          const r = await this.post("/api/ussd", { code, imei: this.activeImei || null });
-          if (r.text) this.out(r.text);
-          this.out("  " + r.stage + " · " + Math.round(r.elapsed_ms / 100) / 10 + "s", "out-meta");
-          if (r.expects_reply) this.out("  运营商在等待回复——把选项填进输入框再发一次", "out-warn");
-          this.ussdOpen = !!r.expects_reply;
+          const entry = this.newEntry("ussd", "> USSD " + code, "out-cmd");
+          entry.recall = { mode: "ussd", text: code };
+          this.sinkId = entry.id;
+          try {
+            const r = await this.post("/api/ussd", { code, imei: this.activeImei || null });
+            if (r.text) this.out(r.text);
+            entry.meta = r.stage + " · " + Math.round(r.elapsed_ms / 100) / 10 + "s";
+            if (r.expects_reply) this.out("  运营商在等待回复——把选项填进输入框再发一次", "out-warn");
+            entry.tone = r.expects_reply ? "is-warn" : "is-ok";
+            this.ussdOpen = !!r.expects_reply;
+          } catch (error) {
+            this.out("  " + reason(error), "out-fail");
+            entry.meta = "没有回复";
+            entry.tone = "is-fail";
+          } finally {
+            this.sinkId = 0;
+          }
         },
 
         async cancelUssd() {
           await this.post("/api/ussd/cancel", { imei: this.activeImei || null }).catch(() => {});
-          this.out("> USSD 会话已取消", "out-cmd");
+          this.newEntry("note", "> USSD 会话已取消", "out-cmd");
           this.ussdOpen = false;
         },
 
@@ -1975,7 +2347,13 @@
           const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
             target.tagName === "SELECT" || target.isContentEditable);
           if (event.key === "Escape") {
-            if (typing) { target.blur(); }
+            // In the command box Esc means "cancel what I was typing", which
+            // is more than blurring: a half-written command left behind is
+            // the thing that gets sent by accident on the next Enter.
+            if (this.$refs.cmd && target === this.$refs.cmd) {
+              event.preventDefault();
+              this.cancelInput();
+            } else if (typing) { target.blur(); }
             else if (this.anyLogFilter()) { this.resetLogFilters(); }
             return;
           }
@@ -1987,8 +2365,7 @@
           }
           if (event.key === "/") {
             event.preventDefault();
-            this.tab = "console";
-            this.$nextTick(() => { if (this.$refs.cmd) this.$refs.cmd.focus(); });
+            this.focusCommand();
             return;
           }
           if (event.key === "f" || event.key === "F") {

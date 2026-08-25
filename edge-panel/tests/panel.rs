@@ -150,12 +150,216 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
 /// A section that has not been restyled yet has to say which card restyles it.
 /// A placeholder that just says "coming soon" is how a migration loses a
 /// feature without anybody noticing it went.
+///
+/// T004 is absent from this list because the console tab has had its card. A
+/// note left behind after the work is done is worse than no note: it tells the
+/// next reader that a finished surface is still a stub.
 #[tokio::test]
 async fn sections_awaiting_their_own_card_say_which_card_that_is() {
     let page = panel_page().await;
-    for card in ["T004", "T005", "T006"] {
+    for card in ["T005", "T006"] {
         assert!(page.contains(card), "no section points at {card}");
     }
+    assert!(
+        !page.contains("T004"),
+        "the console tab still calls itself unfinished"
+    );
+}
+
+/// Everything the console card promised, pinned to the thing that implements
+/// it. Markers rather than wording: the copy will keep changing and the
+/// mechanism should not.
+#[tokio::test]
+async fn the_console_has_what_a_debugging_console_needs() {
+    let page = panel_page().await;
+    // Each marker names where the feature is *wired up*, not where it is
+    // defined. A marker that also matches the declaration of the thing it
+    // checks survives having the only caller deleted, which is how one of
+    // these went quiet under its own negative control.
+    for (feature, marker) in [
+        ("one block per command", "class=\"con-entry\""),
+        ("each block carries its own clock", "x-text=\"clock(entry.at)\""),
+        ("a failed exchange is marked as one", ".con-entry.is-fail"),
+        ("the tone is actually set on a failure", "entry.tone = \"is-fail\""),
+        ("command history", "@keydown.arrow-up.prevent=\"historyBack()\""),
+        ("history keeps the half-written line", "this.consoleDraft = this.consoleInput;"),
+        ("a past command can be put back in the box", "@click=\"recall(entry)\""),
+        ("copy one exchange", "@click=\"copyEntry(entry, $event.currentTarget)\""),
+        ("copy the whole transcript", "@click=\"copyConsole($event.currentTarget)\""),
+        // The panel is opened at http://<lan-ip>:8743 far more often than at
+        // localhost, and that is not a secure context, so this is the path
+        // that actually runs on site rather than a courtesy to old browsers.
+        ("copy without a secure context", "execCommand(\"copy\")"),
+        ("slash focuses the command box", "this.focusCommand();"),
+        ("escape cancels the typing", "this.cancelInput();"),
+        ("the quick probes are labelled read-only", "只读探针"),
+        ("an open USSD session is visible", "class=\"con-ussd\""),
+        ("the transcript is capped", "const CONSOLE_KEEP"),
+        ("eviction is reported", "this.consoleDropped += over;"),
+    ] {
+        assert!(page.contains(marker), "{feature} is missing: no {marker}");
+    }
+}
+
+/// `AT+QCFG="usbnet"` is the one command in this box that takes away the port
+/// the undo would have to travel on.
+///
+/// On these EC20s it applies on the spot rather than at the next restart, and
+/// every mode but rmnet has no QMI control port — which is how the agent finds
+/// a module at all. So the stick leaves the inventory immediately and the
+/// panel can no longer reach it. There is no `/api` route for this: the
+/// daemon's `set_usbnet_mode` is a cloud-dispatched command, so the only way
+/// to reach it from the panel is to type it, and the only place a guard can
+/// sit is on the command itself.
+#[tokio::test]
+async fn the_console_confirms_the_command_that_removes_the_module() {
+    let page = panel_page().await;
+    // The call site, not the declaration: `function guardFor(command)` matches
+    // a bare `guardFor(command)` too, so that spelling stayed green with the
+    // only caller deleted.
+    assert!(
+        page.contains("const tripped = guardFor(command);"),
+        "nothing checks a typed command against the guard list"
+    );
+    assert!(
+        page.contains("!confirm(tripped.guard.ask("),
+        "the guard does not ask before the command goes out"
+    );
+    // Asking is worth nothing if the dialog does not say what will happen.
+    for consequence in [
+        "立即生效",
+        "重新枚举",
+        "cdc-wdm",
+        "从机队里消失",
+        "rmnet",
+    ] {
+        assert!(
+            page.contains(consequence),
+            "the confirmation never mentions {consequence}"
+        );
+    }
+    assert!(
+        page.contains("没有发出"),
+        "a refused command leaves no trace saying it was not sent"
+    );
+}
+
+/// The guard has to fire on the write and stay out of the way of the read.
+///
+/// `AT+QCFG="usbnet"` with no value is a query and changes nothing; making an
+/// operator confirm it would train them to dismiss the dialog, which is how a
+/// guard stops working. The comma in the pattern is what separates the two.
+#[tokio::test]
+async fn the_usbnet_guard_fires_on_the_write_not_the_read() {
+    let page = panel_page().await;
+    assert!(
+        page.contains("\"usbnet\"\\s*,\\s*(\\d+)"),
+        "the guard pattern does not require a value, so it also traps the query form"
+    );
+    assert!(
+        page.contains("const USBNET_MODES"),
+        "the dialog cannot name the mode it is switching to"
+    );
+}
+
+/// Restyling the console must not add a command the panel never sent.
+///
+/// The quick row is the panel's only list of commands it issues by itself, and
+/// its whole design is that every one of them is a query. A convenience button
+/// added here is a new action rather than a moved one — including a usbnet one,
+/// however useful it would look next to the guard above.
+#[tokio::test]
+async fn the_console_issues_no_command_the_panel_did_not_issue_before() {
+    let page = panel_page().await;
+    // Past the declaration itself: `const QUICK = [` carries an `=` of its own,
+    // and the count below is what proves no probe writes anything.
+    let head = "const QUICK = [";
+    let start = page.find(head).expect("no quick probe list") + head.len();
+    let end = start + page[start..].find("];").expect("unterminated quick probe list");
+    let quick = &page[start..end];
+
+    for command in [
+        "AT+CSQ",
+        "AT+CREG?",
+        "AT+CEREG?",
+        "AT+COPS?",
+        "AT+CPIN?",
+        "AT+QCCID",
+        "AT+CIMI",
+        "AT+CNUM",
+        "AT+QGMR",
+        "AT+CSCA?",
+        "AT+QCFG=\"ims\"",
+    ] {
+        assert!(quick.contains(command), "the quick row lost {command}");
+    }
+    assert_eq!(
+        quick.matches("AT+").count(),
+        11,
+        "the quick row has gained or lost a probe"
+    );
+    assert!(
+        !quick.contains("usbnet"),
+        "the quick row would now write a usbnet mode on one click"
+    );
+    // Every one of them is a query: a `=` that is not part of `="…"` would be
+    // a write. `AT+QCFG="ims"` is the only `=` the list is allowed to carry.
+    assert_eq!(
+        quick.matches('=').count(),
+        1,
+        "a quick probe now assigns something"
+    );
+}
+
+/// Where an unaimed command lands is neither obvious nor harmless.
+///
+/// With no IMEI the daemon takes the first AT control port it finds
+/// (`at_port_by_imei` in edge-bin), so the reply can come back from a stick
+/// nobody was looking at. The console says so rather than leaving the target
+/// blank.
+#[tokio::test]
+async fn the_console_says_where_an_unaimed_command_lands() {
+    let page = panel_page().await;
+    // The readout the operator looks at, not merely the phrase somewhere on
+    // the page: the usbnet dialog says the same thing, so a bare substring
+    // stayed green with the readout itself cut back to "未选模组".
+    assert!(
+        page.contains("未选模组 · 命令交给第一个应答的控制口"),
+        "the console does not say where a command with no modem selected goes"
+    );
+}
+
+/// Esc must not claim to do something it cannot.
+///
+/// Once a command is on the wire the modem has it, and abandoning this end of
+/// the request would only hide the reply — so the panel says what Esc actually
+/// cancels instead of implying it can call a command back.
+#[tokio::test]
+async fn the_console_says_what_esc_does_not_do() {
+    let page = panel_page().await;
+    assert!(
+        page.contains("已经发出的命令收不回来"),
+        "the console lets Esc look like it aborts a command in flight"
+    );
+}
+
+/// An open USSD session has to stay cancellable.
+///
+/// Changing the AT/USSD dropdown used to clear `ussdOpen`, which hid the only
+/// control that calls `/api/ussd/cancel` — leaving a session open on the
+/// network with nothing on the panel able to close it, while `lib.rs` says an
+/// abandoned session keeps the network waiting and blocks the next request.
+/// The pre-refactor panel did this too (`$("ussd-cancel").hidden = true` in its
+/// mode-change listener), so this is a deliberate departure from moving the
+/// section across untouched, not a regression being repaired.
+#[tokio::test]
+async fn an_open_ussd_session_survives_a_change_of_command_mode() {
+    let page = panel_page().await;
+    assert!(page.contains("cancelUssd()"), "nothing cancels a USSD session");
+    assert!(
+        !page.contains("@change=\"ussdOpen = false\""),
+        "changing the command mode still forgets an open USSD session"
+    );
 }
 
 /// The process-wide log ring is shared by every test in this binary, so the two
