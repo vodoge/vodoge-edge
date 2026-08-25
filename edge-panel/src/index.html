@@ -439,12 +439,10 @@
     .tabpanel.fill > .block > .block-body > * { flex:0 0 auto; }
     .tabpanel.fill .stream { flex:1 1 auto; max-height:none; min-height:6rem; }
 
-    .panel-note {
-      margin:0; padding:var(--s2) var(--s3); border-radius:var(--radius);
-      background:var(--surface-raised); border:1px dashed var(--line-strong);
-      color:var(--fg-faint); font-size:var(--text-xs);
-    }
-    .panel-note b { color:var(--fg-muted); font-weight:600; }
+    /* The dashed placeholder box that stood in each tab while the migration
+       was running is gone with the last of them, style included: a ready-made
+       look for "this bit is unfinished" is an invitation to add another one
+       without writing down which card finishes it. */
 
     .block { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); }
     .block > .block-head { display:flex; align-items:center; gap:var(--s2); padding:var(--s2) var(--s3); border-bottom:1px solid var(--line); font-size:var(--text-xs); color:var(--fg-muted); }
@@ -572,6 +570,68 @@
     .esim-verdict.is-unknown, .esim-verdict.is-missing { color:var(--warn); }
     .esim-verdict.is-refused { color:var(--fg-muted); }
     .fact dd.claim { color:var(--fg-faint); font-family:var(--font-ui); text-align:right; }
+
+    /* ── The guarded-command index ───────────────────────────────────────
+       Rendered from the guard table itself rather than typed out, so a guard
+       that is added without a line of copy is impossible: the copy is part of
+       the entry. Two lines per row, because the command shape is what an
+       operator scans for and the consequence is what they read once. */
+    .guard-list { margin:0; padding:0; list-style:none; display:grid; gap:2px; }
+    .guard-item { display:flex; gap:var(--s2); align-items:baseline; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .guard-cmd {
+      font-family:var(--font-mono); color:var(--warn); font-weight:600;
+      flex:0 0 auto; min-width:10.5rem; white-space:nowrap;
+    }
+    .guard-why { min-width:0; }
+
+    /* ── Network tab ─────────────────────────────────────────────────────
+       A sweep can run for three minutes with the modem serving nothing, and
+       the pre-refactor panel showed a disabled button for all of it. A bar
+       that is visibly moving is the difference between "slow" and "hung".
+
+       Deliberately no flags and no carrier logos in this table: every one of
+       them is an off-page fetch, and this panel is opened on machines with no
+       route out — where an <img> to a CDN does not degrade, it hangs. The
+       operator column is the name the module reported and nothing else. */
+    .scan-live { display:grid; gap:var(--s1); }
+    .scan-row { display:flex; align-items:center; gap:var(--s2); font-size:var(--text-xs); color:var(--warn); flex-wrap:wrap; }
+    progress.scan-bar { width:100%; height:6px; margin:0; --pico-progress-color:var(--warn); }
+    .scan-note-late { color:var(--fg-faint); font-size:10px; margin:0; line-height:1.5; }
+    tr.is-current > td { background:var(--accent-wash); }
+    tr.is-forbidden > td { color:var(--fg-faint); }
+
+    /* ── SMS tab ─────────────────────────────────────────────────────────
+       The one stick whose MO path costs the module is refused here rather
+       than at the endpoint, and it is said in amber before the box is
+       reached — a form that accepts a message and then explains why it could
+       not send it has already wasted the operator's typing. */
+    .sms-block {
+      margin:0; padding:var(--s2) var(--s3); border-radius:var(--radius);
+      background:var(--warn-wash); border:1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+      color:var(--fg); font-size:var(--text-xs); line-height:1.6; display:grid; gap:var(--s1);
+    }
+    .sms-block b { color:var(--warn); font-weight:700; }
+    .sms-block .sms-src { color:var(--fg-faint); font-size:10px; }
+    .sms-meter { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .sms-meter b { font-family:var(--font-mono); color:var(--fg-muted); font-weight:600; }
+    .sms-meter.is-over b, .sms-meter.is-over { color:var(--bad); }
+    .msg-imei { font-family:var(--font-mono); color:var(--fg-faint); }
+    fieldset.sms-form { margin:0; padding:0; border:0; display:grid; gap:var(--s2); }
+    fieldset.sms-form:disabled .field { opacity:.5; }
+
+    /* ── Health tab ──────────────────────────────────────────────────────
+       The facts came out of one read, so the read has a time on it, and the
+       three that decide whether this stick can carry anything are said in
+       words above the grid instead of being left to a colour in a list of
+       ten. */
+    .health-verdict { margin:0; font-size:var(--text-xs); line-height:1.6; display:grid; gap:2px; }
+    .health-line { display:flex; gap:var(--s2); align-items:baseline; }
+    .health-line .health-key { color:var(--fg-muted); flex:0 0 5.5rem; }
+    .health-line.ok .health-say { color:var(--ok); }
+    .health-line.warn .health-say { color:var(--warn); }
+    .health-line.bad .health-say { color:var(--bad); }
+    .health-line.idle .health-say { color:var(--fg-faint); }
+    .health-group { font-size:10px; color:var(--fg-faint); text-transform:uppercase; letter-spacing:.06em; font-weight:600; padding-top:var(--s2); }
 
     /* ── Log column ──────────────────────────────────────────────────────
        This is the column the operator actually watches, so it is permanent
@@ -775,6 +835,13 @@
             <span class="modem-line" x-text="m.network ? '驻留 ' + m.network + (m.network_numeric ? ' (' + m.network_numeric + ')' : '') : '未驻留网络'"></span>
             <span class="modem-line faint" :title="m.iccid || ''" x-text="(m.iccid ? 'ICCID ' + m.iccid : 'ICCID —')"></span>
             <span class="modem-line faint" x-text="m.family + ' · 心跳 ' + since(m.last_seen)"></span>
+            <!-- Said here, not only inside the SMS tab: an operator who
+                 selects this stick to send a message should learn it cannot
+                 before they change tabs, never mind before they type. -->
+            <span class="modem-line" x-show="smsBlock(m.imei)"
+                  :title="smsBlock(m.imei) ? smsBlock(m.imei).why : ''">
+              <span class="badge warn">MO 短信禁发</span>
+            </span>
           </button>
         </template>
         <p class="empty" x-show="loaded && !modems.length">
@@ -812,25 +879,51 @@
 
         <!-- 体检 -->
         <div x-show="tab === 'health'" class="tabpanel">
-          <p class="panel-note">这一块的外观打磨在 <b>T006</b> 卡；下面是原面板「体检」分区，功能与请求形状原样迁入。</p>
           <div class="block">
             <div class="block-head">
               <span x-text="report ? report.imei + ' · ' + report.port : '读取一次会下发一批只读 AT 查询'"></span>
+              <!-- Every number below came out of one read, and a stick's
+                   signal and registration move underneath the panel, so the
+                   head carries when that read happened. -->
+              <span class="esim-read" x-show="reportAt" x-text="'读于 ' + clock(reportAt)"></span>
               <button type="button" class="btn go push" @click="runReport($event.currentTarget)"
-                      :disabled="!activeImei">体检</button>
+                      :disabled="!activeImei" x-text="report ? '重新体检' : '体检'"></button>
             </div>
             <div class="block-body">
-              <p class="empty" x-show="!report">还没有体检结果。</p>
-              <dl class="facts" x-show="report">
-                <template x-for="f in reportFacts" :key="f.label">
-                  <div class="fact">
-                    <dt x-text="f.label"></dt>
-                    <dd :class="f.tone" x-text="f.value === null || f.value === undefined || f.value === '' ? '—' : f.value"></dd>
-                  </div>
+              <p class="empty" x-show="!report">
+                <b>还没有体检结果</b>
+                「体检」下发一批只读查询（信号、注册、卡、固件），不改任何状态。
+              </p>
+              <!-- Three questions in words, above the grid. Whether this stick
+                   can carry anything is decided by registration, by signal and
+                   by whether the card gave up a message centre; leaving that to
+                   a colour somewhere in a list of ten rows is how a modem that
+                   is attached for data with no CS domain reads as healthy right
+                   up until an SMS disappears. Derived from the same read — no
+                   second request exists for any of it. -->
+              <div class="health-verdict" x-show="report">
+                <template x-for="v in reportVerdict" :key="v.key">
+                  <span class="health-line" :class="v.tone">
+                    <span class="health-key" x-text="v.key"></span>
+                    <span class="health-say" x-text="v.say"></span>
+                  </span>
                 </template>
-              </dl>
+              </div>
+              <template x-for="group in reportGroups" :key="group.name">
+                <div>
+                  <div class="health-group" x-text="group.name"></div>
+                  <dl class="facts">
+                    <template x-for="f in group.facts" :key="f.label">
+                      <div class="fact">
+                        <dt x-text="f.label"></dt>
+                        <dd :class="f.tone" x-text="f.value === null || f.value === undefined || f.value === '' ? '—' : f.value"></dd>
+                      </div>
+                    </template>
+                  </dl>
+                </div>
+              </template>
               <p class="danger-note" x-show="report && report.refused && report.refused.length"
-                 x-text="report && report.refused ? '模组拒绝了: ' + report.refused.join('、') : ''"></p>
+                 x-text="report && report.refused ? '模组拒绝了: ' + report.refused.join('、') + '（拒绝也是回答 —— 这些查询没有得到值，不代表模组失联）' : ''"></p>
             </div>
           </div>
         </div>
@@ -901,6 +994,23 @@
                 <b>cdc-wdm</b> 这个 QMI 控制口，代理正是靠它找模组，所以这一根会立刻
                 <b>从机队里消失</b>。
               </p>
+
+              <!-- The rest of the guarded list, drawn from the guard table
+                   itself. Typing it out by hand is how a guard gets added with
+                   no copy anywhere the operator will see it before the dialog
+                   opens — and a consequence that first appears inside the
+                   confirmation has arrived after the decision that opened it.
+                   usbnet is said twice on purpose: the paragraph above is its
+                   long form, and this list is mechanical, so leaving it out
+                   here would mean the list is edited by hand after all. -->
+              <ul class="guard-list">
+                <template x-for="g in GUARDED" :key="g.label">
+                  <li class="guard-item">
+                    <span class="guard-cmd" x-text="g.label"></span>
+                    <span class="guard-why" x-text="g.warn"></span>
+                  </li>
+                </template>
+              </ul>
 
               <div class="stream con-stream" x-ref="conStream" @scroll="onConsoleScroll()">
                 <p class="empty" x-show="!consoleLog.length">
@@ -1034,22 +1144,41 @@
 
         <!-- 网络 -->
         <div x-show="tab === 'network'" class="tabpanel">
-          <p class="panel-note">这一块的外观打磨在 <b>T006</b> 卡；下面是原面板「可见网络」分区，功能与请求形状原样迁入。</p>
           <div class="block">
             <div class="block-head">
-              <span x-text="scanNote || '全频段扫网，模组会停止服务，最长两分钟'"></span>
+              <span x-text="scanNote || ('全频段扫网 · 模组停止服务，最长 ' + Math.round(SCAN_LIMIT / 1000) + ' 秒')"></span>
+              <span class="esim-read" x-show="scanAt && !scanBusy" x-text="'扫于 ' + clock(scanAt)"></span>
               <button type="button" class="btn risk push" @click="runScan($event.currentTarget)"
                       :disabled="!activeImei" :aria-busy="scanBusy"
-                      x-text="scanBusy ? '扫描中…' : '扫网'"></button>
+                      x-text="scanBusy ? '扫描中…' : (scanLoaded ? '重新扫网' : '扫网')"></button>
             </div>
             <div class="block-body">
-              <p class="empty" x-show="!operators.length" x-text="scanBusy ? '扫描进行中，模组此刻不服务。' : (scanLoaded ? '没有扫到网络' : '还没有扫描。')"></p>
+              <!-- A sweep runs for up to three minutes with the module serving
+                   nothing, and a disabled button is indistinguishable from a
+                   hung one for all of it. The bar is driven by the same
+                   one-second tick the status bar uses, so it keeps moving even
+                   while the request is outstanding. -->
+              <div class="scan-live" x-show="scanBusy">
+                <span class="scan-row">
+                  <span x-text="'扫描中 · 已 ' + scanElapsed + ' 秒 / 最长 ' + Math.round(SCAN_LIMIT / 1000) + ' 秒'"></span>
+                  <span class="push" x-text="'剩 ' + Math.max(0, Math.round(SCAN_LIMIT / 1000) - scanElapsed) + ' 秒'"></span>
+                </span>
+                <progress class="scan-bar" :value="Math.min(scanElapsed, SCAN_LIMIT / 1000)"
+                          :max="SCAN_LIMIT / 1000"
+                          :aria-label="'扫网进度，已 ' + scanElapsed + ' 秒'"></progress>
+                <p class="scan-note-late">
+                  这一根此刻<b>不服务</b>：不注册、不收短信、没有数据。它在机队里会显示为「忙」而不是离线。
+                  扫完自己回来，不需要任何补救动作。
+                </p>
+              </div>
+              <p class="empty" x-show="!operators.length && !scanBusy"
+                 x-text="scanLoaded ? '没有扫到网络' : '还没有扫描。'"></p>
               <div class="table-wrap" x-show="operators.length">
                 <table>
                   <thead><tr><th>运营商</th><th>MCC/MNC</th><th>制式</th><th>状态</th></tr></thead>
                   <tbody>
                     <template x-for="op in operators" :key="op.numeric + op.status">
-                      <tr>
+                      <tr :class="op.status === 'current' ? 'is-current' : (op.status === 'forbidden' ? 'is-forbidden' : '')">
                         <td x-text="op.long_name || op.short_name"></td>
                         <td class="mono" x-text="op.numeric"></td>
                         <td x-text="op.access_technology || '—'"></td>
@@ -1060,44 +1189,101 @@
                   </tbody>
                 </table>
               </div>
+              <!-- What this table is not: it is one sweep at one moment, and
+                   "禁止" is the module's own forbidden-PLMN list rather than a
+                   statement about the operator. -->
+              <p class="scan-note-late" x-show="operators.length">
+                这是<b>一次扫描的快照</b>，不是实时的。「当前」是模组当时驻留的网络，
+                「禁止」来自模组自己的禁止 PLMN 列表。手动锁一个网要用命令框的
+                <b>AT+COPS=1,…</b>，那条命令面板会先问一次。
+              </p>
             </div>
           </div>
         </div>
 
         <!-- 短信 -->
         <div x-show="tab === 'sms'" class="tabpanel">
-          <p class="panel-note">这一块的外观打磨在 <b>T006</b> 卡；下面是原面板「发送短信」与「本地短信」两个分区，功能与请求形状原样迁入。</p>
           <div class="block">
             <div class="block-head">
-              <span x-text="activeImei ? '经 ' + activeImei + ' 发出' : '未选择模组，由代理挑一根'"></span>
+              <span x-text="activeImei ? '经 ' + activeImei + ' 发出' : '未选择模组 —— 先选一根'"></span>
+              <span class="esim-read push" x-show="smsBlock(activeImei)">这一根不发</span>
             </div>
             <div class="block-body">
-              <form class="row" @submit.prevent="sendSms()">
-                <input class="field" x-model="sendTo" required placeholder="号码" autocomplete="off">
-                <input class="field grow" x-model="sendBody" required placeholder="内容">
-                <button type="submit" class="btn go" :aria-busy="sendBusy">发送</button>
+              <!-- Amber, above the box, before anything is typed. This stick's
+                   MO path is not slow or unreliable, it is expensive: every
+                   submit takes the module off the USB bus. Finding that out
+                   from a failed send costs the module as well as the typing. -->
+              <template x-if="smsBlock(activeImei)">
+                <div class="sms-block">
+                  <span><b x-text="activeImei"></b> <b>禁止从面板发送短信。</b></span>
+                  <span x-text="smsBlock(activeImei).why"></span>
+                  <span x-text="smsBlock(activeImei).also"></span>
+                  <span class="sms-src" x-text="smsBlock(activeImei).source"></span>
+                </div>
+              </template>
+              <!-- No modem selected is refused too, and this is the reason:
+                   with no IMEI the daemon takes the first entry out of its
+                   modem map (`path_for` in edge-bin), and one of the entries in
+                   that map is the stick above. An unaimed send is a coin toss
+                   with that outcome on one face. -->
+              <p class="sms-block" x-show="!activeImei && !smsBlock(activeImei)">
+                <b>先选一根模组。</b>不选的话，代理会取它 modem map 里的第一条
+                （<b>edge-bin 的 path_for</b>），而机队里有一根发一条 MO 短信就会掉出 USB 总线。
+                面板不替你抽这个签。
+              </p>
+              <form @submit.prevent="sendSms()">
+                <fieldset class="sms-form" :disabled="!canSend">
+                  <div class="row">
+                    <input class="field" x-model="sendTo" required placeholder="号码" autocomplete="off"
+                           aria-label="收件号码">
+                    <input class="field grow" x-model="sendBody" required placeholder="内容"
+                           aria-label="短信内容">
+                    <button type="submit" class="btn go" :aria-busy="sendBusy">发送</button>
+                  </div>
+                </fieldset>
               </form>
+              <!-- What the encoder will actually do with this text, computed
+                   from the same two rules it uses. The panel's encoder does not
+                   segment: past the limit the send is refused outright, so a
+                   long message is worth knowing about before the button. -->
+              <p class="sms-meter" :class="draft.over ? 'is-over' : ''"
+                 x-text="draftText"></p>
               <p class="danger-note" x-text="sendStatus"></p>
             </div>
           </div>
           <div class="block">
             <div class="block-head"><span>本地短信 · 断网也保留在本机</span>
-              <span class="push" x-text="messages.length + ' 条'"></span></div>
+              <label class="tick" x-show="activeImei">
+                <input type="checkbox" x-model="inboxMine">
+                只看 <span class="mono" x-text="shortImei(activeImei)"></span>
+              </label>
+              <span class="push" x-text="inbox.length + ' / ' + messages.length + ' 条'"></span></div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>对端</th><th>内容</th><th>承载</th><th>时间</th></tr></thead>
+                <!-- 方向 and 模组 are in the payload and the pre-refactor panel
+                     threw both away, so three sticks' traffic arrived in one
+                     undifferentiated list. Neither column costs a request. -->
+                <thead><tr><th>对端</th><th>内容</th><th>方向</th><th>承载</th><th>模组</th><th>时间</th></tr></thead>
                 <tbody>
-                  <template x-for="m in messages" :key="m.seq">
+                  <template x-for="m in inbox" :key="m.seq">
                     <tr>
                       <td class="mono" x-text="m.peer"></td>
                       <td class="wrap" x-text="m.body"></td>
+                      <td><span class="badge" :class="m.direction === 'outbound' ? 'info' : 'idle'"
+                                x-text="m.direction === 'outbound' ? '发出' : (m.direction === 'inbound' ? '收到' : m.direction)"></span></td>
                       <td><span class="badge info" x-text="m.bearer"></span></td>
+                      <td class="msg-imei" :title="m.modem_imei || '未记录是哪一根'"
+                          x-text="m.modem_imei ? shortImei(m.modem_imei) : '—'"></td>
                       <td class="mono" x-text="stamp(m.received_at)"></td>
                     </tr>
                   </template>
                 </tbody>
               </table>
-              <p class="empty" x-show="!messages.length"><b>还没有本地短信</b>模组收到短信后会立刻出现在这里。</p>
+              <p class="empty" x-show="!inbox.length && !messages.length"><b>还没有本地短信</b>模组收到短信后会立刻出现在这里。</p>
+              <p class="empty" x-show="!inbox.length && messages.length">
+                <b x-text="'这一根没有短信'"></b>
+                本机还有 <span x-text="messages.length"></span> 条属于别的模组 —— 取消勾选就能看到。
+              </p>
             </div>
           </div>
         </div>
@@ -1218,6 +1404,16 @@
     const CONSOLE_HISTORY = 100;
     let CONSOLE_SEQ = 0;
 
+    /* How long a full-band sweep is given, taken from the daemon rather than
+       from the old copy. `edge-bin/src/main.rs` runs `AT+COPS=?` with
+       `SCAN_TIMEOUT = Duration::from_secs(180)`; the pre-refactor panel told
+       the operator "最长两分钟", which was a minute short of what the endpoint
+       actually waits — and a progress bar drawn against the wrong maximum
+       fills up and then keeps the operator waiting anyway, which is worse than
+       no bar. Declared here because the guard for a typed `AT+COPS=?` quotes
+       it too. */
+    const SCAN_LIMIT = 180_000;
+
     /* ── Commands that take away the port you would need to undo them ─────
        The panel passes typed commands to the modem untouched, which is the
        point of this box: `lib.rs` says so, and the read-only quick row exists
@@ -1238,11 +1434,44 @@
        reach it from here is to type it, and the only place a guard can sit is
        on the command itself.
 
-       Which *other* commands deserve an entry here is a product call rather
-       than a styling one, so this table ships with the one the card names. */
+       Which *other* commands deserve an entry here was a product call rather
+       than a styling one, and it has now been made. The test each entry has to
+       pass: **it can leave the module in a state software cannot get it out
+       of**, on hardware nobody can physically reach — over USB/IP, with no
+       operator able to replug a stick. Two commands were considered against
+       that test and left out on purpose:
+
+       - `AT+CGACT=0,1` takes the default bearer down (`edge-bin` uses exactly
+         this for the data switch), and `AT+CGACT=1,1` on the same port brings
+         it back. Nothing is lost that the next command cannot restore.
+       - `AT+COPS=0` is the *recovery* from a manual selection, measured on
+         this bench to return two sticks to LTE in 15-90s. Guarding a way back
+         is how a dialog becomes a thing operators dismiss.
+
+       The other rule, taken from usbnet's read/write split: a guard that fires
+       on a harmless form trains the reflex that defeats it. So `AT+CRSM` is
+       trapped on the update codes only — the agent itself sends
+       `AT+CRSM=176,...` on every report — and `AT+CFUN=1` (plain, the one that
+       restores) goes through untouched.
+
+       Every entry carries its own `warn`, and the console renders those on
+       screen from this table: a guard added without copy would otherwise be
+       invisible until the dialog it opens is already too late to be a
+       warning. */
     const USBNET_MODES = { 0: "rmnet", 1: "ecm", 2: "mbim", 3: "rndis" };
+    const CFUN_MEANING = {
+      0: "最小功能 —— 射频与卡一起下电",
+      4: "飞行模式 —— 射频关，卡还在",
+      7: "Quectel 离线模式",
+    };
+    /* `AT+CRSM` command codes that write, in 27.007's numbering. The read
+       codes (176 READ BINARY, 178 READ RECORD, 192 GET RESPONSE, 242 STATUS)
+       are deliberately not here. */
+    const CRSM_WRITES = { 214: "UPDATE BINARY", 219: "SET DATA", 220: "UPDATE RECORD" };
     const GUARDED = [
       {
+        label: 'AT+QCFG="usbnet",N',
+        warn: "立即生效并当场重新枚举；rmnet(0) 以外拿掉 cdc-wdm，这一根从机队里消失。",
         match: /^at\+qcfg\s*=\s*"usbnet"\s*,\s*(\d+)/i,
         ask(command, imei, found) {
           const value = Number(found[1]);
@@ -1259,6 +1488,183 @@
             + "改成：" + value + " = " + name + "\n\n"
             + "这批 EC20 上它立即生效，不等重启 —— 模组当场重新枚举。\n"
             + tail + "\n\n确定要发出去吗？";
+        },
+      },
+
+      /* The reset form. `edge-modem/src/session.rs` writes this contradiction
+         down so nobody has to derive it again, and the dialog carries both
+         halves rather than picking the scarier one:
+
+         - it is the *forbidden* form named in `edge-panel/src/lib.rs`'s
+           `set_radio` ("whose reset form wedges a module often enough that it
+           is not worth exposing on a button"), and the reason `/api/at` is
+           LAN-only is precisely so it cannot be fired from the cloud;
+         - it is also **the only measured cure** for `+CFUN: 7`, where
+           `AT+CFUN=0`, `=1` and `=4` all answered `+CME ERROR: 4`. The agent
+           still will not send it by itself, on one observation: "One sample is
+           enough to name the cure in an error message. It is not enough to
+           fire it, unprompted, at hardware nobody can reach. The escalation is
+           left to a human at the LAN-only `/api/at` endpoint."
+
+         This box *is* that endpoint, so the dialog's job is not to refuse — it
+         is to make sure whoever types it knows which of the two situations
+         they are in. */
+      {
+        label: "AT+CFUN=N,1",
+        warn: "带复位：模组重启并重新枚举 USB。也是 +CFUN: 7 唯一量到过的解药，但只有一次观测。",
+        match: /^at\+cfun\s*=\s*(\d+)\s*,\s*1\s*$/i,
+        ask(command, imei, found) {
+          return "带复位的 AT+CFUN\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n"
+            + "第二个参数 1 = 复位：模组重启，USB 重新枚举。\n\n"
+            + "这三根是经 USB/IP 过来的，没有人能物理接触 —— 复位之后没回来，\n"
+            + "就没有第二条路。lib.rs 正是因此不把这条放在按钮上。\n\n"
+            + "另一半也要说清楚：它是这块板子上唯一量到过的解药。\n"
+            + "2026-08-25 模组搁浅在 +CFUN: 7 时，AT+CFUN=0 / =1 / =4 全部 +CME ERROR: 4，\n"
+            + "只有 AT+CFUN=" + found[1] + ",1 把它救了回来（约 40 秒，没有掉出 USB 总线）。\n"
+            + "那是一次观测，所以代理不会自己发，留给人来发 —— 也就是这里。\n\n"
+            + "确定要发出去吗？";
+        },
+      },
+
+      /* Radio off / flight / the stranded value. Not a one-way door on its own
+         — `edge-modem/src/session.rs`'s recovery ladder is literally
+         `AT+CFUN=0`, a few seconds, `AT+CFUN=1`, and it has worked twice on
+         this bench — so the dialog says where the way back is instead of
+         implying there is none. 7 is the exception and is named as one. */
+      {
+        label: "AT+CFUN=0 / =4 / =7",
+        warn: "立刻脱网。0/4 的回程是同一个口上的 AT+CFUN=1；7 是「进去容易、记录在案的出路全部失败」的那个值。",
+        match: /^at\+cfun\s*=\s*(0|4|7)\s*(?:,\s*0\s*)?$/i,
+        ask(command, imei, found) {
+          const value = Number(found[1]);
+          const lines = ["关闭射频（" + command + "）", ""];
+          lines.push("命令：" + command);
+          lines.push("目标：" + (imei || "未选模组 —— 第一个应答的控制口"));
+          lines.push(value + " = " + CFUN_MEANING[value]);
+          lines.push("");
+          lines.push("这一根会立刻脱网：收不到短信、没有数据，在它上面的通话会断，");
+          lines.push("面板上它会暂时从机队里消失。");
+          lines.push("");
+          if (value === 7) {
+            lines.push("7 和另外两个不一样。session.rs 把它记成「进去容易，记录在案的");
+            lines.push("出路全部失败」的那个值：2026-08-25 从 +CFUN: 7 里，AT+CFUN=0、");
+            lines.push("=1、=4 全部答 +CME ERROR: 4，QMI 两个方向都被 error 60 拒绝，");
+            lines.push("唯一救回来的是带复位的 AT+CFUN=1,1 —— 而那只有一次观测。");
+          } else {
+            lines.push("AT 控制口还在，所以回程是同一个口上的 AT+CFUN=1。");
+            lines.push("session.rs 的恢复梯子第三级正是 AT+CFUN=0、等几秒、AT+CFUN=1，");
+            lines.push("本机成功过两次（867018069514820 约 15 秒、867018069509705 约 2.3 秒，");
+            lines.push("两次都没有掉出 USB 总线）。但面板不会替你发那条回程命令。");
+          }
+          lines.push("");
+          lines.push("这批硬件没有人能物理接触，插拔不是退路。");
+          lines.push("");
+          lines.push("确定要发出去吗？");
+          return lines.join("\n");
+        },
+      },
+
+      /* The sweep, typed. This is the exact command `/api/scan` runs — the
+         daemon issues `AT+COPS=?` with `SCAN_TIMEOUT` — and the button in the
+         网络 tab already asks first. Typing it must not be the cheaper way
+         round that dialog. */
+      {
+        label: "AT+COPS=?",
+        warn: "就是「扫网」按钮那条命令：最长 180 秒全频段扫描，期间这一根不服务。",
+        match: /^at\+cops\s*=\s*\?\s*$/i,
+        ask(command, imei) {
+          return "全频段扫网（AT+COPS=?）\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
+            + "这正是「网络」tab 那个扫网按钮发的命令：edge-bin 用 SCAN_TIMEOUT\n"
+            + "（" + Math.round(SCAN_LIMIT / 1000) + " 秒）跑它。期间模组不注册、不收短信、没有数据。\n"
+            + "扫完它自己回来 —— 但那个按钮先问一次，从命令框绕过去不该更容易。\n\n"
+            + "确定要发出去吗？";
+        },
+      },
+
+      /* Manual selection and deregistration. Recoverable by `AT+COPS=0`, which
+         is why that form is not guarded — but until somebody sends it, the
+         stick is off the network and the panel cannot tell "locked to a PLMN
+         that is not here" from "no coverage". */
+      {
+        label: "AT+COPS=1,… / =2",
+        warn: "手动锁网 / 主动注销。锁到这里收不到的网上就一直脱网；回程是 AT+COPS=0（自动）。",
+        match: /^at\+cops\s*=\s*([12])\s*(?:,|$)/i,
+        ask(command, imei, found) {
+          const manual = found[1] === "1";
+          return (manual ? "手动锁定运营商" : "从网络注销") + "\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
+            + (manual
+              ? "手动选网会把这一根钉在一个 PLMN 上。锁到一个这里收不到的网上，\n"
+                + "它就一直搜不到、一直脱网，而面板上看起来只是「搜网中」。\n"
+              : "注销之后模组不会自己回到网络上。\n")
+            + "\n回程是 AT+COPS=0（自动选网）—— 本机实测 15 到 90 秒回到 LTE。\n"
+            + "面板不会替你发那一条。这批硬件没有人能物理接触。\n\n"
+            + "确定要发出去吗？";
+        },
+      },
+
+      /* Writing to the card. Reads are left alone on purpose: the agent sends
+         `AT+CRSM=176,28589,0,0,4` on every report, so a dialog in front of the
+         read form would appear next to something the daemon does by itself. */
+      {
+        label: "AT+CRSM=214/219/220,…",
+        warn: "往卡里写文件。写坏的 EF 没有撤销，卡上没有第二份；读（176/178/192/242）不拦。",
+        match: /^at\+crsm\s*=\s*(214|219|220)\b/i,
+        ask(command, imei, found) {
+          return "往卡里写（" + command.split(",")[0] + ",…）\n\n"
+            + "命令：" + command + "\n"
+            + "操作：" + found[1] + " = " + CRSM_WRITES[Number(found[1])] + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
+            + "+CRSM 把命令直接交给卡上的文件系统。读是安全的 —— 代理自己每次体检\n"
+            + "都在发 AT+CRSM=176,28589,…（EF_AD）。写不是：写坏的 EF 没有撤销，\n"
+            + "卡上没有第二份，而这批硬件没有人能物理接触，换卡不是退路。\n\n"
+            + "确定要发出去吗？";
+        },
+      },
+
+      /* Raw APDUs. The panel cannot tell a read from a write inside one, so
+         this is the entry that does not get a read exception. */
+      {
+        label: "AT+CSIM=…",
+        warn: "裸 APDU：面板读不出它是读还是写。占住 eUICC 的逻辑通道会直接弄坏 profile 管理。",
+        match: /^at\+csim\s*=/i,
+        ask(command, imei) {
+          return "裸 APDU（AT+CSIM）\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
+            + "+CSIM 把一整条 APDU 原样交给卡。面板读不出它是读还是写，\n"
+            + "所以这一条没有「只读放行」的例外。\n\n"
+            + "两处代价来自仓库自己的记录：\n"
+            + "· eUICC 只有几条逻辑通道，占着不放会直接弄坏 profile 管理\n"
+            + "  （edge-modem/src/aka.rs）；\n"
+            + "· 2026-08-25，对一张「已经选好」的卡再 SELECT 一次 USIM ADF 之后卡就走了：\n"
+            + "  AT+CPIN? 变成 +CME ERROR: 13、AT+QSIMSTAT? 变成 0,0、\n"
+            + "  之后每一条 AT+CSIM 都 +CME ERROR: 0，直到一次 AT+CFUN=0/1 才重新初始化。\n\n"
+            + "确定要发出去吗？";
+        },
+      },
+
+      /* NV. Named in vowifi T028's own list of things it did not do, as
+         "无物理接触、没有第二次机会", and left for a human to decide. This is
+         where that human types. */
+      {
+        label: "AT+QPRTPARA=…",
+        warn: "Quectel 的 NV 备份/恢复。出厂重置没有第二次机会，而这批硬件不能拔插。",
+        match: /^at\+qprtpara\s*=/i,
+        ask(command, imei) {
+          return "改动 NV（AT+QPRTPARA）\n\n"
+            + "命令：" + command + "\n"
+            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
+            + "这是 Quectel 的 NV 备份/恢复命令。vowifi 板子 T028 把「对这张卡做\n"
+            + "AT+QPRTPARA 出厂 NV 重置」列成一个「无物理接触、没有第二次机会」的选项，\n"
+            + "并且没有执行 —— 它被留给人来决定。\n\n"
+            + "这三根经 USB/IP 过来，没有人能拔插。重置之后模组没回来，就没有别的办法。\n\n"
+            + "确定要发出去吗？";
         },
       },
     ];
@@ -1303,7 +1709,10 @@
 
        This is deliberately not an entry in GUARDED: that table matches a
        command string, and there is no command here. `AT+CFUN=0/4` typed into
-       the box is a separate path and belongs in that table — T006 owns it. */
+       the box is a separate path and has its own entry in that table, with its
+       own wording — the two must not be merged, because this button does not
+       send an AT command at all and saying it does would put a falsehood on
+       the screen for an operator who then reads `+CFUN: 0` in the status bar. */
     function radioAsk(imei, goOnline) {
       const aim = imei || "未选模组";
       if (goOnline) {
@@ -1325,6 +1734,96 @@
         + "而 2026-08-25 有一次 QMI 模式切换被 error 60 拒在半路，把模组停在\n"
         + "+CFUN: 7 出不来（那次走的是 Offline，不是这里的 LowPower）。\n\n"
         + "确定要关吗？";
+    }
+
+    /* ── Sweeping for visible networks ────────────────────────────────────
+       The pre-refactor panel asked "对 X 全频段扫网？模组会停止服务，最长两分钟"
+       — a real consequence, and two of the three numbers in it were right.
+       This says the same thing with the daemon's own timeout and adds the part
+       the old one left out: the way back is nothing, because the sweep ends by
+       itself. Saying so is not softening the warning, it is the difference
+       between this and the entries in GUARDED, and blurring that line is how
+       every dialog starts reading the same.
+
+       - `edge-panel/src/lib.rs` on the endpoint: the scan "takes the radio
+         away for as long as the scan runs, so the modem serves nothing while
+         it is in progress".
+       - `edge-bin/src/main.rs`: `AT+COPS=?` under `SCAN_TIMEOUT`, 180s.
+       - `lib.rs` again, on why the stick reads as busy rather than gone: "a
+         modem mid-scan has stopped answering the poll loop on purpose, and
+         reporting that as offline sends the operator" after a fault that is
+         not there. */
+    function scanAsk(imei) {
+      return "全频段扫网\n\n"
+        + "目标：" + (imei || "未选模组") + "\n"
+        + "动作：/api/scan → AT+COPS=?，最长 " + Math.round(SCAN_LIMIT / 1000) + " 秒\n\n"
+        + "扫描期间这一根不服务：不注册、不收短信、没有数据，\n"
+        + "在它上面的通话会断。机队里它会显示为「忙」，不是离线。\n\n"
+        + "扫完它自己回来，不需要任何补救动作 —— 这一条和命令框里那些\n"
+        + "要先问一次的命令不同，它没有走不回来的那一半。\n\n"
+        + "确定要扫吗？";
+    }
+
+    /* ── Sticks the panel will not send a message from ────────────────────
+       Not a policy invented here, and not "SMS is broken on this stick".
+
+       `867018069509705` stalls its own QMI interrupt endpoint on every MO
+       submit: the USB/IP session is torn down and the module leaves the bus.
+       Measured on 2026-08-25 by replaying one WMS RAW_SEND frame with the
+       agent stopped — the same frame succeeded on `cdc-wdm0`, was cleanly
+       refused by `cdc-wdm1`, and only this stick disconnected. Both transports
+       trigger it (QMI RAW_SEND and `AT+CMGS`), and a full `AT+CFUN=1,1` does
+       not clear it.
+
+       Two details decide the wording, and both cut against the obvious one:
+
+       - **the message usually goes out.** `edge-bin/src/main.rs` says so where
+         it names the failure: the SIM's own MO reference counter in `EF_SMSS`
+         "advanced by 34 over a day of sends the console recorded as failures,
+         and 10086 kept replying to them. Told 'failed', an operator resends
+         and the recipient gets it twice." So the cost is not a lost message,
+         it is a lost module — and telling the operator "发不出去" would be the
+         same lie the daemon was fixed for telling.
+       - **there is no fix from this side**, which is why the hourly keepalive
+         that used to send on this stick was switched off rather than retried.
+
+       Keyed by IMEI because that is what identifies the hardware; the card in
+       it can be moved. */
+    const SMS_BLOCKED = {
+      "867018069509705": {
+        why: "每一次 MO 短信提交都会让它挂掉自己的 QMI 中断端点，USB/IP 会话被拆掉，模组离开总线几十秒。QMI 与 AT 两条路都会触发，完整的 AT+CFUN=1,1 也清不掉。",
+        also: "代价不是「发不出去」：短信多半真的发出去了 —— 卡上 EF_SMSS 的 MO 计数在被记成「失败」的那一天涨了 34，10086 一直在回。代价是每发一条就丢一次模组。",
+        source: "vowifi T028 实测 2026-08-25：停掉 agent 后同一个 RAW_SEND 帧在 867018069514820 上成功、被 862547055142811 干净拒绝，只有这一根 disconnect。每小时的保号短信任务也因此被停掉。",
+      },
+    };
+
+    /* What the encoder will do with a draft, mirrored from `edge-modem`'s
+       `pdu.rs` rather than guessed.
+
+       Two rules and one surprise. The rules: `GSM7_MAX_SEPTETS = 160`,
+       `UCS2_MAX_CHARS = 70`. The surprise is `gsm7_value` — the seven-bit
+       alphabet this encoder accepts is a small ASCII subset, so a `#`, a
+       bracket, an apostrophe or a newline is enough to move a message to UCS2
+       and its limit from 160 to 70.
+
+       And it does not segment: past the limit `encode_submit` returns
+       `TooLong` and the send is refused. That is worth knowing before the
+       button rather than after, which is the whole reason this is on screen.
+
+       ⚠ This is a copy of a rule that lives in another crate. If `pdu.rs`
+       gains a character, this says 70 where the daemon would accept 160 — the
+       error is in the safe direction, but it is still drift. */
+    const GSM7_MAX_SEPTETS = 160;
+    const UCS2_MAX_CHARS = 70;
+    const GSM7_ALPHABET = /^[A-Za-z0-9 .,!?:+-]*$/;
+
+    function draftShape(body) {
+      const chars = Array.from(String(body || ""));
+      const gsm7 = GSM7_ALPHABET.test(String(body || ""));
+      // UCS2 counts UTF-16 code units, not characters: an emoji is two.
+      const units = gsm7 ? chars.length : String(body || "").length;
+      const limit = gsm7 ? GSM7_MAX_SEPTETS : UCS2_MAX_CHARS;
+      return { encoding: gsm7 ? "GSM-7" : "UCS-2", units, limit, over: units > limit };
     }
 
     /* ── Switching an eSIM profile ────────────────────────────────────────
@@ -1620,6 +2119,10 @@
     document.addEventListener("alpine:init", () => {
       Alpine.data("panel", () => ({
         QUICK, STATUS_EVERY, LOG_EVERY, LOG_KEEP, LOG_RENDER, LOG_LEVELS, CONSOLE_KEEP,
+        // Exposed so the console can draw the guard list from the table
+        // itself, and the network tab can size its progress bar against the
+        // daemon's own timeout rather than a number typed twice.
+        GUARDED, SCAN_LIMIT,
 
         /* ---- fleet ---- */
         mode: "local",
@@ -1653,6 +2156,10 @@
         ussdOpen: false,
         report: null,
         reportFacts: [],
+        // When the report was read. Signal and registration move underneath
+        // the panel, so a grid with no time on it looks the same ten minutes
+        // later as it does now.
+        reportAt: 0,
         profiles: [],
         esimLoaded: false,
         esimNote: "",
@@ -1667,7 +2174,15 @@
         scanLoaded: false,
         scanBusy: false,
         scanNote: "",
+        // When the sweep started, so the bar can keep moving while the request
+        // is outstanding, and when its result came back.
+        scanStartedAt: 0,
+        scanAt: 0,
         messages: [],
+        // Three sticks' traffic arrives in one list, so the inbox can be
+        // narrowed to the selected one. Off by default: the whole point of the
+        // local inbox is that it is what this machine has.
+        inboxMine: false,
         sendTo: "",
         sendBody: "",
         sendBusy: false,
@@ -1932,6 +2447,7 @@
           // another's.
           this.report = null;
           this.reportFacts = [];
+          this.reportAt = 0;
           this.profiles = [];
           this.esimLoaded = false;
           this.esimNote = "";
@@ -1942,6 +2458,10 @@
           this.operators = [];
           this.scanLoaded = false;
           this.scanNote = "";
+          this.scanAt = 0;
+          // "已发送" left beside a different stick reads as that stick's, and
+          // a refusal naming the previous IMEI reads as a refusal of this one.
+          this.sendStatus = "";
           this.ussdOpen = false;
         },
 
@@ -2010,29 +2530,96 @@
           await this.busy(button, "读取中…", async () => {
             const r = await this.post("/api/report", { imei: this.activeImei });
             const facts = [];
-            const fact = (label, value, tone) => facts.push({ label, value, tone: tone || "" });
+            // `group` is new; the label, value and tone of every fact are the
+            // pre-refactor panel's, unchanged. A grid of ten equal rows makes
+            // the operator find the three that matter; naming which question a
+            // row answers is the whole difference.
+            const fact = (group, label, value, tone) => facts.push({ group, label, value, tone: tone || "" });
             const dbm = r.signal_dbm;
-            fact("信号", dbm === null || dbm === undefined ? null : dbm + " dBm (CSQ " + r.signal_index + ")",
+            fact("网络", "信号", dbm === null || dbm === undefined ? null : dbm + " dBm (CSQ " + r.signal_index + ")",
               dbm === null || dbm === undefined ? "" : dbm > -85 ? "good" : dbm > -100 ? "" : "bad");
             // CS and PS are shown apart on purpose: a modem can be attached for
             // data with no circuit-switched domain, which is exactly the state
             // in which SMS quietly fails.
             for (const [key, name] of [["cs_registration", "注册 CS"], ["ps_registration", "注册 PS"]]) {
               const v = r[key];
-              fact(name, v ? (REG_LABEL[v] || v) : null, v === "home" || v === "roaming" ? "good" : v ? "bad" : "");
+              fact("网络", name, v ? (REG_LABEL[v] || v) : null, v === "home" || v === "roaming" ? "good" : v ? "bad" : "");
             }
-            fact("运营商", r.operator);
-            fact("接入制式", r.access_technology);
-            fact("ICCID", r.iccid);
-            fact("IMSI", r.imsi);
-            fact("本机号", r.msisdn);
-            fact("短信中心", r.sms_centre, r.sms_centre ? "good" : "bad");
-            fact("固件", r.firmware);
+            fact("网络", "运营商", r.operator);
+            fact("网络", "接入制式", r.access_technology);
+            fact("卡", "ICCID", r.iccid);
+            fact("卡", "IMSI", r.imsi);
+            fact("卡", "本机号", r.msisdn);
+            fact("卡", "短信中心", r.sms_centre, r.sms_centre ? "good" : "bad");
+            fact("设备", "固件", r.firmware);
             for (const item of facts) if (item.value === null || item.value === undefined || item.value === "") item.tone = "absent";
             this.report = r;
             this.reportFacts = facts;
+            this.reportAt = Date.now();
             this.out("体检 " + this.activeImei + " 完成", "out-meta");
           });
+        },
+
+        /* The same facts, kept in the order they were written, grouped by the
+           question they answer. Derived rather than stored: one array is the
+           thing that has to stay in step with the read. */
+        get reportGroups() {
+          const groups = [];
+          for (const item of this.reportFacts) {
+            let group = groups.find((g) => g.name === item.group);
+            if (!group) { group = { name: item.group, facts: [] }; groups.push(group); }
+            group.facts.push(item);
+          }
+          return groups;
+        },
+
+        /* Three sentences, from the same read, about the three things that
+           decide whether this stick can carry anything. Every one of them is
+           already somewhere in the grid — as a colour, in a row, next to nine
+           others — which is exactly the problem: a modem attached for data with
+           no CS domain and no message centre reads as healthy right up to the
+           moment a message disappears. Nothing here asks the modem anything. */
+        get reportVerdict() {
+          const r = this.report;
+          if (!r) return [];
+          const said = [];
+          const reg = (value) => value === "home" || value === "roaming";
+          const cs = r.cs_registration;
+          const ps = r.ps_registration;
+          if (reg(cs) && reg(ps)) {
+            said.push({ key: "注册", tone: "ok", say: "CS 与 PS 都已注册 —— 短信与数据都有路。" });
+          } else if (reg(ps) && !reg(cs)) {
+            said.push({ key: "注册", tone: "warn", say: "只注册了 PS：数据可用，而 CS 域不在 —— 短信会安静地失败，不会报错。" });
+          } else if (reg(cs) && !reg(ps)) {
+            said.push({ key: "注册", tone: "warn", say: "只注册了 CS：短信有路，数据没有。" });
+          } else if (cs || ps) {
+            said.push({ key: "注册", tone: "bad", say: "两个域都没有注册（CS " + (REG_LABEL[cs] || cs || "—") + " · PS " + (REG_LABEL[ps] || ps || "—") + "）—— 这一根现在什么都送不出去。" });
+          } else {
+            said.push({ key: "注册", tone: "idle", say: "模组没有给出注册状态。" });
+          }
+          const dbm = r.signal_dbm;
+          if (dbm === null || dbm === undefined) {
+            said.push({ key: "信号", tone: "idle", say: "没有读到信号。" });
+          } else if (dbm > -85) {
+            said.push({ key: "信号", tone: "ok", say: dbm + " dBm —— 好。" });
+          } else if (dbm > -100) {
+            said.push({ key: "信号", tone: "warn", say: dbm + " dBm —— 够用，但边缘。" });
+          } else {
+            said.push({ key: "信号", tone: "bad", say: dbm + " dBm —— 太弱，收发都会不稳。" });
+          }
+          if (r.sms_centre) {
+            said.push({ key: "短信", tone: "ok", say: "短信中心 " + r.sms_centre + "。" });
+          } else {
+            said.push({ key: "短信", tone: "bad", say: "卡上没有短信中心号码 —— 发出去的短信会失败，而失败信息不会提到这件事。" });
+          }
+          // The one thing on this screen that is not about this read: this
+          // stick's MO path is known to cost the module, and the health tab is
+          // where somebody checks before sending.
+          const blocked = SMS_BLOCKED[r.imei];
+          if (blocked) {
+            said.push({ key: "MO 短信", tone: "bad", say: "面板禁止从这一根发短信 —— " + blocked.why });
+          }
+          return said;
         },
 
         /* ══ eSIM ═════════════════════════════════════════════════════════ */
@@ -2141,22 +2728,44 @@
           }
         },
 
+        /* How long the sweep in flight has been running, in whole seconds.
+           Derived from `now`, which the one-second tick in `boot()` already
+           advances, so the bar keeps moving while a single request is
+           outstanding for three minutes. A disabled button is what the old
+           panel showed for all of it, and a disabled button is what a hung
+           panel shows too. */
+        get scanElapsed() {
+          if (!this.scanStartedAt) return 0;
+          return Math.max(0, Math.round((this.now - this.scanStartedAt) / 1000));
+        },
+
         async runScan(button) {
           if (!this.requireActive()) return;
-          if (!confirm("对 " + this.activeImei + " 全频段扫网？\n模组会停止服务，最长两分钟。")) return;
+          if (!confirm(scanAsk(this.activeImei))) {
+            // Refusing leaves a mark, like every other guarded action here:
+            // without one the operator cannot tell a dialog they dismissed
+            // from a sweep that is quietly running.
+            const refused = this.newEntry("note", "已取消扫网 " + this.activeImei, "out-warn");
+            refused.meta = "没有发出 —— 模组没有离开服务";
+            refused.tone = "is-warn";
+            return;
+          }
           this.out("> 扫网 " + this.activeImei + "（耗时较久）", "out-cmd");
           this.scanBusy = true;
-          this.scanNote = "扫描中，最长两分钟…";
+          this.scanStartedAt = Date.now();
+          this.scanNote = "扫描中 · 最长 " + Math.round(SCAN_LIMIT / 1000) + " 秒 · 这一根此刻不服务";
           try {
             await this.busy(button, "扫描中…", async () => {
               const r = await this.post("/api/scan", { imei: this.activeImei });
               this.operators = r.operators || [];
               this.scanLoaded = true;
+              this.scanAt = Date.now();
               this.scanNote = this.activeImei + " · " + Math.round(r.elapsed_ms / 1000) + "s · " + this.operators.length + " 个网络";
               this.out("  扫到 " + this.operators.length + " 个网络", "out-meta");
             });
           } finally {
             this.scanBusy = false;
+            this.scanStartedAt = 0;
           }
         },
 
@@ -2269,7 +2878,54 @@
           this.ussdOpen = false;
         },
 
+        /* ══ SMS ══════════════════════════════════════════════════════════ */
+
+        /** The record saying why this stick must not send, or null. */
+        smsBlock(imei) { return (imei && SMS_BLOCKED[imei]) || null; },
+
+        /** What the encoder will make of the current draft. */
+        get draft() { return draftShape(this.sendBody); },
+
+        get draftText() {
+          const d = this.draft;
+          if (!this.sendBody) {
+            return "编码由内容决定：只用 A-Z a-z 0-9 空格 . , ! ? : + - 走 GSM-7（"
+              + GSM7_MAX_SEPTETS + " 字），其余一律 UCS-2（" + UCS2_MAX_CHARS + " 字）。本机编码器不分片，超了直接拒绝。";
+          }
+          return d.encoding + " · " + d.units + " / " + d.limit
+            + (d.over ? " —— 超了，这条会被编码器拒掉（不会分片发出去）" : "");
+        },
+
+        /* Whether the send controls are usable at all. Two refusals, and they
+           are different refusals:
+
+           - a stick on the block list, because sending from it costs the
+             module;
+           - no stick at all, because with no IMEI the daemon takes the first
+             entry out of its modem map, and one of the entries in that map is
+             that stick. An unaimed send is a draw with that on one face. */
+        get canSend() { return !!this.activeImei && !this.smsBlock(this.activeImei); },
+
         async sendSms() {
+          // Checked here as well as on the fieldset. Enter in a text input
+          // submits a form, and a guard that lives only in an attribute is one
+          // keystroke and one stale render away from not existing.
+          const blocked = this.smsBlock(this.activeImei);
+          if (blocked) {
+            this.sendStatus = "没有发出：" + this.activeImei + " 被面板禁止发送短信。" + blocked.why;
+            const refused = this.newEntry("note", "拒绝从 " + this.activeImei + " 发短信", "out-warn");
+            refused.meta = "没有发出 —— 模组没有被碰过";
+            refused.tone = "is-warn";
+            return;
+          }
+          if (!this.activeImei) {
+            this.sendStatus = "没有发出：先选一根模组。不选的话代理会取它 modem map 里的第一条，"
+              + "而机队里有一根发 MO 短信就会掉出 USB 总线。";
+            const refused = this.newEntry("note", "拒绝发送 —— 未选模组", "out-warn");
+            refused.meta = "没有发出 —— 面板不替你抽签";
+            refused.tone = "is-warn";
+            return;
+          }
           this.sendBusy = true;
           this.sendStatus = "发送中…";
           try {
@@ -2284,6 +2940,14 @@
           } finally {
             this.sendBusy = false;
           }
+        },
+
+        /* The local inbox, optionally narrowed to the selected stick. Messages
+           with no modem recorded stay visible in both views: dropping a row
+           because a field is missing is how an inbox quietly loses mail. */
+        get inbox() {
+          if (!this.inboxMine || !this.activeImei) return this.messages;
+          return this.messages.filter((m) => !m.modem_imei || m.modem_imei === this.activeImei);
         },
 
         /* ══ log column ═══════════════════════════════════════════════════ */

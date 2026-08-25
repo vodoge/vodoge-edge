@@ -804,27 +804,35 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
     );
 }
 
-/// A section that has not been restyled yet has to say which card restyles it.
-/// A placeholder that just says "coming soon" is how a migration loses a
-/// feature without anybody noticing it went.
+/// Nothing on this panel calls itself unfinished any more.
 ///
-/// T004 and T005 are absent from this list because the console and eSIM tabs
-/// have had their cards. A note left behind after the work is done is worse
-/// than no note: it tells the next reader that a finished surface is a stub.
+/// While the migration was running, a section that had not been restyled yet
+/// had to name the card that would restyle it — a placeholder saying only
+/// "coming soon" is how a migration loses a feature without anybody noticing it
+/// went. Every one of those cards has now landed, so the assertion inverts: a
+/// note left behind after the work is done is worse than no note, because it
+/// tells the next reader that a finished surface is a stub.
+///
+/// The `panel-note` class goes with them. Leaving the styling for a
+/// placeholder nobody renders is an invitation to add another one silently.
 #[tokio::test]
-async fn sections_awaiting_their_own_card_say_which_card_that_is() {
+async fn no_section_still_calls_itself_unfinished() {
     let panel = Panel::load().await;
-    // The note has to be readable on the page. A card number in a comment is
-    // a note to whoever opens the source, not to whoever opens the panel.
-    for card in ["T006"] {
-        panel.wired(In::Text, "no section points at the card that restyles it", card);
-    }
-    for done in ["T004", "T005"] {
+    for done in ["T002", "T003", "T004", "T005", "T006"] {
         assert!(
             !panel.page.contains(done),
             "a finished tab still calls itself unfinished: {done}"
         );
     }
+    assert!(
+        !panel.tags.contains("class=\"panel-note\""),
+        "a placeholder note is still rendered somewhere on the page"
+    );
+    assert!(
+        !panel.styles.contains(".panel-note"),
+        "the placeholder style outlived the last placeholder, so the next one can be added \
+         without anybody having to write a card number"
+    );
 }
 
 /// Everything the console card promised, pinned to the thing that implements
@@ -984,7 +992,7 @@ async fn every_action_that_takes_the_module_off_the_air_asks_first() {
             "async switchProfile(iccid, enable, button) {",
             "confirm(esimAsk(",
         ),
-        ("a full-band scan", "async runScan(button) {", "confirm("),
+        ("a full-band scan", "async runScan(button) {", "confirm(scanAsk("),
         ("a USB re-enumeration", "async usbReset(button) {", "confirm("),
         ("a guarded typed command", "async runAt(command) {", "confirm(tripped.guard.ask("),
     ] {
@@ -1420,6 +1428,572 @@ async fn read_logs(after: u64) -> serde_json::Value {
         .unwrap();
     assert_eq!(response.status(), 200);
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// Every entry in the guard table, as the page writes it.
+///
+/// Read out of the table rather than listed here, so a guard added without a
+/// `label`, without a `warn` or without an `ask` is a failure rather than
+/// something the assertions below quietly skip. The pattern is captured as a
+/// string because the shape of the regular expression is the thing the
+/// read/write assertions are about.
+struct Guard {
+    label: String,
+    warn: String,
+    pattern: String,
+    ask: String,
+}
+
+fn guard_table(code: &str) -> Vec<Guard> {
+    let table = body_of(code, "const GUARDED = [", "\n    ];");
+    let mut guards = Vec::new();
+    let mut rest = table;
+    while let Some(at) = rest.find("        label: ") {
+        rest = &rest[at + "        label: ".len()..];
+        let label = quoted(rest);
+        let warn_at = rest.find("        warn: ").expect("a guard with no warn");
+        let warn = quoted(&rest[warn_at + "        warn: ".len()..]);
+        // Every pattern here is case-insensitive, and it has to be: `at+cfun`
+        // typed in lower case is the same command. `/i,` is therefore the
+        // terminator, and a pattern written without the flag fails here rather
+        // than silently guarding only the shouted spelling.
+        let match_at = rest.find("        match: /").expect("a guard with no pattern");
+        let pattern_from = &rest[match_at + "        match: /".len()..];
+        let pattern = pattern_from[..pattern_from
+            .find("/i,")
+            .expect("a guard pattern is not case-insensitive, or is unterminated")]
+            .to_string();
+        let ask_at = rest.find("        ask(").expect("a guard with no dialog");
+        let ask_body = body_of(&rest[ask_at..], "{", "\n        },").to_string();
+        guards.push(Guard { label, warn, pattern, ask: ask_body });
+    }
+    guards
+}
+
+/// The contents of the first `"…"` or `'…'` at the start of `text`.
+fn quoted(text: &str) -> String {
+    let mut chars = text.chars();
+    let opener = chars.next().expect("nothing to quote");
+    assert!(opener == '"' || opener == '\'', "not a string literal: {}", &text[..20.min(text.len())]);
+    let mut out = String::new();
+    let mut escaped = false;
+    for c in chars {
+        if escaped {
+            out.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == opener {
+            break;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The commands that can leave a module somewhere software cannot get it out
+/// of are all guarded, and each one says what it costs.
+///
+/// T004 built the mechanism and shipped it with one entry, leaving "which
+/// other commands belong here" as a product question. It has been answered:
+/// an entry earns its place by being able to leave the module in a state no
+/// further command can undo — on hardware that reaches this site over USB/IP,
+/// where nobody can pull a stick.
+///
+/// The consequence sentences are pinned inside each `ask`, not on the page.
+/// T026 emptied every consequence out of the one dialog that existed and
+/// watched all five assertions stay green, propped up by a paragraph of static
+/// copy. The static copy is a good thing and is asserted separately; what it
+/// is not is evidence that a dialog says anything.
+#[tokio::test]
+async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
+    let panel = Panel::load().await;
+    let guards = guard_table(&panel.code);
+    assert!(
+        guards.len() >= 7,
+        "the guard table has {} entries; it should carry usbnet, both AT+CFUN forms, \
+         both AT+COPS forms, AT+CRSM writes, AT+CSIM and AT+QPRTPARA",
+        guards.len()
+    );
+
+    // Each command shape, and the words its dialog cannot be missing. Every
+    // one of these is quoted from this repository rather than written for the
+    // dialog — the provenance is beside each entry in the page.
+    for (shape, consequences) in [
+        // T004's original. Named here too so a rewrite of the table cannot
+        // drop it while the rest of this test still passes.
+        ("usbnet", vec!["立即生效", "重新枚举", "cdc-wdm", "从机队里消失"]),
+        // `AT+CFUN=<n>,1`: the reset form. edge-panel/src/lib.rs refuses to put
+        // it on a button; edge-modem/src/session.rs records it as the only
+        // measured way out of `+CFUN: 7`, on one observation. Both halves have
+        // to be in the dialog, because an operator who is in the second
+        // situation is being told to do this by the daemon's own error text.
+        //
+        // The shape names the command, not just the argument: a guard renamed
+        // to match some other command keeps its whole dialog, so a lookup by
+        // "the bit in brackets" finds it still there and says nothing. That was
+        // measured — two mutations that pointed a guard at `AT+NEVER` stayed
+        // green until the shapes below carried the command name.
+        (
+            "cfun\\s*=\\s*(\\d+)\\s*,",
+            vec!["重新枚举", "没有人能物理接触", "+CFUN: 7", "唯一量到过的解药", "40 秒"],
+        ),
+        // `AT+CFUN=0/4/7`: off the air. The way back exists for 0 and 4 and is
+        // named, because a dialog that implies otherwise is the kind operators
+        // learn to dismiss. 7 is the exception and is called one.
+        (
+            "cfun\\s*=\\s*(0|4|7)",
+            vec!["立刻脱网", "AT+CFUN=1", "+CME ERROR: 4", "没有人能物理接触"],
+        ),
+        // `AT+COPS=?`: the same sweep the network tab's button runs, and that
+        // button asks first.
+        ("cops\\s*=\\s*\\?", vec!["扫网", "SCAN_TIMEOUT", "不注册"]),
+        // `AT+COPS=1,…` / `=2`: manual selection and deregistration.
+        ("cops\\s*=\\s*([12])", vec!["手动", "脱网", "AT+COPS=0"]),
+        // `AT+CRSM` writes. The read form is deliberately not trapped, and the
+        // dialog says so by naming the read the agent itself sends.
+        ("crsm", vec!["没有撤销", "AT+CRSM=176", "换卡不是退路"]),
+        // `AT+CSIM`: a raw APDU, which the panel cannot classify at all.
+        ("csim", vec!["APDU", "逻辑通道", "+CME ERROR: 13"]),
+        // `AT+QPRTPARA`: NV.
+        ("qprtpara", vec!["NV", "没有第二次机会", "没有人能拔插"]),
+    ] {
+        let guard = guards
+            .iter()
+            .find(|g| g.pattern.contains(shape))
+            .unwrap_or_else(|| {
+                panic!(
+                    "nothing in the guard table matches {shape}; the patterns are {:?}",
+                    guards.iter().map(|g| &g.pattern).collect::<Vec<_>>()
+                )
+            });
+        for consequence in consequences {
+            assert!(
+                guard.ask.contains(consequence),
+                "the dialog for {} never mentions {consequence}",
+                guard.label
+            );
+        }
+        assert!(
+            !guard.warn.trim().is_empty(),
+            "{} has no one-line warning for the on-screen list",
+            guard.label
+        );
+    }
+
+    // Two dialogs name the value the operator typed through a lookup rather
+    // than in a sentence, which is right — the sentence cannot know it — but it
+    // puts the words somewhere the loop above cannot see. Asserted where they
+    // live, or "UPDATE BINARY" could disappear with the dialog still full of
+    // consequences and this test still green.
+    let crsm_table = body_of(&panel.code, "const CRSM_WRITES = {", "};");
+    for (code, name) in [("214", "UPDATE BINARY"), ("219", "SET DATA"), ("220", "UPDATE RECORD")] {
+        assert!(
+            crsm_table.contains(code) && crsm_table.contains(name),
+            "the CRSM dialog cannot name what {code} does: {crsm_table}"
+        );
+    }
+    // And the read codes stay out of it, so the table cannot become the place
+    // a read quietly acquires a dialog.
+    for read in ["176", "178", "192", "242"] {
+        assert!(
+            !crsm_table.contains(read),
+            "the CRSM write table lists the read code {read}"
+        );
+    }
+    let cfun_table = body_of(&panel.code, "const CFUN_MEANING = {", "\n    };");
+    for (value, meaning) in [("0:", "射频与卡一起下电"), ("4:", "飞行模式"), ("7:", "离线")] {
+        assert!(
+            cfun_table.contains(value) && cfun_table.contains(meaning),
+            "the radio-down dialog cannot say what {value} means: {cfun_table}"
+        );
+    }
+    // The lookups have to be read by the dialogs that need them.
+    let crsm_ask = &guards
+        .iter()
+        .find(|g| g.pattern.contains("crsm"))
+        .expect("no CRSM guard")
+        .ask;
+    assert!(
+        crsm_ask.contains("CRSM_WRITES[Number(found[1])]"),
+        "the CRSM dialog does not name the operation it is about to send"
+    );
+    let cfun_ask = &guards
+        .iter()
+        .find(|g| g.pattern.contains("cfun\\s*=\\s*(0|4|7)"))
+        .expect("no radio-down guard")
+        .ask;
+    assert!(
+        cfun_ask.contains("CFUN_MEANING[value]"),
+        "the radio-down dialog does not say which of the three values was typed"
+    );
+}
+
+/// A guard fires on the form that cannot be undone and stays out of the way of
+/// the one that can.
+///
+/// This is the rule usbnet's query/write split established, applied to the
+/// rest: a dialog in front of a harmless command trains the reflex that
+/// dismisses the dialog in front of a harmful one. Three shapes have to pass
+/// through untouched, and each is here because this repository sends it:
+///
+/// * `AT+CRSM=176,…` — the agent reads `EF_AD` with it on every report;
+/// * `AT+CFUN=1` — the plain form, which is the *recovery* in `session.rs`'s
+///   own ladder;
+/// * `AT+COPS=0` — automatic selection, measured on this bench to bring two
+///   sticks back to LTE in 15-90 seconds.
+#[tokio::test]
+async fn the_guards_fire_on_the_form_that_does_not_come_back() {
+    let panel = Panel::load().await;
+    let guards = guard_table(&panel.code);
+    let pattern_for = |shape: &str| -> String {
+        guards
+            .iter()
+            .find(|g| g.pattern.contains(shape))
+            .unwrap_or_else(|| panic!("no guard matches {shape}"))
+            .pattern
+            .clone()
+    };
+
+    // `AT+CFUN=<n>,1` has to require the reset argument, or it swallows every
+    // plain `AT+CFUN=1`.
+    let reset = pattern_for("cfun\\s*=\\s*(\\d+)\\s*,");
+    assert!(
+        reset.contains(",\\s*1\\s*$"),
+        "the reset guard does not require the reset argument, so it also traps AT+CFUN=1: {reset}"
+    );
+    // And the radio-down guard has to stop at 0, 4 and 7 rather than any digit.
+    let off = pattern_for("cfun\\s*=\\s*(0|4|7)");
+    assert!(
+        off.contains("(0|4|7)"),
+        "the radio-down guard takes any value, so it also traps AT+CFUN=1: {off}"
+    );
+
+    // `AT+CRSM` on the update codes only.
+    let crsm = pattern_for("crsm");
+    for write in ["214", "219", "220"] {
+        assert!(crsm.contains(write), "the CRSM guard misses the write code {write}: {crsm}");
+    }
+    for read in ["176", "178", "192", "242"] {
+        assert!(
+            !crsm.contains(read),
+            "the CRSM guard traps the read code {read}, which the agent itself sends on every \
+             report — a dialog in front of that is one an operator learns to dismiss: {crsm}"
+        );
+    }
+
+    // `AT+COPS` on manual selection and deregistration, never on automatic.
+    let cops = pattern_for("cops\\s*=\\s*([12])");
+    assert!(
+        cops.contains("([12])"),
+        "the COPS guard does not name which values it traps, so it may also trap AT+COPS=0 — \
+         which is the way back: {cops}"
+    );
+
+    // Every guard is anchored. An unanchored pattern matches the command
+    // somewhere in the middle of a longer one, which is how a guard starts
+    // firing on things nobody meant it to.
+    for guard in &guards {
+        assert!(
+            guard.pattern.starts_with("^at\\+"),
+            "{} is not anchored at the start of the command: {}",
+            guard.label,
+            guard.pattern
+        );
+    }
+}
+
+/// Every guarded command is named on screen before anybody types one.
+///
+/// The console has always carried a paragraph about usbnet, and it is still
+/// there. What it could not do is grow: a guard added to the table with no copy
+/// anywhere would first announce itself inside the dialog it opens, which is
+/// after the decision that opened it. The list is therefore rendered from the
+/// table, and this pins that wiring rather than the words.
+#[tokio::test]
+async fn every_guarded_command_is_named_before_anybody_types_one() {
+    let panel = Panel::load().await;
+    for (feature, place, marker) in [
+        ("the list is drawn from the guard table", In::Tags, "x-for=\"g in GUARDED\""),
+        ("each row names the command", In::Tags, "x-text=\"g.label\""),
+        ("each row says what it costs", In::Tags, "x-text=\"g.warn\""),
+    ] {
+        panel.wired(place, feature, marker);
+    }
+    // The table has to be reachable from the component, or the loop above
+    // renders nothing and the assertions are about dead markup.
+    let data = body_of(&panel.code, "Alpine.data(\"panel\", () => ({", "\n        boot() {");
+    assert!(
+        data.contains("GUARDED, SCAN_LIMIT,"),
+        "the guard table is not exposed to the component, so the on-screen list is empty"
+    );
+    // And the usbnet paragraph the console has always had is still there.
+    let ahead = body_of(&panel.page, "<p class=\"con-guard\">", "</p>");
+    assert!(
+        ahead.contains("cdc-wdm"),
+        "the console lost the paragraph that explains usbnet in full"
+    );
+}
+
+/// A sweep that runs for three minutes has to look like it is running.
+///
+/// `edge-bin` gives `AT+COPS=?` `SCAN_TIMEOUT`, 180 seconds, and the modem
+/// serves nothing for the whole of it. The pre-refactor panel showed a disabled
+/// button and the words "最长两分钟" — a disabled button is what a hung page
+/// shows too, and the number was sixty seconds short of what the endpoint
+/// waits.
+#[tokio::test]
+async fn a_slow_sweep_shows_progress_rather_than_looking_hung() {
+    let panel = Panel::load().await;
+    assert_eq!(
+        constant(&panel.code, "SCAN_LIMIT"),
+        180_000,
+        "the scan budget no longer matches the daemon's SCAN_TIMEOUT of 180s, so the bar is \
+         drawn against the wrong maximum"
+    );
+
+    for (feature, place, marker) in [
+        ("the sweep is timed from when it started", In::Code, "this.scanStartedAt = Date.now();"),
+        (
+            "elapsed is derived from the tick, not from the reply",
+            In::Code,
+            "return Math.max(0, Math.round((this.now - this.scanStartedAt) / 1000));",
+        ),
+        ("there is a bar", In::Tags, "class=\"scan-bar\""),
+        ("the bar is filled by the elapsed time", In::Tags, ":value=\"Math.min(scanElapsed, SCAN_LIMIT / 1000)\""),
+        ("the bar is sized by the daemon's own timeout", In::Tags, ":max=\"SCAN_LIMIT / 1000\""),
+        ("the progress is readable as a number too", In::Tags, "x-show=\"scanBusy\""),
+        ("the result carries when it was taken", In::Tags, "x-text=\"'扫于 ' + clock(scanAt)\""),
+        ("the current network is marked in the table", In::Tags, "op.status === 'current' ? 'is-current'"),
+        ("a sweep in flight says the stick is not serving", In::Text, "不注册、不收短信、没有数据"),
+        ("and that it comes back by itself", In::Text, "扫完自己回来"),
+    ] {
+        panel.wired(place, feature, marker);
+    }
+
+    // The elapsed counter has to be reset, or the next sweep's bar starts
+    // full — which reads as "already timed out" from the first frame.
+    let sweep = body_of(&panel.code, "async runScan(button) {", "\n        },");
+    assert!(
+        sweep.contains("this.scanStartedAt = 0;"),
+        "the elapsed counter is never cleared, so the next sweep starts with a full bar"
+    );
+
+    // And the dialog in front of it says the two things that decide whether to
+    // press it: how long, and that the way back is nothing.
+    let dialog = body_of(&panel.code, "function scanAsk(imei) {", "\n    }");
+    for consequence in ["不服务", "AT+COPS=?", "扫完它自己回来", "忙"] {
+        assert!(
+            dialog.contains(consequence),
+            "the sweep dialog never mentions {consequence}"
+        );
+    }
+    assert!(
+        dialog.contains("Math.round(SCAN_LIMIT / 1000)"),
+        "the dialog states a duration of its own rather than the one the daemon waits"
+    );
+}
+
+/// The panel will not send a message from the stick that leaves the bus.
+///
+/// `867018069509705` stalls its own QMI interrupt endpoint on every MO submit
+/// and drops off USB/IP for the length of a re-enumeration. Both transports do
+/// it and a full `AT+CFUN=1,1` does not clear it, so there is nothing this side
+/// can fix — but the message usually *does* go out (the SIM's own MO counter in
+/// `EF_SMSS` advanced by 34 over a day of "failed" sends), which is why the
+/// wording has to be about the module rather than about the message.
+///
+/// Two separate things are asserted, because a label is not a guard: the stick
+/// is marked, *and* the send path refuses.
+#[tokio::test]
+async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
+    let panel = Panel::load().await;
+    let blocked = "867018069509705";
+
+    // Marked, in the code that decides it and on the page that shows it.
+    let table = body_of(&panel.code, "const SMS_BLOCKED = {", "\n    };");
+    assert!(
+        table.contains(blocked),
+        "the block list does not name {blocked}"
+    );
+    for (feature, place, marker) in [
+        ("the rail marks the stick", In::Tags, "x-show=\"smsBlock(m.imei)\""),
+        ("the mark is a badge, not only a tooltip", In::Text, "MO 短信禁发"),
+        ("the sms tab explains it in full", In::Tags, "x-text=\"smsBlock(activeImei).why\""),
+        ("and says the message probably went out anyway", In::Tags, "x-text=\"smsBlock(activeImei).also\""),
+        ("and where that was measured", In::Tags, "x-text=\"smsBlock(activeImei).source\""),
+        ("the controls are disabled", In::Tags, ":disabled=\"!canSend\""),
+    ] {
+        panel.wired(place, feature, marker);
+    }
+
+    // And refused in the send path itself. `:disabled` on a fieldset is one
+    // stale render away from not existing, and Enter in a text input submits a
+    // form, so the check that matters is the one in front of the request.
+    let send = body_of(&panel.code, "async sendSms() {", "\n        },");
+    let asked = send
+        .find("const blocked = this.smsBlock(this.activeImei);")
+        .expect("the send path does not consult the block list");
+    let sent = send
+        .find("await this.post(\"/api/send\"")
+        .expect("the send path no longer sends anything");
+    assert!(asked < sent, "the block list is consulted after the message has gone out");
+    assert!(
+        send[asked..sent].contains("if (blocked) {"),
+        "the block list is read and then ignored"
+    );
+
+    // An unaimed send is the same refusal by another route: with no IMEI the
+    // daemon takes the first entry out of its modem map, and the stick above is
+    // in that map.
+    let unaimed = send
+        .find("if (!this.activeImei) {")
+        .expect("an unaimed send is allowed, and the daemon picks the modem — including that one");
+    assert!(unaimed < sent, "the unaimed check happens after the message has gone out");
+
+    // Each refusal has to return inside *its own* branch. Looking for a
+    // `return;` anywhere between the first check and the request is not the
+    // same assertion: with two refusals in a row, deleting the first one's
+    // `return;` leaves the second one's inside the same span, and it was
+    // measured staying green that way.
+    for (refusal, from, to) in [
+        ("a blocked stick", asked, unaimed),
+        ("an unaimed send", unaimed, sent),
+    ] {
+        assert!(
+            send[from..to].contains("return;"),
+            "{refusal} carries on to the send anyway, so the refusal only delays it"
+        );
+    }
+    assert!(
+        send.contains("refused.meta = \"没有发出 —— 模组没有被碰过\";"),
+        "a refused send leaves no trace saying it was not sent"
+    );
+    let gate = body_of(&panel.code, "get canSend() {", "\n        },");
+    assert!(
+        gate.contains("!!this.activeImei") && gate.contains("!this.smsBlock(this.activeImei)"),
+        "the send controls are enabled without both checks: {gate}"
+    );
+}
+
+/// The SMS tab shows what the payload already carries and what the encoder will
+/// do, without asking for anything new.
+///
+/// `/api/messages` has carried `direction` and `modem_imei` all along and the
+/// pre-refactor panel threw both away, so three sticks' traffic arrived as one
+/// undifferentiated list. And `edge-modem`'s encoder does not segment: past 160
+/// GSM-7 septets or 70 UCS-2 characters `encode_submit` returns `TooLong` and
+/// the send is refused, which is worth knowing before the button rather than
+/// after.
+#[tokio::test]
+async fn the_sms_tab_has_what_sending_and_reading_messages_needs() {
+    let panel = Panel::load().await;
+    assert_eq!(constant(&panel.code, "GSM7_MAX_SEPTETS"), 160);
+    assert_eq!(constant(&panel.code, "UCS2_MAX_CHARS"), 70);
+
+    for (feature, place, marker) in [
+        ("which way a message went", In::Tags, "x-text=\"m.direction === 'outbound' ? '发出'"),
+        ("which stick it belongs to", In::Tags, "x-text=\"m.modem_imei ? shortImei(m.modem_imei) : '—'\""),
+        ("the inbox can be narrowed to one stick", In::Tags, "x-model=\"inboxMine\""),
+        ("and says how much it is hiding", In::Tags, "x-text=\"inbox.length + ' / ' + messages.length + ' 条'\""),
+        ("the draft is measured", In::Tags, "x-text=\"draftText\""),
+        ("and marked when it will be refused", In::Tags, ":class=\"draft.over ? 'is-over' : ''\""),
+    ] {
+        panel.wired(place, feature, marker);
+    }
+
+    // The filter must not drop a message whose stick was never recorded:
+    // hiding mail because a field is missing is a worse failure than showing
+    // one row too many.
+    let filter = body_of(&panel.code, "get inbox() {", "\n        },");
+    assert!(
+        filter.contains("!m.modem_imei || m.modem_imei === this.activeImei"),
+        "the inbox filter drops messages with no modem recorded: {filter}"
+    );
+
+    // The encoder mirror has to say it does not segment, or the count reads as
+    // "this will be two messages" — which is what every other SMS box means.
+    // Both branches, separately: the meter has an empty state and an
+    // over-the-limit state, and a single search for "不分片" was measured
+    // staying green with the over-the-limit sentence deleted, propped up by the
+    // empty-state hint.
+    let meter = body_of(&panel.code, "get draftText() {", "\n        },");
+    assert!(
+        meter.contains("本机编码器不分片"),
+        "the empty draft hint does not say the encoder refuses rather than segments: {meter}"
+    );
+    assert!(
+        meter.contains("会被编码器拒掉（不会分片发出去）"),
+        "an over-length draft is flagged without saying it will be refused rather than split, \
+         which is what every other SMS box means by a segment count: {meter}"
+    );
+    let shape = body_of(&panel.code, "function draftShape(body) {", "\n    }");
+    assert!(
+        shape.contains("gsm7 ? GSM7_MAX_SEPTETS : UCS2_MAX_CHARS"),
+        "the limit is not chosen by the encoding the body forces: {shape}"
+    );
+}
+
+/// The health tab answers the three questions it is opened for, in words.
+///
+/// Every one of them is already somewhere in the grid — as a tone on one of ten
+/// rows — and that is the failure this fixes: a module attached for data with
+/// no circuit-switched domain and no message centre reads as healthy right up
+/// to the moment a message disappears. Nothing here is a second request; it is
+/// the same `/api/report` read, said out loud.
+#[tokio::test]
+async fn the_health_tab_says_whether_the_stick_can_carry_anything() {
+    let panel = Panel::load().await;
+    for (feature, place, marker) in [
+        ("the read is timed", In::Code, "this.reportAt = Date.now();"),
+        ("and the time is shown", In::Tags, "x-text=\"'读于 ' + clock(reportAt)\""),
+        ("the verdict is drawn", In::Tags, "x-for=\"v in reportVerdict\""),
+        ("with its own tone", In::Tags, ":class=\"v.tone\""),
+        ("the facts are grouped by the question they answer", In::Tags, "x-for=\"group in reportGroups\""),
+        // In the attribute rather than in a text node: the sentence only makes
+        // sense when there is a refusal to explain, so it is drawn with the
+        // list it explains.
+        ("a refusal is explained rather than left as a list", In::Tags, "'（拒绝也是回答"),
+    ] {
+        panel.wired(place, feature, marker);
+    }
+
+    let verdict = body_of(&panel.code, "get reportVerdict() {", "\n        },");
+    // The one combination that is invisible in a grid of tones: attached for
+    // data, no CS domain. That is the state in which SMS fails silently, and
+    // the panel's own comment on the two rows says so.
+    assert!(
+        verdict.contains("reg(ps) && !reg(cs)"),
+        "the verdict does not separate a PS-only attach from a full one, which is the state \
+         in which SMS fails without an error: {verdict}"
+    );
+    assert!(
+        verdict.contains("短信会安静地失败"),
+        "a PS-only attach is reported without saying what it costs"
+    );
+    assert!(
+        verdict.contains("r.sms_centre"),
+        "the verdict ignores the message centre, whose absence fails a send with an error \
+         that does not mention it"
+    );
+    // Derived from the read, never from a second request.
+    assert!(
+        !verdict.contains("this.post(") && !verdict.contains("fetch("),
+        "the verdict asks the modem something instead of reading what the report already said"
+    );
+    // And it carries the block list, because this tab is where somebody checks
+    // a stick before sending from it.
+    assert!(
+        verdict.contains("SMS_BLOCKED[r.imei]"),
+        "the health tab does not mention that this stick must not send"
+    );
+
+    let groups = body_of(&panel.code, "get reportGroups() {", "\n        },");
+    assert!(
+        groups.contains("this.reportFacts"),
+        "the groups are built from something other than the facts of the read: {groups}"
+    );
 }
 
 /// Pull an integer constant out of the page's script.
