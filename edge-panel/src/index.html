@@ -538,6 +538,41 @@
     .con-line { white-space:pre-wrap; word-break:break-word; color:var(--fg-muted); }
     .con-dropped { margin:0; color:var(--fg-faint); font-size:10px; }
 
+    /* ── eSIM tab ────────────────────────────────────────────────────────
+       Two things get emphasis here because they are the two things that are
+       easy to get wrong: which profile is enabled *right now*, and whether a
+       switch that was asked for actually happened. Both are only ever drawn
+       from a read of the card, never from what the switch endpoint answered,
+       so the readout carries the time of that read. */
+    .esim-guard { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.6; }
+    .esim-guard b { color:var(--warn); font-weight:600; }
+    .esim-live {
+      display:flex; align-items:center; gap:var(--s2); flex-wrap:wrap;
+      font-size:var(--text-xs); color:var(--fg-muted);
+    }
+    .esim-live .esim-name { color:var(--fg); font-weight:600; }
+    .esim-live.is-dark { color:var(--warn); }
+    .esim-read { color:var(--fg-faint); font-size:10px; white-space:nowrap; }
+    tr.is-live > td { background:var(--accent-wash); }
+    tr.is-live .badge { font-weight:700; }
+    td.esim-act { text-align:right; white-space:nowrap; }
+    .esim-class { color:var(--fg-faint); }
+
+    /* The switch receipt. Its border is the verdict, and the verdict can only
+       be green once the card itself has said so. */
+    .esim-receipt { border-left:3px solid var(--line-strong); }
+    .esim-receipt.is-match { border-left-color:var(--ok); }
+    .esim-receipt.is-mismatch { border-left-color:var(--bad); }
+    .esim-receipt.is-unknown, .esim-receipt.is-missing { border-left-color:var(--warn); }
+    .esim-receipt.is-refused { border-left-color:var(--fg-faint); }
+    .esim-step { color:var(--warn); font-size:var(--text-xs); }
+    .esim-verdict { margin:0; font-size:var(--text-xs); line-height:1.6; color:var(--fg); }
+    .esim-verdict.is-match { color:var(--ok); }
+    .esim-verdict.is-mismatch { color:var(--bad); }
+    .esim-verdict.is-unknown, .esim-verdict.is-missing { color:var(--warn); }
+    .esim-verdict.is-refused { color:var(--fg-muted); }
+    .fact dd.claim { color:var(--fg-faint); font-family:var(--font-ui); text-align:right; }
+
     /* ── Log column ──────────────────────────────────────────────────────
        This is the column the operator actually watches, so it is permanent
        and it is the one that gets the extra width. Four rows: controls,
@@ -900,26 +935,43 @@
 
         <!-- eSIM -->
         <div x-show="tab === 'esim'" class="tabpanel">
-          <p class="panel-note">这一块的外观打磨在 <b>T005</b> 卡；下面是原面板「eSIM Profile」分区，功能与请求形状原样迁入。</p>
           <div class="block">
             <div class="block-head">
               <span x-text="esimNote || 'eUICC 上的 profile'"></span>
+              <!-- Every number under this head came out of one read, so the
+                   head carries when that read happened. Without it a table
+                   from ten minutes ago looks exactly like a table from now,
+                   and this is a card that changes underneath the panel. -->
+              <span class="esim-read" x-show="esimReadAt" x-text="'回读于 ' + clock(esimReadAt)"></span>
               <button type="button" class="btn go push" @click="runEsim($event.currentTarget)"
-                      :disabled="!activeImei">读取</button>
+                      :disabled="!activeImei" x-text="esimLoaded ? '重新回读' : '读取'"></button>
             </div>
             <div class="block-body">
+              <!-- Which profile is live is what anybody opens this tab to
+                   learn, so it is said in words above the table instead of
+                   being left to a badge somewhere in a row. Having none
+                   enabled is a real state and it is the bad one: nothing on
+                   the card can carry traffic. -->
+              <p class="esim-live" :class="!liveProfile ? 'is-dark' : ''" x-show="esimLoaded && profiles.length">
+                <span x-show="liveProfile">当前启用</span>
+                <span class="esim-name" x-show="liveProfile" x-text="liveProfile ? profileName(liveProfile) : ''"></span>
+                <span class="mono" x-show="liveProfile" x-text="liveProfile ? liveProfile.iccid : ''"></span>
+                <span x-show="liveProfile" x-text="liveProfile && liveProfile.provider ? '· ' + liveProfile.provider : ''"></span>
+                <span x-show="!liveProfile">卡上没有任何 profile 处于启用 —— 这一根现在没有网络可用。</span>
+              </p>
               <p class="empty" x-show="!profiles.length" x-text="esimLoaded ? '卡上没有 profile' : '还没有读取。'"></p>
               <div class="table-wrap" x-show="profiles.length">
                 <table>
-                  <thead><tr><th>名称</th><th>ICCID</th><th>运营商</th><th>状态</th><th></th></tr></thead>
+                  <thead><tr><th>名称</th><th>ICCID</th><th>运营商</th><th>类别</th><th>状态</th><th></th></tr></thead>
                   <tbody>
                     <template x-for="p in profiles" :key="p.iccid">
-                      <tr>
+                      <tr :class="p.enabled ? 'is-live' : ''">
                         <td x-text="p.nickname || p.name || '—'"></td>
                         <td class="mono" x-text="p.iccid"></td>
                         <td x-text="p.provider || '—'"></td>
+                        <td class="esim-class" x-text="classLabel(p.class)"></td>
                         <td><span class="badge" :class="p.enabled ? 'ok' : 'idle'" x-text="p.enabled ? '已启用' : '未启用'"></span></td>
-                        <td><button type="button" class="btn risk"
+                        <td class="esim-act"><button type="button" class="btn risk"
                                     @click="switchProfile(p.iccid, !p.enabled, $event.currentTarget)"
                                     x-text="p.enabled ? '停用' : '启用'"></button></td>
                       </tr>
@@ -927,9 +979,57 @@
                   </tbody>
                 </table>
               </div>
-              <p class="danger-note">切换会让模组脱网并触发卡片 REFRESH。</p>
+              <!-- On screen before anybody clicks. A consequence that only
+                   appears inside the confirmation has arrived too late to
+                   change the decision that led to it. -->
+              <p class="esim-guard">
+                切换会把模组从它当前的网络上摘下来，直到卡片 <b>REFRESH</b> 完成。eUICC 上
+                <b>同一时刻只有一个 profile 启用</b>，所以启用一条就是停用另一条；把最后一条停掉之后
+                <b>没有网络可回</b>。这批硬件<b>没有人能物理接触</b>，插拔不是退路。
+                发出之后面板<b>不采信 /api/esim/switch 的 ok</b> —— 它等 8 秒再<b>回读 /api/esim</b>，
+                屏幕上写的是回读到的状态。
+              </p>
             </div>
           </div>
+
+          <!-- The receipt for a switch. `x-if` rather than `x-show`, so its
+               fields are never evaluated against a null before the first one.
+               Its whole job is to keep two different things apart: what the
+               endpoint claimed, and what the card says. -->
+          <template x-if="esimSwitch">
+            <div class="block esim-receipt" :class="'is-' + (esimSwitch.verdict || 'pending')">
+              <div class="block-head">
+                <span x-text="'切换回执 · ' + clock(esimSwitch.at)"></span>
+                <span class="esim-step" x-show="esimSwitch.step" x-text="esimSwitch.step"></span>
+                <button type="button" class="btn push" @click="runEsim($event.currentTarget)"
+                        :disabled="!activeImei || esimSwitch.busy">再回读一次</button>
+                <button type="button" class="btn" @click="esimSwitch = null">收起</button>
+              </div>
+              <div class="block-body">
+                <dl class="facts">
+                  <div class="fact">
+                    <dt>请求</dt>
+                    <dd x-text="(esimSwitch.enable ? '启用 ' : '停用 ') + esimSwitch.label"></dd>
+                  </div>
+                  <div class="fact">
+                    <dt>ICCID</dt>
+                    <dd x-text="esimSwitch.iccid"></dd>
+                  </div>
+                  <div class="fact">
+                    <dt>/api/esim/switch 声称</dt>
+                    <dd class="claim" x-text="esimSwitch.claim || '还没有答复'"></dd>
+                  </div>
+                  <div class="fact">
+                    <dt>/api/esim 回读</dt>
+                    <dd :class="esimSwitch.verdict === 'match' ? 'good' : (esimSwitch.verdict && esimSwitch.verdict !== 'refused' ? 'bad' : 'absent')"
+                        x-text="esimSwitch.seenText || '还没有回读'"></dd>
+                  </div>
+                </dl>
+                <p class="esim-verdict" :class="'is-' + (esimSwitch.verdict || 'pending')"
+                   x-text="esimSwitch.verdictText"></p>
+              </div>
+            </div>
+          </template>
         </div>
 
         <!-- 网络 -->
@@ -1170,6 +1270,90 @@
         if (found) return { guard, found };
       }
       return null;
+    }
+
+    /* ── Switching an eSIM profile ────────────────────────────────────────
+       The expensive button on this panel, and not because of the command.
+
+       - `edge-panel/src/lib.rs` on the endpoint: switching "takes the modem
+         off its current network while the card refreshes". The switch asks
+         for that REFRESH deliberately — `edge-modem/src/session.rs` says that
+         without it the change "only takes effect after a restart, which reads
+         to an operator as if the command did nothing".
+       - `edge-modem/src/es10c.rs` states the constraint that makes this a
+         trade rather than a toggle: "Exactly one profile can be enabled."
+         Enabling one is disabling another whether or not that was the intent,
+         and the card's own refusal codes carry "wrong profile reenabled" for
+         when that swap goes wrong halfway.
+       - The same file names why none of it is recoverable by hand: "on
+         hardware nobody can physically reach". Nothing here gets re-seated.
+
+       And the answer to the command cannot settle any of it. This endpoint
+       has been observed returning `ok` on a switch that had not happened —
+       `/api/esim` still showed the profile disabled — and returning an error
+       on one that had. Wrong in both directions is not confirmation, so the
+       panel files the reply as a claim and asks the card for the fact. */
+    const PROFILE_CLASS = { 0: "测试", 1: "预置", 2: "运营" };
+
+    /* How long the card is given before it is asked. The pre-refactor panel
+       used the same 8 s to refresh the fleet after a switch; reading sooner
+       reports the state the REFRESH has not finished leaving yet. */
+    const ESIM_SETTLE = 8000;
+
+    /** The text of the dialog that stands in front of a profile switch. */
+    function esimAsk(profile, enable, profiles, imei) {
+      const name = profile.nickname || profile.name || profile.provider || profile.iccid;
+      const live = profiles.find((p) => p.enabled) || null;
+      const lines = [(enable ? "启用" : "停用") + " profile " + name, ""];
+      lines.push("ICCID：" + profile.iccid);
+      lines.push("目标：" + (imei || "未选模组"));
+      if (enable && live && live.iccid !== profile.iccid) {
+        lines.push("代价：" + (live.nickname || live.name || live.provider || live.iccid)
+          + " 会被一并停用 —— 卡上同一时刻只有一个 profile 启用。");
+      }
+      lines.push("");
+      lines.push("切换会把模组从它当前的网络上摘下来，直到卡片 REFRESH 完成。");
+      if (!enable && live && live.iccid === profile.iccid) {
+        lines.push("停用之后卡上没有启用中的 profile —— 这一根没有网络可以回去。");
+      }
+      lines.push("这批硬件没有人能物理接触，插拔不是退路。");
+      lines.push("");
+      lines.push("发出之后端点回的 ok 不作数：面板会等 " + Math.round(ESIM_SETTLE / 1000)
+        + " 秒再回读 /api/esim，屏幕上写的是回读到的状态。");
+      lines.push("");
+      lines.push("确定要发出去吗？");
+      return lines.join("\n");
+    }
+
+    /** Decide what happened from the card's own profile list, never from the
+        switch endpoint's answer. `state` is the receipt being filled in. */
+    function judgeSwitch(state, profiles) {
+      state.step = "";
+      state.busy = false;
+      const found = profiles.find((p) => p.iccid === state.iccid) || null;
+      if (!found) {
+        state.verdict = "missing";
+        state.seen = null;
+        state.seenText = "列表里没有这条 ICCID";
+        state.verdictText = "无法确认：回读到的 profile 列表里根本没有 " + state.iccid
+          + "。面板不替卡猜它现在是什么状态。";
+        return;
+      }
+      state.seen = !!found.enabled;
+      state.seenText = (state.seen ? "已启用" : "未启用") + " · 读于 " + clock(Date.now());
+      if (state.seen === state.enable) {
+        state.verdict = "match";
+        state.verdictText = "已生效：回读到 " + state.label + " 现在"
+          + (state.enable ? "已启用" : "未启用") + "，与请求一致。"
+          + (state.failed ? "注意：端点当时报的是失败，卡却确实换了 —— 以回读为准。" : "");
+      } else {
+        state.verdict = "mismatch";
+        state.verdictText = "没有生效：请求" + (state.enable ? "启用" : "停用") + " " + state.label
+          + "，回读却显示它" + (state.seen ? "仍然是已启用" : "仍然是未启用") + "。"
+          + (state.failed
+            ? "端点也报了失败，两边一致 —— 卡没有被改动。"
+            : "而端点回的是 ok —— 这是一次假成功，不要当它做过。");
+      }
     }
 
     const REG_LABEL = {
@@ -1417,6 +1601,13 @@
         profiles: [],
         esimLoaded: false,
         esimNote: "",
+        // When the profile table was read. Everything the eSIM tab says is a
+        // statement about that moment, and a card can change under the panel.
+        esimReadAt: 0,
+        // The receipt for the last switch attempt: what was asked for, what
+        // the endpoint claimed, and what the card said afterwards. Null until
+        // somebody switches something.
+        esimSwitch: null,
         operators: [],
         scanLoaded: false,
         scanBusy: false,
@@ -1689,6 +1880,10 @@
           this.profiles = [];
           this.esimLoaded = false;
           this.esimNote = "";
+          this.esimReadAt = 0;
+          // A verdict is about one card. Left up next to a different modem it
+          // would be read as that one's.
+          this.esimSwitch = null;
           this.operators = [];
           this.scanLoaded = false;
           this.scanNote = "";
@@ -1785,25 +1980,110 @@
           });
         },
 
+        /* ══ eSIM ═════════════════════════════════════════════════════════ */
+
+        get liveProfile() { return this.profiles.find((p) => p.enabled) || null; },
+        profileName(p) { return (p && (p.nickname || p.name || p.provider || p.iccid)) || "—"; },
+        classLabel(value) {
+          if (value === null || value === undefined) return "—";
+          return PROFILE_CLASS[value] || String(value);
+        },
+
+        /* The one request that says what is on the card. Every claim the eSIM
+           tab makes comes out of here and is stamped with when it ran. */
+        async readProfiles() {
+          const r = await this.post("/api/esim", { imei: this.activeImei });
+          const list = r.profiles || [];
+          this.profiles = list;
+          this.esimLoaded = true;
+          this.esimReadAt = Date.now();
+          this.esimNote = this.activeImei + " · " + list.length + " 个 profile";
+          return list;
+        },
+
         async runEsim(button) {
           if (!this.requireActive()) return;
           await this.busy(button, "读取中…", async () => {
-            const r = await this.post("/api/esim", { imei: this.activeImei });
-            this.profiles = r.profiles || [];
-            this.esimLoaded = true;
-            this.esimNote = this.activeImei + " · " + this.profiles.length + " 个 profile";
+            const list = await this.readProfiles();
+            // A verdict on screen is a statement about the card, so a fresh
+            // read has to re-decide it. Leaving the old wording beside newer
+            // numbers is how a "没有生效" outlives the switch that did.
+            if (this.esimSwitch && this.esimSwitch.verdict !== "refused") judgeSwitch(this.esimSwitch, list);
           });
         },
 
+        /* Ask, send, wait for the card, then ask the card. The endpoint's own
+           answer is recorded but never rendered as the outcome. */
         async switchProfile(iccid, enable, button) {
-          // Disabling the only enabled profile takes the card off the network
-          // with nothing to fall back to, so this one asks first.
-          if (!confirm((enable ? "启用" : "停用") + " profile " + iccid + "？\n模组会短暂脱网并触发卡片 REFRESH。")) return;
+          const profile = this.profiles.find((p) => p.iccid === iccid) || { iccid };
+          const label = this.profileName(profile);
+          if (!confirm(esimAsk(profile, enable, this.profiles, this.activeImei))) {
+            // Refusing has to leave a mark. Without one the operator is left
+            // unsure whether it went out — which is the exact uncertainty the
+            // dialog exists to remove.
+            const declined = this.newEntry("note", "已取消切换 " + iccid, "out-warn");
+            declined.meta = "没有发出 —— 卡没有被碰过";
+            declined.tone = "is-warn";
+            this.esimSwitch = {
+              iccid, label, enable, at: Date.now(), step: "", busy: false, failed: false,
+              claim: "没有发出", seen: null, seenText: "卡没有被碰过", verdict: "refused",
+              verdictText: "已取消：一个字节都没有发出去，卡上的状态没有变。",
+            };
+            return;
+          }
+          this.esimSwitch = {
+            iccid, label, enable, at: Date.now(), step: "发送中…", busy: true, failed: false,
+            claim: "", seen: null, seenText: "", verdict: "",
+            verdictText: "还在确认 —— 结果以回读为准。",
+          };
+          // Read the property back rather than keeping the literal above:
+          // Alpine proxies an object as it is read out of the component, and
+          // mutating the raw one would render nothing.
+          const s = this.esimSwitch;
           await this.busy(button, "执行中…", async () => {
-            await this.post("/api/esim/switch", { imei: this.activeImei, iccid, enable });
-            this.out("profile " + iccid + (enable ? " 已启用" : " 已停用"), "out-meta");
-            setTimeout(() => { this.load().catch(() => {}); }, 8000);
+            try {
+              await this.post("/api/esim/switch", { imei: this.activeImei, iccid, enable });
+              s.claim = "ok";
+            } catch (error) {
+              s.failed = true;
+              s.claim = "失败：" + reason(error);
+            }
+            // Both answers land here, and for the same reason: this endpoint
+            // has returned ok on a switch that never happened and an error on
+            // one that did. Either way the next step is the card.
+            await this.settle(s);
+            s.step = "回读 /api/esim…";
+            try {
+              judgeSwitch(s, await this.readProfiles());
+            } catch (error) {
+              // The third outcome, and it is not "failed": nobody knows.
+              s.step = "";
+              s.busy = false;
+              s.verdict = "unknown";
+              s.seenText = "回读失败";
+              s.verdictText = "无法确认：回读 /api/esim 失败（" + reason(error)
+                + "）。卡是什么状态不知道 —— 面板不会拿端点的答复来顶替。";
+            }
+            this.out("切换 " + iccid + "：" + s.verdictText,
+              s.verdict === "match" ? "out-meta" : "out-warn");
+            // The fleet view is refreshed on the same beat the pre-refactor
+            // panel used, so the chips stop describing the old network.
+            this.load().catch(() => {});
           });
+        },
+
+        /* The card is not back the moment the command returns — the REFRESH
+           the switch asks for is what takes the time, and a read taken during
+           it reports the state being left. Counted down on screen rather than
+           spent looking hung. */
+        async settle(state) {
+          const until = Date.now() + ESIM_SETTLE;
+          for (;;) {
+            const left = until - Date.now();
+            if (left <= 0) break;
+            state.step = "等卡片 REFRESH… " + Math.ceil(left / 1000) + " 秒";
+            await new Promise((done) => setTimeout(done, 250));
+          }
         },
 
         async runScan(button) {

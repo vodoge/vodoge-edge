@@ -151,19 +151,21 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
 /// A placeholder that just says "coming soon" is how a migration loses a
 /// feature without anybody noticing it went.
 ///
-/// T004 is absent from this list because the console tab has had its card. A
-/// note left behind after the work is done is worse than no note: it tells the
-/// next reader that a finished surface is still a stub.
+/// T004 and T005 are absent from this list because the console and eSIM tabs
+/// have had their cards. A note left behind after the work is done is worse
+/// than no note: it tells the next reader that a finished surface is a stub.
 #[tokio::test]
 async fn sections_awaiting_their_own_card_say_which_card_that_is() {
     let page = panel_page().await;
-    for card in ["T005", "T006"] {
+    for card in ["T006"] {
         assert!(page.contains(card), "no section points at {card}");
     }
-    assert!(
-        !page.contains("T004"),
-        "the console tab still calls itself unfinished"
-    );
+    for done in ["T004", "T005"] {
+        assert!(
+            !page.contains(done),
+            "a finished tab still calls itself unfinished: {done}"
+        );
+    }
 }
 
 /// Everything the console card promised, pinned to the thing that implements
@@ -359,6 +361,230 @@ async fn an_open_ussd_session_survives_a_change_of_command_mode() {
     assert!(
         !page.contains("@change=\"ussdOpen = false\""),
         "changing the command mode still forgets an open USSD session"
+    );
+}
+
+/// The text between an opening line and the first line that closes it at the
+/// indentation the closer is written at.
+///
+/// Used to ask *where inside a function* something happens. "The page contains
+/// a readback" is a much weaker statement than "the readback is reached from
+/// both branches of the send", and only the second one is the property that
+/// keeps a false success off the screen.
+fn body_of<'a>(page: &'a str, opening: &str, closing: &str) -> &'a str {
+    let start = page
+        .find(opening)
+        .unwrap_or_else(|| panic!("the page has no {opening}"));
+    let rest = &page[start + opening.len()..];
+    let end = rest
+        .find(closing)
+        .unwrap_or_else(|| panic!("{opening} is never closed by {closing}"));
+    &rest[..end]
+}
+
+/// Everything the eSIM card promised, pinned to the wiring that implements it.
+///
+/// Every marker below is required to appear **exactly once**. That is not
+/// tidiness: the console card's own negative control found three assertions
+/// that stayed green after their only call site was deleted, because the
+/// marker also matched the declaration of the thing it was checking. A marker
+/// with one occurrence cannot survive losing it.
+#[tokio::test]
+async fn the_esim_tab_has_what_switching_a_profile_needs() {
+    let page = panel_page().await;
+    for (feature, marker) in [
+        ("the tab reads the card", "const list = await this.readProfiles();"),
+        (
+            "switching asks first",
+            "if (!confirm(esimAsk(profile, enable, this.profiles, this.activeImei))) {",
+        ),
+        (
+            "refusing leaves a trace",
+            "declined.meta = \"没有发出 —— 卡没有被碰过\";",
+        ),
+        (
+            "the switch itself is unchanged",
+            "await this.post(\"/api/esim/switch\", { imei: this.activeImei, iccid, enable });",
+        ),
+        (
+            "the card is asked afterwards",
+            "judgeSwitch(s, await this.readProfiles());",
+        ),
+        (
+            "a verdict left on screen is re-decided by a fresh read",
+            "if (this.esimSwitch && this.esimSwitch.verdict !== \"refused\") judgeSwitch(this.esimSwitch, list);",
+        ),
+        (
+            "the wait before the readback is visible",
+            "state.step = \"等卡片 REFRESH… \" + Math.ceil(left / 1000) + \" 秒\";",
+        ),
+        ("a readback that fails is its own outcome", "s.verdict = \"unknown\";"),
+        (
+            "the receipt keeps the endpoint's claim apart",
+            "x-text=\"esimSwitch.claim || '还没有答复'\"",
+        ),
+        (
+            "the receipt shows what the card said",
+            "x-text=\"esimSwitch.seenText || '还没有回读'\"",
+        ),
+        ("the verdict is what gets drawn", "x-text=\"esimSwitch.verdictText\""),
+        (
+            "which profile is live is stated in words",
+            "x-text=\"liveProfile ? profileName(liveProfile) : ''\"",
+        ),
+        ("a card with nothing enabled is called out", "卡上没有任何 profile 处于启用"),
+        ("the enabled row is marked", ":class=\"p.enabled ? 'is-live' : ''\""),
+        ("the profile class is readable", "x-text=\"classLabel(p.class)\""),
+        ("the table says when it was read", "x-text=\"'回读于 ' + clock(esimReadAt)\""),
+        (
+            "the row button goes through the guarded path",
+            "@click=\"switchProfile(p.iccid, !p.enabled, $event.currentTarget)\"",
+        ),
+        (
+            "the receipt can be re-checked against the card",
+            ":disabled=\"!activeImei || esimSwitch.busy\"",
+        ),
+        ("selecting another modem drops the old verdict", "this.esimSwitch = null;"),
+    ] {
+        assert_eq!(
+            page.matches(marker).count(),
+            1,
+            "{feature}: expected exactly one occurrence of {marker}"
+        );
+    }
+}
+
+/// The switch is confirmed first, and the dialog says what it costs.
+///
+/// The consequences are not invented for the dialog; they are the repository's
+/// own words about this operation. `edge-panel/src/lib.rs`: switching "takes
+/// the modem off its current network while the card refreshes".
+/// `edge-modem/src/es10c.rs`: "Exactly one profile can be enabled", so
+/// enabling one is disabling another; and "on hardware nobody can physically
+/// reach", so there is no undoing it by hand.
+#[tokio::test]
+async fn switching_a_profile_asks_before_it_sends() {
+    let page = panel_page().await;
+    let dialog = body_of(&page, "function esimAsk(profile, enable, profiles, imei) {", "\n    }");
+    for consequence in [
+        "摘下来",
+        "REFRESH",
+        "只有一个 profile 启用",
+        "没有网络可以回去",
+        "没有人能物理接触",
+        "回读 /api/esim",
+    ] {
+        assert!(
+            dialog.contains(consequence),
+            "the confirmation never mentions {consequence}"
+        );
+    }
+
+    // And on screen before anybody clicks. A warning that only exists inside
+    // the dialog has arrived after the decision that opened it.
+    let ahead = body_of(&page, "<p class=\"esim-guard\">", "</p>");
+    for consequence in [
+        "REFRESH",
+        "同一时刻只有一个 profile 启用",
+        "没有人能物理接触",
+        "回读 /api/esim",
+    ] {
+        assert!(
+            ahead.contains(consequence),
+            "the tab does not say {consequence} until the dialog is already open"
+        );
+    }
+}
+
+/// What is on the card decides what the panel says, in both directions.
+///
+/// `/api/esim/switch` has been measured wrong both ways on this fleet: it
+/// returned `ok` for a switch that had not happened — `/api/esim` still showed
+/// the profile disabled — and it has also reported a failure for one that had.
+/// An endpoint that is wrong in both directions confirms nothing, so a
+/// readback reached only from the success branch would still leave half of it
+/// unchecked. This asserts the order, not merely the presence.
+#[tokio::test]
+async fn a_switch_is_reported_from_the_card_and_not_from_the_endpoint() {
+    let page = panel_page().await;
+    let body = body_of(
+        &page,
+        "async switchProfile(iccid, enable, button) {",
+        "\n        },",
+    );
+
+    let sent = body
+        .find("this.post(\"/api/esim/switch\"")
+        .expect("the switch is never sent");
+    let claimed_ok = body
+        .find("s.claim = \"ok\";")
+        .expect("an ok answer is not recorded");
+    let claimed_failure = body
+        .find("s.failed = true;")
+        .expect("an error answer is not recorded");
+    let read_back = body
+        .find("judgeSwitch(s, await this.readProfiles());")
+        .expect("the switch never reads the card back");
+
+    assert!(sent < read_back, "the card is read before the switch is sent");
+    assert!(
+        claimed_ok < read_back,
+        "the readback does not follow an ok answer"
+    );
+    assert!(
+        claimed_failure < read_back,
+        "the readback does not follow an error answer"
+    );
+
+    // Nothing may announce an outcome in the stretch that only knows the POST
+    // came back. This is the pre-refactor panel's exact mistake.
+    let between = &body[sent..read_back];
+    for claim in ["已启用", "已停用", "已生效", "切换成功", "已切换"] {
+        assert!(
+            !between.contains(claim),
+            "the panel announces {claim} before it has read the card"
+        );
+    }
+    assert!(
+        !page.contains("(enable ? \" 已启用\" : \" 已停用\")"),
+        "the pre-refactor line that printed the outcome from the POST is back"
+    );
+
+    // The verdict is judgeSwitch's to write. The one exception is the case
+    // where the card could not be reached at all, which is neither success nor
+    // failure and is reported as neither.
+    assert!(
+        !body.contains("s.verdict = \"match\""),
+        "the switch decides success without asking the card"
+    );
+    assert!(
+        !body.contains("s.verdict = \"mismatch\""),
+        "the switch decides failure without asking the card"
+    );
+}
+
+/// The verdict is a function of the profile list and nothing else.
+#[tokio::test]
+async fn the_verdict_is_computed_from_the_profile_list_alone() {
+    let page = panel_page().await;
+    let judge = body_of(&page, "function judgeSwitch(state, profiles) {", "\n    }");
+
+    assert!(
+        judge.contains("profiles.find((p) => p.iccid === state.iccid)"),
+        "the verdict does not look the profile up in what was read back"
+    );
+    assert!(
+        judge.contains("state.seen === state.enable"),
+        "the verdict does not compare the card against what was asked for"
+    );
+    // Three outcomes, because there are three: it matches, it does not, or the
+    // profile is not in the list the card handed back at all.
+    for outcome in ["\"match\"", "\"mismatch\"", "\"missing\""] {
+        assert!(judge.contains(outcome), "the verdict cannot come out {outcome}");
+    }
+    assert!(
+        !judge.contains("claim"),
+        "the verdict reads the endpoint's answer instead of the card"
     );
 }
 
