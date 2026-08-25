@@ -10,6 +10,154 @@ use edge_store::{LocalMessage, LocalModem};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+/// Fetch the panel page the way a browser would.
+async fn panel_page() -> String {
+    let app = router(Arc::new(MemoryInbox::default()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    String::from_utf8(response.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+}
+
+/// Drop HTML comments before scanning the markup.
+///
+/// The page documents the no-external-references rule in a comment, so a
+/// scanner that reads inert text would be tripped by the rule's own
+/// description. A comment cannot load anything, which is why ignoring it
+/// costs the check nothing.
+fn markup_without_comments(page: &str) -> String {
+    let mut kept = String::with_capacity(page.len());
+    let mut rest = page;
+    while let Some(start) = rest.find("<!--") {
+        kept.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// Every `<name ...>` opening tag in the markup, as written.
+fn opening_tags<'a>(markup: &'a str, name: &str) -> Vec<&'a str> {
+    let needle = format!("<{name}");
+    let mut found = Vec::new();
+    let mut rest = markup;
+    while let Some(start) = rest.find(&needle) {
+        let tag = &rest[start..];
+        let end = tag.find('>').map(|at| at + 1).unwrap_or(tag.len());
+        found.push(&tag[..end]);
+        rest = &tag[end..];
+    }
+    found
+}
+
+/// The panel must load nothing from anywhere.
+///
+/// It is served over the site LAN to a machine that may have no route to the
+/// internet at all. A linked stylesheet or a CDN script is not a dependency
+/// here, it is an outage: the operator standing next to a wedged modem would
+/// get an unstyled page with no behaviour at exactly the moment the panel is
+/// the only tool they have. This is the assertion that keeps that true after
+/// somebody reaches for a charting library.
+#[tokio::test]
+async fn the_panel_loads_nothing_from_outside_itself() {
+    let page = panel_page().await;
+    let markup = markup_without_comments(&page).to_lowercase();
+
+    for tag in opening_tags(&markup, "script") {
+        assert!(!tag.contains("src="), "script loads something external: {tag}");
+    }
+    for tag in opening_tags(&markup, "link") {
+        assert!(
+            tag.contains("href=\"data:"),
+            "link points somewhere other than an inline data: uri: {tag}"
+        );
+    }
+    assert!(!markup.contains("@import"), "css imports another sheet");
+    assert!(!markup.contains("src=\"//"), "protocol-relative script source");
+    assert!(!markup.contains("href=\"//"), "protocol-relative link target");
+
+    // Fonts, icons and images all have to be inline too, so every url() in the
+    // stylesheets has to resolve to a data: uri.
+    let mut scanned = 0;
+    let mut rest = markup.as_str();
+    while let Some(at) = rest.find("url(") {
+        let argument = rest[at + 4..].trim_start_matches(['"', '\'']);
+        assert!(
+            argument.starts_with("data:"),
+            "stylesheet fetches something: url({}…)",
+            argument.chars().take(40).collect::<String>()
+        );
+        scanned += 1;
+        rest = &rest[at + 4..];
+    }
+    assert!(scanned > 0, "no url() found at all, so this check measured nothing");
+}
+
+/// The rule above is trivially satisfiable by shipping no framework, so this
+/// asserts the frameworks are in fact there — inlined rather than dropped.
+#[tokio::test]
+async fn the_panel_carries_its_framework_inline() {
+    let page = panel_page().await;
+    assert!(page.contains("id=\"vendor-pico\""), "no inline Pico block");
+    assert!(page.contains("Pico CSS"), "Pico's own banner is missing");
+    assert!(page.contains("--pico-background-color"), "Pico's variables are missing");
+    assert!(page.contains("id=\"vendor-alpine\""), "no inline Alpine block");
+    assert!(page.contains("_x_dataStack"), "Alpine's runtime is missing");
+    assert!(page.contains("alpine:init"), "the panel never registers its component");
+    // Alpine self-starts, so the component has to be registered before it runs.
+    let component = page.find("id=\"panel-script\"").expect("panel script");
+    let alpine = page.find("id=\"vendor-alpine\"").expect("alpine script");
+    assert!(component < alpine, "Alpine starts before the panel registers its component");
+}
+
+/// Reshaping the page must not quietly orphan an endpoint.
+///
+/// `/api/restart` is deliberately absent: it had no caller in the panel before
+/// this layout either, so wiring one would be adding an action rather than
+/// moving one. It is reported rather than invented here.
+#[tokio::test]
+async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
+    let page = panel_page().await;
+    for endpoint in [
+        "/api/status",
+        "/api/logs",
+        "/api/messages",
+        "/api/send",
+        "/api/at",
+        "/api/report",
+        "/api/esim",
+        "/api/esim/switch",
+        "/api/scan",
+        "/api/ussd",
+        "/api/ussd/cancel",
+        "/api/radio",
+        "/api/usb-reset",
+    ] {
+        assert!(page.contains(endpoint), "nothing on the page calls {endpoint}");
+    }
+}
+
+/// A section that has not been restyled yet has to say which card restyles it.
+/// A placeholder that just says "coming soon" is how a migration loses a
+/// feature without anybody noticing it went.
+#[tokio::test]
+async fn sections_awaiting_their_own_card_say_which_card_that_is() {
+    let page = panel_page().await;
+    for card in ["T004", "T005", "T006"] {
+        assert!(page.contains(card), "no section points at {card}");
+    }
+}
+
 #[tokio::test]
 async fn panel_serves_embedded_html_and_local_json() {
     let inbox = Arc::new(MemoryInbox {
@@ -54,7 +202,7 @@ async fn panel_serves_embedded_html_and_local_json() {
     assert!(page.contains("/api/messages"));
     assert!(page.contains("/api/status"));
     assert!(page.contains("/api/at"));
-    assert!(page.contains("id=\"console-out\""));
+    assert!(page.contains("x-ref=\"cmd\""));
     assert!(page.contains("/api/report"));
     assert!(page.contains("/api/logs"));
 
