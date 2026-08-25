@@ -482,30 +482,100 @@
 
     /* ── Log column ──────────────────────────────────────────────────────
        This is the column the operator actually watches, so it is permanent
-       and it is the one that gets the extra width. */
-    .logs { position:relative; grid-template-rows:auto auto minmax(0,1fr); }
+       and it is the one that gets the extra width. Four rows: controls,
+       facets, the honest polling readout, and the lines themselves. */
+    .logs { position:relative; grid-template-rows:auto auto auto minmax(0,1fr); }
     .logs .pane-head { flex-wrap:wrap; row-gap:var(--s1); }
+    .logs .pane-head input.field[type="search"] { flex:1 1 5rem; min-width:4rem; }
+
+    /* A poll that is working and a poll that stopped two minutes ago look
+       identical in a column of old lines, so one dot says the last request
+       came back — and flashes only when it brought something. */
+    .live { width:7px; height:7px; border-radius:50%; background:var(--fg-faint); flex:0 0 auto; }
+    .live.beat { background:var(--accent); animation:live-beat .6s ease-out; }
+    .live.off { background:var(--bad); }
+    @keyframes live-beat {
+      from { box-shadow:0 0 0 0 var(--accent); }
+      to { box-shadow:0 0 0 6px transparent; }
+    }
+
+    /* Every pixel this row costs is a log line the operator does not see, so
+       it is sized down to what the controls actually need. */
+    .log-facets {
+      display:flex; align-items:center; gap:3px; flex-wrap:wrap; row-gap:3px;
+      padding:3px var(--s2); border-bottom:1px solid var(--line); background:var(--surface);
+    }
+    .log-facets select.field { height:1.35rem; font-size:10px; padding:0 1.15rem 0 3px; max-width:5rem; }
+    .log-facets .btn { min-height:1.35rem; font-size:10px; padding:0 4px; }
+
+    /* Level chips carry their own count, which is what turns "colour the
+       lines" into something an operator can act on: 3 errors in 500 lines is
+       visible before any of them has scrolled past. */
+    .lvl-chip {
+      font:inherit; font-size:10px; font-weight:600; line-height:1; width:auto;
+      min-height:1.35rem; padding:0 4px; box-shadow:none; cursor:pointer;
+      display:inline-flex; align-items:center; gap:3px; white-space:nowrap;
+      border-radius:var(--radius); border:1px solid var(--line-strong);
+      background:transparent; color:var(--fg-faint);
+    }
+    .lvl-chip b { font-family:var(--font-mono); font-weight:700; }
+    /* An excluded level is struck through rather than merely dimmed: three
+       quiet chips and three switched-off chips otherwise look the same. */
+    .lvl-chip:not(.on) { opacity:.55; text-decoration:line-through; }
+    .lvl-chip.err.on { color:var(--bad); border-color:color-mix(in srgb, var(--bad) 45%, transparent); background:var(--bad-wash); }
+    .lvl-chip.warn.on { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 45%, transparent); background:var(--warn-wash); }
+    .lvl-chip.info.on { color:var(--fg-muted); border-color:var(--line-strong); background:var(--surface-hover); }
+
     .log-meta {
-      display:flex; align-items:center; gap:var(--s2); flex-wrap:wrap;
-      padding:2px var(--s3); border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:var(--s1); flex-wrap:wrap; row-gap:2px;
+      padding:2px var(--s2); border-bottom:1px solid var(--line);
       background:var(--surface); color:var(--fg-faint); font-size:10px;
     }
     .log-meta .warn { color:var(--warn); }
     .log-meta .bad { color:var(--bad); }
+    .log-meta .btn { min-height:1.15rem; font-size:10px; padding:0 4px; }
+    /* Kept together and pushed right as one unit, so the second button does not
+       wrap onto a line of its own and cost a log line for nothing. */
+    .log-meta .meta-acts { display:inline-flex; gap:3px; margin-left:auto; flex:0 0 auto; }
     .log-pane {
       overflow:auto; padding:var(--s1) var(--s2); display:block;
       font-family:var(--font-mono); font-size:var(--text-xs); line-height:1.5;
       overflow-anchor:none;
     }
     .log-pane:empty::before { content:attr(data-empty); color:var(--fg-faint); }
-    .log-row { display:flex; gap:var(--s2); padding:1px 0; border-radius:3px; }
+    .log-row {
+      display:flex; gap:var(--s2); padding:1px 0 1px var(--s1); border-radius:3px;
+      border-left:2px solid transparent;
+    }
     .log-row:hover { background:var(--surface-hover); }
     .log-row time { color:var(--fg-faint); flex:0 0 auto; -webkit-user-select:all; user-select:all; }
-    .log-row .log-text { white-space:pre-wrap; word-break:break-word; min-width:0; }
+    .log-row .log-text { white-space:pre-wrap; word-break:break-word; min-width:0; flex:1 1 auto; }
+    /* Colour and a left rule, not colour alone: the stripe survives being
+       skimmed at arm's length, which is how this column is usually read. */
+    .log-row.lvl-err { border-left-color:var(--bad); }
+    .log-row.lvl-warn { border-left-color:var(--warn); }
     .log-row.lvl-err .log-text { color:var(--bad); }
     .log-row.lvl-warn .log-text { color:var(--warn); }
     .log-row.lvl-info .log-text { color:var(--fg-muted); }
-    .log-row.is-hit { background:var(--accent-wash); }
+    .log-row mark { background:var(--accent-wash); color:var(--accent); border-radius:2px; padding:0 1px; }
+    .log-row.is-cursor { background:var(--accent-wash); outline:1px solid var(--accent); }
+    /* The heartbeat is not news. Flashing every arrival would mean this column
+       blinks 18 times a minute on a fleet where nothing is wrong, so only the
+       lines that are not the routine poll get the flash, tinted by level. */
+    .log-row.is-new { animation:log-arrive 1.4s ease-out; }
+    .log-row.is-new.lvl-warn { animation-name:log-arrive-warn; }
+    .log-row.is-new.lvl-err { animation-name:log-arrive-err; }
+    @keyframes log-arrive { from { background:var(--accent-wash); } to { background:transparent; } }
+    @keyframes log-arrive-warn { from { background:var(--warn-wash); } to { background:transparent; } }
+    @keyframes log-arrive-err { from { background:var(--bad-wash); } to { background:transparent; } }
+    .log-copy {
+      font:inherit; font-size:10px; line-height:1; width:auto; min-height:0; margin:0;
+      padding:0 4px; box-shadow:none; cursor:pointer; flex:0 0 auto; align-self:flex-start;
+      border:1px solid var(--line-strong); border-radius:4px;
+      background:var(--surface-raised); color:var(--fg-faint); visibility:hidden;
+    }
+    .log-row:hover .log-copy, .log-copy:focus-visible { visibility:visible; }
+    .log-copy:hover { color:var(--accent); border-color:var(--accent); }
     .jump {
       position:absolute; right:var(--s4); bottom:var(--s3); z-index:5;
       font:inherit; font-size:var(--text-xs); font-weight:600; width:auto;
@@ -513,6 +583,10 @@
       background:var(--accent); color:var(--accent-ink); border:0; cursor:pointer;
       box-shadow:var(--shadow-lg);
     }
+    /* Scrolled away and something went wrong is the one case where this button
+       has to be more than a count. */
+    .jump.warn { background:var(--warn); color:#33260a; }
+    .jump.bad { background:var(--bad); color:#2b0c0e; }
 
     /* ── Narrower windows ────────────────────────────────────────────────
        The three-column, never-scrolling promise holds down to 1280x720. Below
@@ -822,29 +896,85 @@
     <section class="pane logs" aria-label="运行日志">
       <div class="pane-head">
         <h2>运行日志</h2>
-        <input type="search" class="field" x-ref="logFilter" x-model="logFilter"
-               @input="rebuildLogs()" placeholder="过滤…" aria-label="过滤日志"
-               style="flex:1 1 4rem; min-width:4rem;">
-        <label class="tick"><input type="checkbox" x-model="logProblemsOnly" @change="rebuildLogs()">只看问题</label>
+        <span class="live" :class="{ beat: logBeat, off: logPollFailed }"
+              :title="logPollFailed ? '上次轮询失败' : '上次轮询有回应；有新行时闪一下'"></span>
+        <input type="search" class="field" x-ref="logFilter" x-model="logQuery"
+               @input="rebuildLogs()" @keydown.enter.prevent="stepMatch($event.shiftKey ? -1 : 1)"
+               placeholder="搜索…" aria-label="搜索日志"
+               title="Enter 跳到下一处命中，Shift+Enter 上一处。f 聚焦，Esc 清空全部条件。">
+        <button type="button" class="btn" :class="{ on: logRegex }"
+                @click="logRegex = !logRegex; rebuildLogs()"
+                title="把搜索词当正则表达式（语法错时不静默失败，会说「正则语法错误」）">.*</button>
+        <button type="button" class="btn" :class="{ on: logOnlyHits }"
+                @click="logOnlyHits = !logOnlyHits; rebuildLogs()"
+                title="开：只留下命中的行。关：全部留着，命中处高亮，Enter 逐个跳 —— 因为一条错误行的上下文往往才是要看的东西。">仅命中</button>
         <button type="button" class="btn" :class="{ on: logPaused }" @click="togglePause()"
+                title="冻结的是这一栏的视图，不是轮询：停轮询会让服务端那个 500 行的环在没人读的时候滚掉。（键 p）"
                 x-text="logPaused ? '继续' : '暂停'"></button>
-        <button type="button" class="btn" @click="clearLogs()">清空</button>
         <button type="button" class="btn" :class="{ on: logWide }" @click="logWide = !logWide"
                 x-text="logWide ? '窄' : '宽'"></button>
       </div>
 
-      <div class="log-meta">
-        <span x-text="'每 ' + Math.round(LOG_EVERY / 1000) + 's 轮询'"></span>
-        <span :class="{ bad: logPollFailed }" x-text="logPollFailed ? '上次轮询失败' : ('上次 ' + since(lastLogPollAt))"></span>
-        <span x-text="'显示 ' + logShown + ' / 保留 ' + logKept + ' 条（上限 ' + LOG_MAX + '）'"></span>
-        <span class="warn" x-show="logPaused" x-text="'已暂停 · 缓冲 ' + logHeld + ' 条'"></span>
-        <span class="warn" x-show="logDropped > 0" x-text="'已丢弃最旧 ' + logDropped + ' 条'"></span>
+      <div class="log-facets">
+        <template x-for="level in LOG_LEVELS" :key="level.key">
+          <button type="button" class="lvl-chip" :class="level.key + (logLevels[level.key] ? ' on' : '')"
+                  @click="logLevels[level.key] = !logLevels[level.key]; rebuildLogs()"
+                  :title="level.hint + '　⚠️ /api/logs 只给 {seq, at, text}，没有级别字段，所以级别是从行文推断的，不是服务端标的。'">
+            <span x-text="level.label"></span><b x-text="logCounts[level.key]"></b>
+          </button>
+        </template>
+
+        <select class="field" x-model="logImei" @change="rebuildLogs()" aria-label="按模组过滤"
+                title="按模组过滤。写了 imei= 的行直接归属；只写了 /dev/… 的行按最近一次成功轮询学到的「端口→模组」对应关系归属。">
+          <option value="">全部模组</option>
+          <template x-for="option in logImeiOptions" :key="option.value">
+            <option :value="option.value" x-text="option.label"></option>
+          </template>
+        </select>
+
+        <select class="field" x-model="logTopic" @change="rebuildLogs()" aria-label="按来源过滤"
+                title="按来源（子系统）过滤。⚠️ 日志里没有 /api 端点字段 —— 面板的 HTTP 处理器一行都不写日志，所以这里给的是行文里那个子系统，不是 HTTP 端点。">
+          <option value="">全部来源</option>
+          <template x-for="option in logTopicOptions" :key="option.value">
+            <option :value="option.value" x-text="option.label"></option>
+          </template>
+        </select>
+
+        <button type="button" class="btn" :class="{ on: logQuiet }"
+                @click="logQuiet = !logQuiet; rebuildLogs()"
+                title="隐藏 poll /dev/… ok 这种例行心跳。本机实测：一切正常时服务端那个 500 行的环里，500 行全是它。">静音</button>
       </div>
 
-      <div class="log-pane" x-ref="logPane" data-empty="等待日志…" @scroll="onLogScroll()"></div>
+      <div class="log-meta"
+           :title="'游标轮询：每 ' + Math.round(LOG_EVERY / 1000) + ' 秒问一次 /api/logs?after=（上次游标）。不是推送流，也不是 tail —— 所以上次刷新时间写在这里。\n保留 ' + LOG_KEEP + ' 行（约 4 小时 40 分，本机实测 17.7 行/分），最多绘制 ' + LOG_RENDER + ' 行；搜索走的是全部保留行，所以它能够到这一栏已经滚不到的地方。'">
+        <span x-text="Math.round(LOG_EVERY / 1000) + 's 轮询'"></span>
+        <span :class="{ bad: logPollFailed, warn: !logPollFailed && logPollLate }"
+              x-text="logPollFailed ? '上次轮询失败' : (lastLogPollAt ? '刷新于 ' + clock(lastLogPollAt) : '还没有拿到日志')"></span>
+        <span x-text="'显示 ' + logShown + ' / 保留 ' + logKept + '（上限 ' + LOG_KEEP + '）'"></span>
+        <span x-show="logKept > 0" x-text="'自 ' + clock(logOldestAt)"></span>
+        <span class="warn" x-show="logPaused" x-text="'已暂停 · 缓冲 ' + logHeld + ' 条'"></span>
+        <span class="warn" x-show="logDropped > 0" x-text="'已丢弃最旧 ' + logDropped + ' 条'"></span>
+        <span class="warn" x-show="logHidden > 0" x-text="'新行被过滤掉 ' + logHidden + ' 条'"></span>
+        <span class="bad" x-show="logQueryBad">正则语法错误</span>
+        <span x-show="logQuery.trim() !== '' && !logQueryBad"
+              x-text="!logHits ? '无命中' : (logHitAt >= 0 ? '命中 ' + (logHitAt + 1) + '/' + logHitsDrawn : '命中 ' + logHits + ' 处')"></span>
+        <span class="warn" x-show="logHits > logHitsDrawn"
+              x-text="'另有 ' + (logHits - logHitsDrawn) + ' 处在已绘制的 ' + LOG_RENDER + ' 行之外 —— 开「仅命中」'"></span>
+        <span class="meta-acts">
+          <button type="button" class="btn" @click="copyVisible()"
+                  title="把当前可见的行连时间戳一起复制走"
+                  x-text="logCopyNote || '复制可见'"></button>
+          <button type="button" class="btn" @click="clearLogs()"
+                  title="丢掉这一栏已经收到的行（不影响服务端那个 500 行的环）">清空</button>
+        </span>
+      </div>
+
+      <div class="log-pane" x-ref="logPane" data-empty="等待日志…"
+           @scroll="onLogScroll()" @click="onLogClick($event)"></div>
 
       <button type="button" class="jump" x-show="!logFollow" @click="jumpToLatest()"
-              x-text="logNew ? logNew + ' 条新日志 ↓' : '回到最新 ↓'"></button>
+              :class="{ bad: logNewErr > 0, warn: logNewErr === 0 && logNewWarn > 0 }"
+              x-text="logNew ? logNew + ' 条新日志' + (logNewErr ? ' · ' + logNewErr + ' 错' : (logNewWarn ? ' · ' + logNewWarn + ' 警' : '')) + ' ↓' : '回到最新 ↓'"></button>
     </section>
 
   </main>
@@ -875,24 +1005,158 @@
     const STATUS_EVERY = 10_000;
     const LOG_EVERY = 2_000;
 
-    /* Retained log lines. The server ring holds 500; a panel left open all day
-       accumulates past that, and an unbounded list is how a debugging session
-       ends with a browser tab using a gigabyte. 2000 rows is roughly an hour
-       of the poll loop at its current rate and stays responsive to filter. */
-    const LOG_MAX = 2000;
+    /* ── How much of the stream this column keeps ─────────────────────────
+       Measured on this fleet rather than guessed: with nothing wrong the
+       daemon prints 17.7 lines a minute (500 consecutive lines spanned
+       1694 s). So the server's own ring is a 28-minute window, and once the
+       panel has been open longer than that its buffer is the only longer
+       history that exists anywhere — closing the tab really does lose it.
 
-    /* Log data lives outside Alpine's reactive graph on purpose: proxying two
+       The two numbers are deliberately different, because the two costs are.
+       A retained line is a small object (~250 B with the derived fields), so
+       5000 of them is about 1.2 MB — four and three quarter hours of this
+       stream, for memory no browser notices. A *drawn* line is four DOM nodes
+       plus layout, and that is the thing that makes a tab crawl, so the
+       painted list is capped much lower and independently.
+
+       Keeping them apart is the point rather than an accident: a search runs
+       over all 5000 retained lines, so it reaches hours further back than the
+       2000 rows the column can scroll through. Eviction is reported ("已丢弃
+       最旧 N 条") instead of being swallowed. */
+    const LOG_KEEP = 5000;
+    const LOG_RENDER = 2000;
+
+    /* Log data lives outside Alpine's reactive graph on purpose: proxying five
        thousand objects and re-diffing them every two seconds is the one thing
        that would make this column stutter. Alpine owns the controls; the rows
-       are appended by hand. */
-    const LOG = { lines: [], cursor: 0, held: [], dropped: 0 };
+       are appended by hand.
+
+       `ports` is learned, not configured: a successful poll line names both a
+       device path and an IMEI, which is the only place the two are ever tied
+       together, so later lines that mention only the path can still be
+       attributed to a module. */
+    const LOG = { lines: [], cursor: 0, held: [], dropped: 0, ports: Object.create(null) };
+
+    /* IMEIs the fleet actually has, so a bare 15-digit run in a line is only
+       read as a module when it is one of ours. */
+    const KNOWN_IMEI = new Set();
+
+    /* The compiled search term. `QUERY` is global and walks the string to place
+       every <mark>; `QUERY_ONE` is the same pattern without /g, because a
+       global regex keeps `lastIndex` between calls and reusing it to decide
+       whether a row matches would drop every second row. */
+    let QUERY = null;
+    let QUERY_ONE = null;
 
     const EMPTY_PROBE = Object.freeze({ cfun: "", cpin: "", pending: false, at: 0 });
 
+    /* ── The log column's inference layer ─────────────────────────────────
+       `/api/logs` serves exactly `{seq, at, text}`. logs.rs keeps no level, no
+       module and no endpoint, `log_line` and `log_error` push into the same
+       ring with the distinction dropped, and this card is not allowed to
+       change that. Everything below is therefore read back out of the line's
+       own text, and it is labelled as inferred in the UI rather than passed
+       off as something the server said.
+
+       The patterns are not invented. They are the strings edge-bin actually
+       prints, checked against fourteen days of this machine's journal (475
+       distinct line shapes). Where the corpus disagreed with the obvious
+       reading, the corpus won: "N sms fragment(s) awaiting the rest" reads
+       like trouble and is the ordinary multipart path — 6830 of them — so it
+       stays info, and a column that flagged it would cry wolf all day. */
+    const LEVEL_RULES = [
+      /* Ordered first on purpose: a line that says it carried on with a
+         substitute is a warning even though something inside it failed.
+         "EF_AD …: QMI request rejected; assuming a 2-digit MNC" would
+         otherwise be red on the strength of "rejected", and an operator
+         chasing red would spend the trip finding out the daemon had already
+         handled it. Kept to the two phrasings that actually mean recovered —
+         "retrying" is deliberately not here, because a FAIL that will be
+         retried is still a FAIL. */
+      [/\bassuming\b|\bfalling back\b/i, "warn"],
+      /* A whole line handed up as a failure. The healthy poll line is
+         "poll /dev/... ok" and never "poll: ...", so anchoring on the colon
+         tells the two apart without having to guess at the tail, which is an
+         arbitrary error string. */
+      [/^(?:poll|uplink|panel|command|proxy traffic)\s*:/i, "err"],
+      [/\bfail|\berror\b|\bpanic|\brefus|\bdenied\b|\brejected\b|\binvalid\b|\bunavailable\b|\bunreachable\b|\bunrecognised\b|\bundecodable\b|\bunidentified\b|\bsilent\b|\babsent\b|\bnever delivered\b|\bno recipient\b|\bno such\b|\bcannot\b|\bnot (?:hex|numeric|deleted|recorded|started)\b/i, "err"],
+      /* Working, but not the way it is supposed to: "at-only" is a module
+         that answered over serial after QMI did not, and a usb recovery is
+         the daemon having just power-cycled a port under the operator. */
+      [/\bat-only\b|^usb recovery\b|\bassuming\b|\breplaced by\b|\breconnecting\b|\bbusy\b|\bwarn|\bretry|\btimed? ?out\b|\bstale\b|\bskipped\b|\bdegrad|\bmissing\b/i, "warn"],
+    ];
+
+    /* Source, in the sense the daemon means it. ⚠️ Not an HTTP endpoint: the
+       panel's own handlers in lib.rs log nothing at all, so which /api route
+       was called is simply not in this data and is not faked here. */
+    const TOPIC_RULES = [
+      [/^poll\b/i, "poll"],
+      [/^status report\b/i, "report"],
+      [/\bsms\b/i, "sms"],
+      [/^uplink\b/i, "uplink"],
+      [/^usb\b/i, "usb"],
+      [/^restart\b/i, "restart"],
+      [/^at lease\b|^at\+/i, "at"],
+      [/^(?:iccid|ef_ad|family)\b/i, "modem"],
+      [/^(?:vodoge-edge )?panel\b/i, "panel"],
+      [/^proxy\b/i, "proxy"],
+      [/^command\b/i, "command"],
+    ];
+
+    const TOPIC_LABEL = {
+      poll: "轮询", report: "投递报告", sms: "短信", uplink: "上行", usb: "USB",
+      restart: "重启", at: "AT", modem: "模组识别", panel: "面板", proxy: "代理",
+      command: "云端命令", other: "其他",
+    };
+    const TOPIC_ORDER = Object.keys(TOPIC_LABEL);
+
+    const LOG_LEVELS = [
+      { key: "err", label: "错", hint: "失败：daemon 明说这一步没成。" },
+      { key: "warn", label: "警", hint: "降级：跑通了，但不是该有的样子。" },
+      { key: "info", label: "信", hint: "常规：包括每 10 秒三条的轮询心跳。" },
+    ];
+
+    /* The routine success heartbeat. Worth naming because it is not a small
+       share of the stream — it is very nearly all of it.
+
+       Only the "ok" form. The sibling line ends "at-only", which is a module
+       that answered over serial after QMI did not; folding that in would mean
+       "静音心跳" quietly hid a degraded module, which is the one thing an
+       operator turned it on to find. */
+    const HEARTBEAT = /^poll \/dev\/\S+ imei=\d+ ok$/i;
+
+    const DEV_PATH = /\/dev\/[A-Za-z0-9._-]+/;
+    const TAGGED_IMEI = /\bimei=(\d{15})\b/i;
+    const BARE_IMEI = /\b\d{15}\b/g;
+
     function levelOf(text) {
-      if (/fail|failed|error|panic|refus|denied|unavailable|unreachable|reject|cannot|no such/i.test(text)) return "err";
-      if (/warn|retry|retrying|timeout|timed out|stale|busy|skipp?|degrad|missing/i.test(text)) return "warn";
+      for (const [pattern, level] of LEVEL_RULES) {
+        if (pattern.test(text)) return level;
+      }
       return "info";
+    }
+
+    function topicOf(text) {
+      for (const [pattern, topic] of TOPIC_RULES) {
+        if (pattern.test(text)) return topic;
+      }
+      return "other";
+    }
+
+    /* Everything the column can tell about a line, worked out once on arrival
+       rather than on every filter change. */
+    function classify(line) {
+      const text = line.text || "";
+      line.level = levelOf(text);
+      line.topic = topicOf(text);
+      line.beat = HEARTBEAT.test(text);
+      const tagged = TAGGED_IMEI.exec(text);
+      line.imei = tagged ? tagged[1] : "";
+      line.nums = line.imei ? [] : (text.match(BARE_IMEI) || []);
+      const path = DEV_PATH.exec(text);
+      line.port = path ? path[0] : "";
+      if (line.imei && line.port) LOG.ports[line.port] = line.imei;
+      return line;
     }
 
     function clock(ms) {
@@ -936,7 +1200,7 @@
 
     document.addEventListener("alpine:init", () => {
       Alpine.data("panel", () => ({
-        QUICK, STATUS_EVERY, LOG_EVERY, LOG_MAX,
+        QUICK, STATUS_EVERY, LOG_EVERY, LOG_KEEP, LOG_RENDER, LOG_LEVELS,
 
         /* ---- fleet ---- */
         mode: "local",
@@ -976,16 +1240,34 @@
         radioOnline: true,
 
         /* ---- log column ---- */
-        logFilter: "",
-        logProblemsOnly: false,
+        logQuery: "",
+        logRegex: false,
+        logOnlyHits: false,
+        logLevels: { err: true, warn: true, info: true },
+        logCounts: { err: 0, warn: 0, info: 0 },
+        logImei: "",
+        logTopic: "",
+        logQuiet: false,
+        logImeiOptions: [],
+        logTopicOptions: [],
         logPaused: false,
         logFollow: true,
         logWide: false,
         logNew: 0,
+        logNewErr: 0,
+        logNewWarn: 0,
         logHeld: 0,
         logShown: 0,
         logKept: 0,
         logDropped: 0,
+        logHidden: 0,
+        logHits: 0,
+        logHitsDrawn: 0,
+        logHitAt: -1,
+        logQueryBad: false,
+        logOldestAt: 0,
+        logBeat: false,
+        logCopyNote: "",
         logPollFailed: false,
         lastLogPollAt: 0,
 
@@ -1003,7 +1285,14 @@
 
         shortImei(imei) { return imei ? "…" + String(imei).slice(-6) : "—"; },
         stamp,
+        clock,
         since(ms) { return ago(ms, this.now); },
+
+        /* Three missed intervals is long enough that "上次刷新" has stopped
+           being reassuring and started being the thing to look at. */
+        get logPollLate() {
+          return this.lastLogPollAt > 0 && this.now - this.lastLogPollAt > LOG_EVERY * 3;
+        },
         stateKey(state) { return String(state || "").toLowerCase().replace(/[^a-z]/g, ""); },
         stateTone(state) { return STATE_TONE[this.stateKey(state)] || "idle"; },
         stateLabel(state) { return STATE_LABEL[this.stateKey(state)] || state || "未知"; },
@@ -1087,6 +1376,9 @@
               if (!this.probes[modem.imei]) {
                 this.probes[modem.imei] = { cfun: "", cpin: "", pending: false, at: 0 };
               }
+              // The log column reads bare 15-digit runs as a module only when
+              // the fleet says they are one; an IMSI is 15 digits too.
+              KNOWN_IMEI.add(modem.imei);
             }
             // A modem that was unplugged stops being a valid target; keeping it
             // selected would aim every action at something that is not there.
@@ -1280,23 +1572,92 @@
 
         /* ══ log column ═══════════════════════════════════════════════════ */
 
+        /* Which module a line is about. Resolved on demand rather than frozen
+           at arrival, because the path→IMEI map is learned as the stream goes
+           by: a line that could not be attributed at 09:00 becomes attributable
+           the moment the next successful poll names that port. */
+        imeiOf(line) {
+          if (line.imei) return line.imei;
+          for (const number of line.nums) {
+            if (KNOWN_IMEI.has(number)) return number;
+          }
+          return LOG.ports[line.port] || "";
+        },
+
+        /* The search term, compiled once per rebuild instead of once per row.
+           Two objects, because a /g regex carries lastIndex between calls and
+           testing with the same one that marks would skip every other row. */
+        compileQuery() {
+          const raw = this.logQuery.trim();
+          this.logQueryBad = false;
+          if (!raw) { QUERY = null; QUERY_ONE = null; return; }
+          const source = this.logRegex ? raw : raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          try {
+            QUERY = new RegExp(source, "gi");
+            QUERY_ONE = new RegExp(source, "i");
+          } catch {
+            // A half-typed regex is the normal state of the box while typing,
+            // so it says so and keeps showing everything rather than blanking.
+            QUERY = null;
+            QUERY_ONE = null;
+            this.logQueryBad = true;
+          }
+        },
+
         matches(line) {
-          if (this.logProblemsOnly && line.level === "info") return false;
-          const needle = this.logFilter.trim().toLowerCase();
-          if (!needle) return true;
-          return line.text.toLowerCase().includes(needle);
+          if (!this.logLevels[line.level]) return false;
+          if (this.logQuiet && line.beat) return false;
+          if (this.logTopic && line.topic !== this.logTopic) return false;
+          if (this.logImei) {
+            const imei = this.imeiOf(line);
+            if (this.logImei === "none" ? imei !== "" : imei !== this.logImei) return false;
+          }
+          if (this.logOnlyHits && QUERY_ONE && !QUERY_ONE.test(line.text)) return false;
+          return true;
         },
 
         rowFor(line) {
           const row = document.createElement("div");
           row.className = "log-row lvl-" + line.level;
+          row.dataset.seq = line.seq;
           const at = document.createElement("time");
           at.textContent = clock(line.at);
           const text = document.createElement("span");
           text.className = "log-text";
-          text.textContent = line.text;
-          row.append(at, text);
+          if (this.markInto(text, line.text)) row.dataset.hit = "1";
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "log-copy";
+          copy.textContent = "复制";
+          copy.title = "复制这一行（带时间戳）";
+          row.append(at, text, copy);
           return row;
+        },
+
+        /* textContent for everything, <mark> around the hits. Never innerHTML:
+           a log line is whatever a modem, an operator or a remote peer put
+           there, and one `<img onerror>` in an SMS sender field would be
+           enough. */
+        markInto(span, text) {
+          if (!QUERY) { span.textContent = text; return false; }
+          QUERY.lastIndex = 0;
+          let from = 0;
+          let hit = false;
+          let guard = 0;
+          let found;
+          while ((found = QUERY.exec(text)) !== null && guard < 40) {
+            guard += 1;
+            if (found.index > from) span.append(text.slice(from, found.index));
+            const mark = document.createElement("mark");
+            mark.textContent = found[0];
+            span.append(mark);
+            from = found.index + found[0].length;
+            hit = true;
+            // A pattern that can match nothing at all would otherwise spin.
+            if (found[0] === "") QUERY.lastIndex += 1;
+          }
+          span.append(text.slice(from));
+          return hit;
         },
 
         appendRows(lines) {
@@ -1304,15 +1665,27 @@
           if (!pane) return;
           const batch = document.createDocumentFragment();
           let added = 0;
+          let hidden = 0;
           for (const line of lines) {
-            if (!this.matches(line)) continue;
-            batch.append(this.rowFor(line));
+            if (!this.matches(line)) { hidden += 1; continue; }
+            const row = this.rowFor(line);
+            // Arrival is only worth flagging when it is not the heartbeat.
+            if (!line.beat) row.classList.add("is-new");
+            batch.append(row);
             added += 1;
+            if (!this.logFollow) {
+              if (line.level === "err") this.logNewErr += 1;
+              else if (line.level === "warn") this.logNewWarn += 1;
+            }
           }
+          // Lines arriving into a filter that hides them is exactly when a
+          // column looks dead, so it is counted and said out loud.
+          if (hidden) this.logHidden += hidden;
           if (!added) return;
           pane.append(batch);
-          while (pane.childElementCount > LOG_MAX) pane.removeChild(pane.firstElementChild);
+          while (pane.childElementCount > LOG_RENDER) pane.removeChild(pane.firstElementChild);
           this.logShown = pane.childElementCount;
+          this.countHits(pane);
           if (this.logFollow) this.scrollToEnd();
           else this.logNew += added;
         },
@@ -1320,13 +1693,56 @@
         rebuildLogs() {
           const pane = this.$refs.logPane;
           if (!pane) return;
-          const batch = document.createDocumentFragment();
+          this.compileQuery();
+          // The buffer holds more than the column will ever paint, so the tail
+          // is taken: the newest LOG_RENDER matches, not the oldest.
+          const keep = [];
           for (const line of LOG.lines) {
-            if (this.matches(line)) batch.append(this.rowFor(line));
+            if (this.matches(line)) keep.push(line);
           }
+          const painted = keep.length > LOG_RENDER ? keep.slice(keep.length - LOG_RENDER) : keep;
+          const batch = document.createDocumentFragment();
+          for (const line of painted) batch.append(this.rowFor(line));
           pane.replaceChildren(batch);
           this.logShown = pane.childElementCount;
+          this.logHidden = 0;
+          this.logHitAt = -1;
+          this.countHits(pane);
           if (this.logFollow) this.scrollToEnd();
+        },
+
+        /* Two numbers, because they really are different, and reporting only
+           the drawn one would be a lie in the one case that matters: the
+           buffer holds far more than the column paints, so a line from three
+           hours ago can match while not being anywhere in the DOM. Saying
+           "无命中" then would send an operator away from a hit they have. */
+        countHits(pane) {
+          if (!QUERY_ONE) { this.logHits = 0; this.logHitsDrawn = 0; this.logHitAt = -1; return; }
+          let held = 0;
+          for (const line of LOG.lines) {
+            if (QUERY_ONE.test(line.text)) held += 1;
+          }
+          this.logHits = held;
+          this.logHitsDrawn = pane.querySelectorAll('.log-row[data-hit="1"]').length;
+          if (this.logHitAt >= this.logHitsDrawn) this.logHitAt = this.logHitsDrawn - 1;
+        },
+
+        /* Walk the hits without hiding their surroundings. The reason the
+           column has both a filter and a search is that the line before an
+           error is usually the one that explains it. */
+        stepMatch(direction) {
+          const pane = this.$refs.logPane;
+          if (!pane) return;
+          const hits = pane.querySelectorAll('.log-row[data-hit="1"]');
+          this.logHitsDrawn = hits.length;
+          if (!hits.length) { this.logHitAt = -1; return; }
+          const next = (this.logHitAt + direction + hits.length * 2) % hits.length;
+          this.logHitAt = next;
+          for (const row of pane.querySelectorAll(".log-row.is-cursor")) row.classList.remove("is-cursor");
+          const row = hits[next];
+          row.classList.add("is-cursor");
+          this.logFollow = false;
+          row.scrollIntoView({ block: "center" });
         },
 
         scrollToEnd() {
@@ -1334,6 +1750,8 @@
           if (!pane) return;
           pane.scrollTop = pane.scrollHeight;
           this.logNew = 0;
+          this.logNewErr = 0;
+          this.logNewWarn = 0;
         },
 
         onLogScroll() {
@@ -1341,12 +1759,64 @@
           if (!pane) return;
           const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
           this.logFollow = atBottom;
-          if (atBottom) this.logNew = 0;
+          if (atBottom) { this.logNew = 0; this.logNewErr = 0; this.logNewWarn = 0; }
         },
 
         jumpToLatest() {
           this.logFollow = true;
           this.scrollToEnd();
+        },
+
+        /* One delegated listener instead of one per row: at 2000 rows the
+           difference is 2000 listeners. */
+        onLogClick(event) {
+          const button = event.target.closest && event.target.closest(".log-copy");
+          if (!button) return;
+          const row = button.closest(".log-row");
+          const seq = Number(row && row.dataset.seq);
+          const line = LOG.lines.find((held) => held.seq === seq);
+          if (!line) return;
+          this.copyText(stamp(line.at) + "  " + line.text).then((ok) => {
+            button.textContent = ok ? "已复制" : "复制失败";
+            setTimeout(() => { button.textContent = "复制"; }, 1200);
+          });
+        },
+
+        async copyVisible() {
+          const pane = this.$refs.logPane;
+          if (!pane) return;
+          const wanted = new Set();
+          for (const row of pane.children) wanted.add(Number(row.dataset.seq));
+          const text = LOG.lines
+            .filter((line) => wanted.has(line.seq))
+            .map((line) => stamp(line.at) + "  " + line.text)
+            .join("\n");
+          const ok = await this.copyText(text);
+          this.logCopyNote = ok ? "已复制 " + wanted.size + " 行" : "复制失败";
+          setTimeout(() => { this.logCopyNote = ""; }, 1600);
+        },
+
+        /* The panel is reached at http://<lan-ip>:8743 far more often than at
+           localhost, and that is not a secure context, so navigator.clipboard
+           is simply absent there. The old execCommand path is not a legacy
+           nicety here, it is the one that actually runs on site. */
+        async copyText(value) {
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(value);
+              return true;
+            }
+          } catch { /* fall through to the selection-based copy below */ }
+          const holder = document.createElement("textarea");
+          holder.value = value;
+          holder.setAttribute("readonly", "");
+          holder.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+          document.body.append(holder);
+          holder.select();
+          let copied = false;
+          try { copied = document.execCommand("copy"); } catch { copied = false; }
+          holder.remove();
+          return copied;
         },
 
         /* Pausing freezes the view, not the poll. Stopping the poll would let
@@ -1363,6 +1833,7 @@
           this.trim();
           this.appendRows(flush);
           this.logKept = LOG.lines.length;
+          this.recount();
         },
 
         clearLogs() {
@@ -1372,24 +1843,91 @@
           this.logHeld = 0;
           this.logKept = 0;
           this.logDropped = 0;
+          this.logHidden = 0;
           this.logNew = 0;
+          this.logNewErr = 0;
+          this.logNewWarn = 0;
           this.logFollow = true;
           const pane = this.$refs.logPane;
           if (pane) pane.replaceChildren();
           this.logShown = 0;
+          this.recount();
+        },
+
+        anyLogFilter() {
+          return this.logQuery !== "" || this.logQuiet || this.logImei !== "" ||
+            this.logTopic !== "" || this.logOnlyHits ||
+            !(this.logLevels.err && this.logLevels.warn && this.logLevels.info);
+        },
+
+        resetLogFilters() {
+          this.logQuery = "";
+          this.logRegex = false;
+          this.logOnlyHits = false;
+          this.logQuiet = false;
+          this.logImei = "";
+          this.logTopic = "";
+          this.logLevels = { err: true, warn: true, info: true };
+          this.rebuildLogs();
         },
 
         trim() {
-          if (LOG.lines.length > LOG_MAX) {
-            LOG.dropped += LOG.lines.length - LOG_MAX;
-            LOG.lines.splice(0, LOG.lines.length - LOG_MAX);
+          if (LOG.lines.length > LOG_KEEP) {
+            LOG.dropped += LOG.lines.length - LOG_KEEP;
+            LOG.lines.splice(0, LOG.lines.length - LOG_KEEP);
           }
-          if (LOG.held.length > LOG_MAX) {
-            LOG.dropped += LOG.held.length - LOG_MAX;
-            LOG.held.splice(0, LOG.held.length - LOG_MAX);
+          if (LOG.held.length > LOG_KEEP) {
+            LOG.dropped += LOG.held.length - LOG_KEEP;
+            LOG.held.splice(0, LOG.held.length - LOG_KEEP);
           }
           this.logDropped = LOG.dropped;
         },
+
+        /* Level counts and the two facet lists, recomputed from the buffer.
+           Five thousand cheap comparisons every two seconds is nothing next to
+           keeping five thousand running totals correct through eviction. */
+        recount() {
+          const counts = { err: 0, warn: 0, info: 0 };
+          const imeis = new Set();
+          const topics = new Set();
+          for (const line of LOG.lines) {
+            counts[line.level] += 1;
+            const imei = this.imeiOf(line);
+            imeis.add(imei || "none");
+            topics.add(line.topic);
+          }
+          this.logCounts = counts;
+
+          // The current selection stays offerable even after its last line has
+          // been evicted, so a filter never silently turns into "everything".
+          if (this.logImei) imeis.add(this.logImei);
+          if (this.logTopic) topics.add(this.logTopic);
+
+          const imeiValues = [...imeis].filter((value) => value !== "none").sort();
+          if (imeis.has("none")) imeiValues.push("none");
+          const imeiOptions = imeiValues.map((value) => ({
+            value,
+            label: value === "none" ? "无模组" : "模组 " + this.shortImei(value),
+          }));
+          // Only replaced when the set itself changed: rewriting the <option>
+          // list every two seconds would fight an open dropdown.
+          if (this.keysOf(imeiOptions) !== this.keysOf(this.logImeiOptions)) {
+            this.logImeiOptions = imeiOptions;
+          }
+
+          const topicOptions = TOPIC_ORDER
+            .filter((topic) => topics.has(topic))
+            .map((topic) => ({ value: topic, label: TOPIC_LABEL[topic] }));
+          if (this.keysOf(topicOptions) !== this.keysOf(this.logTopicOptions)) {
+            this.logTopicOptions = topicOptions;
+          }
+
+          // How far back the buffer reaches, which is the question the
+          // retention cap is really an answer to.
+          this.logOldestAt = LOG.lines.length ? LOG.lines[0].at : 0;
+        },
+
+        keysOf(options) { return options.map((option) => option.value).join(","); },
 
         async pollLogs() {
           try {
@@ -1401,7 +1939,8 @@
             LOG.cursor = result.cursor || LOG.cursor;
             const fresh = result.lines || [];
             if (!fresh.length) return;
-            for (const line of fresh) line.level = levelOf(line.text);
+            for (const line of fresh) classify(line);
+            this.pulse();
             if (this.logPaused) {
               for (const line of fresh) LOG.held.push(line);
               this.trim();
@@ -1412,10 +1951,21 @@
             this.trim();
             this.logKept = LOG.lines.length;
             this.appendRows(fresh);
+            this.recount();
           } catch {
             // One dropped poll costs one interval; the cursor resumes it.
             this.logPollFailed = true;
           }
+        },
+
+        pulse() {
+          this.logBeat = false;
+          // Off and on again in separate frames, or the animation does not
+          // restart when two batches land back to back.
+          requestAnimationFrame(() => {
+            this.logBeat = true;
+            setTimeout(() => { this.logBeat = false; }, 600);
+          });
         },
 
         /* ══ keyboard ═════════════════════════════════════════════════════ */
@@ -1426,7 +1976,7 @@
             target.tagName === "SELECT" || target.isContentEditable);
           if (event.key === "Escape") {
             if (typing) { target.blur(); }
-            else if (this.logFilter || this.logProblemsOnly) { this.logFilter = ""; this.logProblemsOnly = false; this.rebuildLogs(); }
+            else if (this.anyLogFilter()) { this.resetLogFilters(); }
             return;
           }
           if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1444,6 +1994,13 @@
           if (event.key === "f" || event.key === "F") {
             event.preventDefault();
             if (this.$refs.logFilter) this.$refs.logFilter.focus();
+            return;
+          }
+          // Both hands are usually on the keyboard when the line worth reading
+          // goes past, and reaching for the mouse is how it scrolls away.
+          if (event.key === "p" || event.key === "P") {
+            event.preventDefault();
+            this.togglePause();
           }
         },
       }));

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use edge_panel::{
-    router, router_with_actions, Actions, AtResult, MemoryInbox, PanelError, ProfileBody,
+    router, router_with_actions, Actions, AtResult, LogRing, MemoryInbox, PanelError, ProfileBody,
     ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
 };
 use edge_store::{LocalMessage, LocalModem};
@@ -156,6 +156,183 @@ async fn sections_awaiting_their_own_card_say_which_card_that_is() {
     for card in ["T004", "T005", "T006"] {
         assert!(page.contains(card), "no section points at {card}");
     }
+}
+
+/// The process-wide log ring is shared by every test in this binary, so the two
+/// tests that write to it take turns. Without this, the six hundred lines one
+/// of them pushes evict the single line the other is looking for.
+static LOG_RING_TURN: Mutex<()> = Mutex::new(());
+
+/// Read the panel's `/api/logs` the way the column does.
+async fn read_logs(after: u64) -> serde_json::Value {
+    let app = router(Arc::new(MemoryInbox::default()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/api/logs?after={after}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// Pull an integer constant out of the page's script.
+fn constant(page: &str, name: &str) -> u64 {
+    let needle = format!("const {name} = ");
+    let at = page
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the page defines no {name}"));
+    page[at + needle.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} is not a number"))
+}
+
+/// The premise the whole log column rests on: a served line carries a sequence
+/// number, a timestamp and text, and nothing else.
+///
+/// `log_line` and `log_error` push into the same ring and the distinction is
+/// dropped there, so severity, which module a line is about and which endpoint
+/// produced it are all absent from the wire. The column therefore infers them
+/// from the text. If this ever stops being true — if `logs.rs` grows a `level`
+/// — this test fails and says so, which is the signal to delete the guessing
+/// rather than to leave two sources of truth disagreeing.
+#[tokio::test]
+async fn a_served_log_line_carries_no_level_module_or_endpoint() {
+    let _turn = LOG_RING_TURN.lock().unwrap_or_else(|held| held.into_inner());
+    let marker = "panel-test-marker line for the shape assertion";
+    LogRing::global().push(marker);
+
+    let body = read_logs(0).await;
+    let line = body["lines"]
+        .as_array()
+        .expect("lines")
+        .iter()
+        .find(|line| line["text"] == marker)
+        .expect("the line just pushed is not in the ring");
+
+    let mut fields: Vec<&str> = line
+        .as_object()
+        .expect("a line is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["at", "seq", "text"],
+        "the served shape changed; the column's inferred level/module/source \
+         should be replaced by the real field instead of layered on top"
+    );
+}
+
+/// The panel must hold more history than the server does.
+///
+/// The ring keeps 500 lines. Measured on this fleet, the daemon prints about
+/// 17.7 lines a minute with nothing wrong, so 500 lines is a 28-minute window:
+/// once the panel has been open longer than that, its own buffer is the only
+/// longer record that exists anywhere. A retention cap at or below the ring's
+/// would make the buffer pointless.
+#[tokio::test]
+async fn the_column_retains_more_than_the_server_ring_does() {
+    let _turn = LOG_RING_TURN.lock().unwrap_or_else(|held| held.into_inner());
+    let ring = LogRing::global();
+    for index in 0..600 {
+        ring.push(format!("ring capacity probe {index}"));
+    }
+    let served = read_logs(0).await;
+    let held = served["lines"].as_array().expect("lines").len();
+    assert_eq!(held, 500, "the server ring no longer holds 500 lines");
+
+    let page = panel_page().await;
+    let keep = constant(&page, "LOG_KEEP");
+    let render = constant(&page, "LOG_RENDER");
+    assert!(
+        keep > held as u64,
+        "the column keeps {keep} lines but the server already holds {held}"
+    );
+    // Retaining and drawing are capped separately because their costs are
+    // different: a retained line is a small object, a drawn one is four DOM
+    // nodes and layout. Collapsing the two would either shrink how far a
+    // search reaches or paint thousands of rows nobody asked for.
+    assert!(
+        render < keep,
+        "the drawn cap ({render}) is not below the retained cap ({keep})"
+    );
+}
+
+/// The column is a cursor poll, and has to keep saying so.
+///
+/// A log pane that looks like a tail and is not one is worse than an obviously
+/// periodic one: the operator reads "nothing new" as "nothing happened" when it
+/// may only mean the last request never came back.
+#[tokio::test]
+async fn the_log_column_admits_it_is_polling_rather_than_tailing() {
+    let page = panel_page().await;
+    assert!(page.contains("/api/logs?after="), "no cursor poll on the page");
+    assert!(page.contains("s 轮询'"), "the poll interval is not on screen");
+    assert!(page.contains("'刷新于 '"), "the last refresh time is not on screen");
+    assert!(page.contains("logPollFailed"), "a failed poll is not reported");
+    assert!(
+        page.contains("不是推送流"),
+        "the column does not say it is not a stream"
+    );
+}
+
+/// Everything this card promised, pinned to the thing that implements it.
+///
+/// These are markers rather than wording: the copy will keep changing and the
+/// mechanism should not.
+#[tokio::test]
+async fn the_log_column_has_what_a_debugging_log_needs() {
+    let page = panel_page().await;
+    for (feature, marker) in [
+        ("level colouring", "log-row.lvl-err"),
+        ("level filtering", "logLevels[level.key]"),
+        ("level counts", "logCounts["),
+        ("filter by module", "x-model=\"logImei\""),
+        ("filter by source", "x-model=\"logTopic\""),
+        ("search", "x-model=\"logQuery\""),
+        ("search highlighting", "log-row mark"),
+        ("walking the hits", "stepMatch("),
+        ("pause and resume", "togglePause()"),
+        ("copy one line", "className = \"log-copy\""),
+        ("copy without a secure context", "execCommand(\"copy\")"),
+        ("arrival cue", "@keyframes log-arrive"),
+        ("arrival cue is applied to the new rows", "classList.add(\"is-new\")"),
+        ("arrival cue while scrolled away", "logNewErr"),
+        ("quieting the heartbeat", "logQuiet = !logQuiet"),
+        // Only the `ok` form: folding in the `at-only` sibling would let
+        // "静音" hide a module that answered over serial after QMI did not.
+        ("the heartbeat is only the ok form", "imei=\\d+ ok$/i"),
+        ("eviction is reported", "已丢弃最旧"),
+    ] {
+        assert!(page.contains(marker), "{feature} is missing: no {marker}");
+    }
+}
+
+/// The inferred fields have to be labelled as inferred where they are used.
+///
+/// Colouring a line red on a guess is defensible; letting an operator believe
+/// the daemon called it an error is not, because they will trust it in the one
+/// case where the guess is wrong.
+#[tokio::test]
+async fn the_column_says_the_level_and_source_are_inferred() {
+    let page = panel_page().await;
+    assert!(
+        page.contains("没有级别字段"),
+        "the level control does not admit the level is inferred"
+    );
+    assert!(
+        page.contains("日志里没有 /api 端点字段"),
+        "the source control does not admit an endpoint is not in the data"
+    );
 }
 
 #[tokio::test]
