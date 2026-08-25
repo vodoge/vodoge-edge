@@ -1272,6 +1272,61 @@
       return null;
     }
 
+    /* ── The radio switch ─────────────────────────────────────────────────
+       The table above only guards commands somebody types, and the button in
+       the danger zone does not go through it: `/api/radio` reaches the same
+       outcome — a module with its radio down — through an endpoint. It had a
+       bare `confirm("关闭 … 的射频？")` in front of it, which asks a question
+       without stating a single consequence. A dialog that says nothing is not
+       a guard; it is a keystroke somebody learns to send.
+
+       The wording below is the repository's own, not an invention:
+
+       - `edge-panel/src/lib.rs` on `set_radio`: it "goes through QMI rather
+         than `AT+CFUN`, whose reset form wedges a module often enough that it
+         is not worth exposing on a button". So the dialog names QMI LowPower
+         and says it is *not* AT+CFUN — the operator reading `+CFUN: 0` in the
+         status bar would otherwise assume it was.
+       - the same file on the endpoint: "Taking the radio down disconnects the
+         modem from its network."
+       - `edge-modem/src/session.rs`: "`LowPower` is the mode the radio toggle
+         and the address rotation already use many times a day, in both
+         directions, on these same three sticks." That is why this is not in
+         the GUARDED table's class of one-way doors, and the dialog says so
+         rather than pretending everything dangerous is equally dangerous.
+       - the same note, on 2026-08-25: a QMI mode change was refused with
+         "error 60" and left a module at `+CFUN: 7` with every cheap way back
+         refused. That was `Offline`, not `LowPower`, and the dialog says
+         which — a warning that overstates its case is the other way a guard
+         stops working. What carries over is the last line: "Nobody can reach
+         this hardware to pull a stick."
+
+       This is deliberately not an entry in GUARDED: that table matches a
+       command string, and there is no command here. `AT+CFUN=0/4` typed into
+       the box is a separate path and belongs in that table — T006 owns it. */
+    function radioAsk(imei, goOnline) {
+      const aim = imei || "未选模组";
+      if (goOnline) {
+        return "恢复射频\n\n"
+          + "目标：" + aim + "\n"
+          + "动作：/api/radio → QMI 工作模式设回 Online\n\n"
+          + "模组会重新搜网并注册，这要几十秒。期间机队里它看起来仍然是离线的，\n"
+          + "面板会在 5 秒后自动刷新一次，没回来就再刷新。\n\n"
+          + "确定要恢复吗？";
+      }
+      return "关闭射频\n\n"
+        + "目标：" + aim + "\n"
+        + "动作：/api/radio → QMI 工作模式设成 LowPower\n"
+        + "（不是 AT+CFUN —— lib.rs 写着那条的复位形式楔死过模组，不值得放在按钮上。）\n\n"
+        + "这一根会立刻脱网：收不到短信、没有数据、在它上面的通话会断，\n"
+        + "面板上它会暂时从机队里消失，心跳停在这一刻。\n\n"
+        + "回来的路是同一个按钮（QMI Online）—— LowPower 是这三根每天来回走\n"
+        + "很多次的模式。但退路只有软件这一条：这批硬件没有人能物理接触，\n"
+        + "而 2026-08-25 有一次 QMI 模式切换被 error 60 拒在半路，把模组停在\n"
+        + "+CFUN: 7 出不来（那次走的是 Offline，不是这里的 LowPower）。\n\n"
+        + "确定要关吗？";
+    }
+
     /* ── Switching an eSIM profile ────────────────────────────────────────
        The expensive button on this panel, and not because of the command.
 
@@ -2108,7 +2163,16 @@
         async toggleRadio(button) {
           if (!this.requireActive()) return;
           const goOnline = !this.radioOnline;
-          if (!confirm((goOnline ? "恢复" : "关闭") + " " + this.activeImei + " 的射频？")) return;
+          // Refusing has to leave a mark, for the same reason the typed guard
+          // and the profile switch leave one: without it the operator cannot
+          // tell a dialog they dismissed from a command that went out.
+          if (!confirm(radioAsk(this.activeImei, goOnline))) {
+            const refused = this.newEntry("note",
+              "已取消" + (goOnline ? "恢复" : "关闭") + "射频 " + this.activeImei, "out-warn");
+            refused.meta = "没有发出 —— 射频没有被碰过";
+            refused.tone = "is-warn";
+            return;
+          }
           await this.busy(button, "执行中…", async () => {
             await this.post("/api/radio", { imei: this.activeImei, online: goOnline });
             this.radioOnline = goOnline;
