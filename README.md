@@ -4,6 +4,53 @@ VoDoge Edge is the Rust agent that runs beside USB cellular modems in a
 customer site. It owns hardware access, keeps working while the Internet is
 unavailable, and connects outward to the VoDoge cloud control plane.
 
+## License, and where to get the source
+
+This repository is not under one license. The complete map is in
+[`LICENSE`](LICENSE); attribution is in [`NOTICE`](NOTICE).
+
+| Path | License | Full text |
+| --- | --- | --- |
+| `contract/` `edge-core/` `edge-modem/` `edge-store/` `edge-uplink/` `edge-agent/` `edge-panel/` `edge-proxy/` `edge-bin/`, and the repository root | Apache-2.0 | `LICENSE`, section 6 |
+| `voice/` (binary `vodoge-voice`) | AGPL-3.0-or-later | `voice/LICENSE` |
+| `vowifi/` (binary `vodoge-ike-probe`) | AGPL-3.0-or-later | `vowifi/LICENSE` |
+
+The two Go modules are AGPL because both `require github.com/boa-z/vowifi-go`,
+which is AGPL-3.0 with no linking exception, and roughly 39,900 lines of it are
+compiled into those binaries. `LICENSE` section 4 records the five conditions
+the Apache-2.0 half currently rests on, each written so it can be checked and
+falsified rather than assumed — the first thing to re-read before wiring the
+Rust agent to either Go binary.
+
+Upstream is not vendored here. Both `go.mod` files `replace` it with a path to a
+read-only mirror that lives outside this repository, pinned at commit
+`1e9c6e6a`. `scripts/verify-vendor-mirror.sh` checks that mirror against the
+upstream commit's blobs and prints how many of the 212 files match; run it
+before trusting any statement that the mirror is unmodified. It also prints how
+to materialise the mirror if you do not have it.
+
+### If you are talking to one of these services over a network
+
+`vodoge-voice` and `vodoge-ike-probe` are AGPL-3.0 programs, and they exist so
+that people can place calls through them. AGPL-3.0 section 13 gives everyone who
+interacts with them remotely over a network the right to receive the
+Corresponding Source. Here is that offer. It is deliberate, not incidental:
+
+> The complete Corresponding Source for the version you are talking to is
+> published at <https://github.com/yuanshuai1122/vodoge-edge>, and may be
+> obtained by anyone, at no charge, over the network, without an account:
+>
+> ```sh
+> git clone https://github.com/yuanshuai1122/vodoge-edge
+> ```
+>
+> The upstream AGPL dependency compiled into these binaries is at
+> <https://github.com/boa-z/vowifi-go>, commit `1e9c6e6a`.
+
+This repository is public on purpose so that the offer above stays satisfiable.
+A binary that serves network users must correspond to a commit that is actually
+published there — do not run a private patch against them without pushing it.
+
 ## Current scope
 
 The first delivered slices are deliberately I/O-free so their behavior can be
@@ -68,6 +115,9 @@ edge-uplink/ Pure cumulative acknowledgement and loss-marker state
 edge-agent/  CommandExecutor: receipt, SendSms, capability-matrix install
 edge-panel/  Offline Axum panel over the SQLite inbox
 docs/        Architecture decisions
+
+voice/       Go: IMS media relay (vodoge-voice)      -- AGPL-3.0, see LICENSE
+vowifi/      Go: IKEv2/EAP-AKA stack (vodoge-ike-probe) -- AGPL-3.0, see LICENSE
 ```
 
 ## Picking up the work

@@ -1,0 +1,402 @@
+VoDoge Edge -- licensing
+========================
+
+Copyright (c) 2026 the VoDoge Edge authors
+Source: https://github.com/yuanshuai1122/vodoge-edge
+
+This repository is NOT under a single license. It builds two independent sets
+of artifacts under two different licenses, and which one applies to you depends
+on which directory you took code from. This file is the whole map: read it and
+you know what you have.
+
+  SPDX-License-Identifier: Apache-2.0 AND AGPL-3.0-or-later
+
+Nothing here is legal advice. It is a statement of what this project grants and
+of the facts that statement rests on.
+
+
+--------------------------------------------------------------------------------
+1. Apache-2.0 -- the Rust workspace
+--------------------------------------------------------------------------------
+
+The following paths are licensed under the Apache License, Version 2.0. The
+complete text is in section 6 of this file.
+
+    contract/       edge-core/      edge-modem/     edge-store/
+    edge-uplink/    edge-agent/     edge-panel/     edge-proxy/
+    edge-bin/
+
+Also Apache-2.0: everything at the repository root that is not listed in
+section 2 -- Cargo.toml, Cargo.lock, scripts/, docs/, .github/, README.md.
+
+This matches `license = "Apache-2.0"` in Cargo.toml, which is the license
+metadata for these nine crates and only for these nine crates.
+
+    Licensed under the Apache License, Version 2.0 (the "License"); you may not
+    use these files except in compliance with the License. You may obtain a
+    copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+    License for the specific language governing permissions and limitations
+    under the License.
+
+
+--------------------------------------------------------------------------------
+2. AGPL-3.0-or-later -- the two Go modules
+--------------------------------------------------------------------------------
+
+The following paths are licensed under the GNU Affero General Public License,
+version 3 or (at your option) any later version:
+
+    voice/          the IMS media relay      -> binary: vodoge-voice
+    vowifi/         the IKEv2/EAP-AKA stack  -> binary: vodoge-ike-probe
+
+The complete AGPL-3.0 text ships with each of them:
+
+    voice/LICENSE
+    vowifi/LICENSE
+
+Both files are byte-for-byte the unmodified Free Software Foundation text
+(35182 bytes as checked out here), the same copy that upstream ships.
+
+Why AGPL and not Apache: both modules require github.com/boa-z/vowifi-go
+(voice/go.mod, vowifi/go.mod), and that project is AGPL-3.0 with no additional
+permission, no linking exception and no dual license. Building either binary
+compiles roughly 39,900 lines of that upstream code into it -- about five times
+the volume of our own Go code in these two modules. We did not try to argue our
+way around that. We took the license.
+
+This is a grant, not a warning: you may use, study, modify and redistribute
+voice/ and vowifi/ under AGPL-3.0. It does mean these two modules can no longer
+be shipped as closed source, by us or by anyone.
+
+
+--------------------------------------------------------------------------------
+3. Third-party code that is NOT in this repository
+--------------------------------------------------------------------------------
+
+github.com/boa-z/vowifi-go is not vendored here. Both go.mod files replace it
+with a path pointing outside this repository, at a read-only local mirror of
+upstream commit 1e9c6e6adbfcd9667695149d5ecb0f71cd062f07.
+
+That mirror is an exact copy, not a fork: scripts/verify-vendor-mirror.sh
+compares every file in it against the upstream commit's git blobs and reports
+212/212 matching. Keeping it exact is deliberate -- AGPL-3.0 section 0 defines
+"modify" as adapting the work "other than the making of an exact copy", and an
+exact copy is what we want it to stay. Do not edit it, and do not build with
+"go build -overlay", which would change what the compiler sees while leaving the
+files on disk untouched and this check falsely green.
+
+Get the upstream source from https://github.com/boa-z/vowifi-go (commit
+1e9c6e6a), or see README.md for how to materialise the mirror.
+
+See NOTICE for attribution.
+
+
+--------------------------------------------------------------------------------
+4. Why the Rust workspace is still Apache-2.0 -- and when to stop believing it
+--------------------------------------------------------------------------------
+
+No Rust crate in this repository depends on any AGPL code. The reason is not a
+principle, it is a set of facts about the current shape of this tree: today the
+Apache-2.0 Rust artifacts and the AGPL-3.0 Go artifacts are two unrelated
+products that never meet.
+
+That is a claim with an expiry date, so it is written below as five conditions
+rather than as an assertion. Each one names the check that would falsify it.
+
+    If ANY ONE of these five stops being true, the conclusion in section 1 is
+    no longer supported and must be re-examined before the next release. It may
+    not survive. Do not treat section 1 as settled without re-running these.
+
+All five were verified against commit 259ebd3 on 2026-08-25.
+
+C1. There is no cgo anywhere in this repository.
+    Falsified when this returns any hit in tracked source:
+        git grep -nE 'import "C"|//export |#cgo|c-archive|c-shared|buildmode'
+    Verified: zero hits. Known future trigger: the AMR-WB transcoding slot
+    described at voice/internal/bridge/peer.go:12 is written as "the cgo codec
+    drops into the same slot". Installing it breaks C1.
+
+C2. The Go modules build with CGO_ENABLED=0 into two standalone executables.
+    They are voice/cmd/vodoge-voice and vowifi/cmd/vodoge-ike-probe, the only
+    two "package main" files in the tree.
+    Falsified when a Go build here needs cgo, or emits a library (c-archive,
+    c-shared, a static or dynamic object) instead of an executable.
+    Verified: .github/workflows/ci.yml:109 builds both modules with
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64.
+
+C3. No Rust source in this repository references either executable.
+    It does not spawn them, link them, or speak to them over IPC or a socket.
+    Falsified when either of these stops being empty:
+        git grep -n 'vodoge-voice\|vodoge-ike-probe' -- '*.rs'
+        git grep -n 'Command::new' -- '*.rs'
+    Verified: both empty. The only std::process uses in Rust are exit and id;
+    nothing is launched.
+
+C4. voice/ and vowifi/ are not part of the Cargo workspace.
+    Falsified when Cargo.toml's members list gains either path, or when any
+    crate grows a build script or dependency that compiles or embeds them.
+    Verified: members lists exactly the nine crates named in section 1.
+
+C5. Nothing in this repository packages the Rust agent and the Go binaries into
+    one deliverable.
+    Falsified when a systemd unit, a container image, an installer, or any
+    packaging step that ships them together appears.
+    Verified: git ls-files matching '\.service$' is empty; there is no systemd
+    unit and no combined package anywhere in the tree.
+
+C3 and C5 are the two most likely to break next. The planned supervisor work
+(goal card T042) is precisely the step that would wire the Rust agent to these
+two Go binaries; that card's stop_if already forbids doing it before this file
+is revisited.
+
+When a condition breaks, the question to answer is not "did the Rust code catch
+something". It is: are the Apache-2.0 artifacts and the AGPL-3.0 artifacts now
+one combined work? Answer that before shipping, not after.
+
+
+--------------------------------------------------------------------------------
+5. AGPL-3.0 section 13 -- source for users on the network
+--------------------------------------------------------------------------------
+
+vodoge-voice and vodoge-ike-probe are intended to let people place calls through
+them, which means people will interact with them remotely over a network.
+AGPL-3.0 section 13 gives those users the right to receive the Corresponding
+Source. This is that offer, and it is deliberate rather than incidental:
+
+    The complete Corresponding Source for these programs is published at
+
+        https://github.com/yuanshuai1122/vodoge-edge
+
+    and may be obtained by anyone, at no charge, over the network, without an
+    account:
+
+        git clone https://github.com/yuanshuai1122/vodoge-edge
+
+    The upstream AGPL dependency compiled into these binaries is at
+    https://github.com/boa-z/vowifi-go, commit 1e9c6e6a.
+
+This repository is public on purpose so that the offer above is always
+satisfiable. If it is ever made private, section 13 does not go away -- the
+source must then be offered to network users by some other standard means, and
+that has to be arranged before the repository is closed, not after.
+
+A deployed binary must correspond to a commit that is actually published here.
+Do not run a private patch against network users without pushing it.
+
+
+--------------------------------------------------------------------------------
+6. The Apache License, Version 2.0 -- complete text
+--------------------------------------------------------------------------------
+
+Applies to the paths listed in section 1. It does not apply to voice/ or
+vowifi/, which are covered by section 2.
+
+
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.

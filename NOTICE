@@ -1,0 +1,50 @@
+VoDoge Edge
+Copyright (c) 2026 the VoDoge Edge authors
+https://github.com/yuanshuai1122/vodoge-edge
+
+This product contains software under two different licenses. The full map of
+which path is under which license is in LICENSE. In short:
+
+  Apache-2.0            the Rust workspace: contract/, edge-core/, edge-modem/,
+                        edge-store/, edge-uplink/, edge-agent/, edge-panel/,
+                        edge-proxy/, edge-bin/, and the repository root.
+                        Full text: LICENSE, section 6.
+
+  AGPL-3.0-or-later     voice/ (binary vodoge-voice) and vowifi/ (binary
+                        vodoge-ike-probe). Full text: voice/LICENSE and
+                        vowifi/LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party attribution
+--------------------------------------------------------------------------------
+
+github.com/boa-z/vowifi-go
+  Copyright (c) boa-z <boa-z@outlook.com>
+  Licensed under the GNU Affero General Public License, version 3.
+  Upstream: https://github.com/boa-z/vowifi-go
+  Pinned at commit 1e9c6e6adbfcd9667695149d5ecb0f71cd062f07.
+
+  This is the reason voice/ and vowifi/ are AGPL-3.0. Both go.mod files require
+  it, and roughly 39,900 lines of it are compiled into the two binaries above.
+
+  Its source is not redistributed in this repository. It is consumed unmodified
+  through a "replace" directive pointing at a read-only local mirror outside the
+  repository; scripts/verify-vendor-mirror.sh checks that mirror against the
+  upstream commit and reports 212/212 files matching. Obtain the upstream source
+  from https://github.com/boa-z/vowifi-go.
+
+Other third-party dependencies are declared in Cargo.toml / Cargo.lock and in
+voice/go.mod, voice/go.sum, vowifi/go.mod and vowifi/go.sum, and remain under
+their own licenses.
+
+--------------------------------------------------------------------------------
+Notice to users interacting over a network (AGPL-3.0 section 13)
+--------------------------------------------------------------------------------
+
+If you interact with vodoge-voice or vodoge-ike-probe remotely over a network,
+AGPL-3.0 section 13 entitles you to the Corresponding Source. It is published,
+free of charge and without an account, at:
+
+    https://github.com/yuanshuai1122/vodoge-edge
+
+See LICENSE section 5 and README.md for the full offer.
