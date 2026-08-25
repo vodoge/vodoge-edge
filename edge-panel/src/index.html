@@ -1438,7 +1438,7 @@
        than a styling one, and it has now been made. The test each entry has to
        pass: **it can leave the module in a state software cannot get it out
        of**, on hardware nobody can physically reach — over USB/IP, with no
-       operator able to replug a stick. Two commands were considered against
+       operator able to replug a stick. Three commands were considered against
        that test and left out on purpose:
 
        - `AT+CGACT=0,1` takes the default bearer down (`edge-bin` uses exactly
@@ -1447,12 +1447,42 @@
        - `AT+COPS=0` is the *recovery* from a manual selection, measured on
          this bench to return two sticks to LTE in 15-90s. Guarding a way back
          is how a dialog becomes a thing operators dismiss.
+       - `AT+COPS=?` — the sweep — was in this table for one card and has been
+         taken back out. It is slow, not irreversible: `edge-bin` runs it under
+         `SCAN_TIMEOUT` and the modem comes back by itself with nothing to
+         undo. It was added for symmetry, because the 网络 tab's button asks
+         before running the same command; but symmetry is not the test this
+         table applies, and a dialog in front of a safe command is what teaches
+         an operator to confirm without reading — which is precisely how the
+         entries below stop working. The real complaint behind it, "nobody
+         expects three minutes", is a progress problem and is answered by the
+         progress bar on the 网络 tab, not by a question. The *manual* forms,
+         `AT+COPS=1,…` and `=2`, stay: locking onto a PLMN that is not here
+         leaves the stick off the air with nothing on screen to say why.
 
        The other rule, taken from usbnet's read/write split: a guard that fires
        on a harmless form trains the reflex that defeats it. So `AT+CRSM` is
        trapped on the update codes only — the agent itself sends
        `AT+CRSM=176,...` on every report — and `AT+CFUN=1` (plain, the one that
        restores) goes through untouched.
+
+       One entry's provenance is not this repository, and it is labelled as
+       such rather than dressed up: `AT+QPRTPARA` appears nowhere in `lib.rs`
+       or `edge-bin`. It comes from the vowifi board's T028, which listed a
+       factory NV reset of this card as an option it did *not* take, on the
+       grounds that there is no physical access and no second chance. The test
+       above is a property of the command, not of where it was written down, so
+       the entry stays and its dialog cites T028 by name.
+
+       ── What this table is not ──────────────────────────────────────────
+       It is a `confirm()` in a browser and nothing else. `guardFor` is reached
+       only from `runAt()` below; `edge-panel/src/lib.rs`'s `/api/at` handler
+       and `edge-bin`'s AT route pass any command through untouched, and no
+       HTTP client other than this page ever sees this table. That is a
+       deliberate scope, not an oversight — on a LAN-only debug panel a guard
+       is there to stop a slip of the hand, and server-side enforcement is a
+       product decision rather than a styling one. Nobody should read this list
+       as a security control.
 
        Every entry carries its own `warn`, and the console renders those on
        screen from this table: a guard added without copy would otherwise be
@@ -1566,25 +1596,6 @@
         },
       },
 
-      /* The sweep, typed. This is the exact command `/api/scan` runs — the
-         daemon issues `AT+COPS=?` with `SCAN_TIMEOUT` — and the button in the
-         网络 tab already asks first. Typing it must not be the cheaper way
-         round that dialog. */
-      {
-        label: "AT+COPS=?",
-        warn: "就是「扫网」按钮那条命令：最长 180 秒全频段扫描，期间这一根不服务。",
-        match: /^at\+cops\s*=\s*\?\s*$/i,
-        ask(command, imei) {
-          return "全频段扫网（AT+COPS=?）\n\n"
-            + "命令：" + command + "\n"
-            + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
-            + "这正是「网络」tab 那个扫网按钮发的命令：edge-bin 用 SCAN_TIMEOUT\n"
-            + "（" + Math.round(SCAN_LIMIT / 1000) + " 秒）跑它。期间模组不注册、不收短信、没有数据。\n"
-            + "扫完它自己回来 —— 但那个按钮先问一次，从命令框绕过去不该更容易。\n\n"
-            + "确定要发出去吗？";
-        },
-      },
-
       /* Manual selection and deregistration. Recoverable by `AT+COPS=0`, which
          is why that form is not guarded — but until somebody sends it, the
          stick is off the network and the panel cannot tell "locked to a PLMN
@@ -1628,10 +1639,19 @@
       },
 
       /* Raw APDUs. The panel cannot tell a read from a write inside one, so
-         this is the entry that does not get a read exception. */
+         this is the entry that does not get a read exception.
+
+         This entry used to carry the logical-channel consequence, and that was
+         wrong twice over: `AT+CSIM` runs on the basic channel and opens no
+         logical channel at all (`edge-modem/src/aka.rs` measured the USIM ADF
+         already selected on channel 0 after boot, which is why the AKA path
+         deliberately does *not* open one), and stating it here while the three
+         commands that really do open channels were missing from the table put
+         the warning on the wrong row. The channel entry below owns that
+         consequence now; this one keeps the cost that is actually its own. */
       {
         label: "AT+CSIM=…",
-        warn: "裸 APDU：面板读不出它是读还是写。占住 eUICC 的逻辑通道会直接弄坏 profile 管理。",
+        warn: "裸 APDU：面板读不出它是读还是写。走基本通道（开逻辑通道的是 AT+CCHO），但它一次弄丢过一张卡。",
         match: /^at\+csim\s*=/i,
         ask(command, imei) {
           return "裸 APDU（AT+CSIM）\n\n"
@@ -1639,19 +1659,102 @@
             + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
             + "+CSIM 把一整条 APDU 原样交给卡。面板读不出它是读还是写，\n"
             + "所以这一条没有「只读放行」的例外。\n\n"
-            + "两处代价来自仓库自己的记录：\n"
-            + "· eUICC 只有几条逻辑通道，占着不放会直接弄坏 profile 管理\n"
-            + "  （edge-modem/src/aka.rs）；\n"
-            + "· 2026-08-25，对一张「已经选好」的卡再 SELECT 一次 USIM ADF 之后卡就走了：\n"
-            + "  AT+CPIN? 变成 +CME ERROR: 13、AT+QSIMSTAT? 变成 0,0、\n"
-            + "  之后每一条 AT+CSIM 都 +CME ERROR: 0，直到一次 AT+CFUN=0/1 才重新初始化。\n\n"
+            + "代价来自仓库自己的记录：2026-08-25，对一张「已经选好」的卡再 SELECT\n"
+            + "一次 USIM ADF 之后卡就走了：AT+CPIN? 变成 +CME ERROR: 13、\n"
+            + "AT+QSIMSTAT? 变成 0,0、之后每一条 AT+CSIM 都 +CME ERROR: 0，\n"
+            + "直到一次 AT+CFUN=0/1 才重新初始化。\n\n"
+            + "一处更正，免得两条守卫说同一句话：+CSIM 自己不开逻辑通道，它走基本通道\n"
+            + "（edge-modem/src/aka.rs：这批卡开机后 USIM ADF 已经选在通道 0 上）。\n"
+            + "开逻辑通道的是 AT+CCHO，那一条在这张表里另有一行。\n\n"
             + "确定要发出去吗？";
+        },
+      },
+
+      /* Logical channels — one entry with three spellings, because they are
+         one operation. `AT+CCHO` takes a channel out of a pool the card sizes
+         at three or four, `AT+CGLA` rides on it, and `AT+CCHC` is the only
+         thing that puts it back. Splitting the close onto its own row would
+         read as though it were optional; it is the half without which the
+         other two are a leak, so the table says all three in one breath.
+
+         These were missing from this table until vowifi T089 opened a channel
+         on real hardware and had to write the procedure down. The costs are
+         this repository's own words:
+
+         - `edge-modem/src/session.rs`'s `isdr_session`: "an eUICC offers only
+           a few logical channels, and once they are gone every later profile
+           operation fails to open one";
+         - `edge-modem/src/aka.rs`: opening one to re-SELECT "would compete
+           with `IsdrSession` for the few channels an eUICC offers, and losing
+           that race breaks profile management".
+
+         The daemon will not race an operator for one on a timer: its own
+         channel is a QMI `OPEN_LOGICAL_CHANNEL` (`edge-modem/src/uim.rs`),
+         taken on demand rather than polled, and closed by an RAII `Drop`
+         (`session.rs`) that also fires on an early `?` and on a panic. But it
+         draws from the same few, so a channel left open here is one it may not
+         get.
+
+         The dialog spells out the proof step because T089 measured that it is
+         the only one worth trusting: close the channel, then send one more
+         `AT+CGLA` on the same session id and require it to *fail*. A `+CCHC`
+         that answered OK is not evidence; a rejected APDU afterwards is. */
+      {
+        label: "AT+CCHO / +CGLA / +CCHC",
+        warn: "逻辑通道：开了必须关，这是一件事。卡上只有 3～4 条，漏掉的那条没有软件办法收回，而这批硬件不能拔插。",
+        match: /^at\+(ccho|cgla|cchc)\b/i,
+        ask(command, imei, found) {
+          const verb = found[1].toLowerCase();
+          const head = verb === "ccho"
+            ? "打开一条逻辑通道（AT+CCHO）"
+            : verb === "cgla"
+              ? "在逻辑通道上发 APDU（AT+CGLA）"
+              : "关闭逻辑通道（AT+CCHC）";
+          const lines = [head, ""];
+          lines.push("命令：" + command);
+          lines.push("目标：" + (imei || "未选模组 —— 第一个应答的控制口"));
+          lines.push("");
+          lines.push("这三条是一件事，不是三件：AT+CCHO 开、AT+CGLA 用、AT+CCHC 关。");
+          lines.push("开了就必须关 —— 关不是可选项，是另一半。");
+          lines.push("");
+          lines.push("卡上的逻辑通道只有 3～4 条。session.rs 写着：eUICC 只提供几条逻辑通道，");
+          lines.push("一旦用光，之后每一次 profile 操作都开不出通道来。");
+          lines.push("漏掉的那条没有软件办法收回，而这三根经 USB/IP 过来，没有人能拔插。");
+          lines.push("");
+          if (verb === "ccho") {
+            lines.push("这一条现在就从那个池子里拿走一条。发之前先想好谁来还：");
+            lines.push("记下 +CCHO 回的 session id，用完立刻 AT+CCHC=<那个 id>。");
+          } else if (verb === "cgla") {
+            lines.push("这一条自己不开也不关通道 —— 它跑在一条已经开着的通道上，");
+            lines.push("而且不会替你把它关掉：关还是要你自己发 AT+CCHC=<session id>。");
+          } else {
+            lines.push("这一条不是危险动作，它就是那必须发的另一半。要确认的是号码：");
+            lines.push("id 打错就关掉了别人的通道，而你以为自己那条已经还回去了。");
+          }
+          lines.push("");
+          lines.push("关掉之后请证明它真的关上了（vowifi T089 在真硬件上就是这么验的）：");
+          lines.push("对同一个 session id 再发一条 AT+CGLA，它必须失败。");
+          lines.push("AT+CCHC 答 OK 不是证据，之后那条 AT+CGLA 被拒才是。");
+          lines.push("");
+          lines.push("守护进程自己那条通道走 QMI（edge-modem/src/uim.rs 的 OPEN_LOGICAL_CHANNEL），");
+          lines.push("按需开、由 RAII 的 Drop 关（session.rs），没有周期轮询，所以它不会和你抢；");
+          lines.push("但它取的是同一批通道，你留着不关的那条就是它开不出来的那条。");
+          lines.push("");
+          lines.push("确定要发出去吗？");
+          return lines.join("\n");
         },
       },
 
       /* NV. Named in vowifi T028's own list of things it did not do, as
          "无物理接触、没有第二次机会", and left for a human to decide. This is
-         where that human types. */
+         where that human types.
+
+         The provenance is the one thing this entry has to be careful about:
+         `AT+QPRTPARA` is in no source file in this repository, so the dialog
+         cites the board and card it does come from instead of implying a
+         `lib.rs` line that does not exist. What earns the row is the property,
+         not the citation — an NV reset has no second chance and nobody can
+         reach the hardware. */
       {
         label: "AT+QPRTPARA=…",
         warn: "Quectel 的 NV 备份/恢复。出厂重置没有第二次机会，而这批硬件不能拔插。",
@@ -1660,10 +1763,12 @@
           return "改动 NV（AT+QPRTPARA）\n\n"
             + "命令：" + command + "\n"
             + "目标：" + (imei || "未选模组 —— 第一个应答的控制口") + "\n\n"
-            + "这是 Quectel 的 NV 备份/恢复命令。vowifi 板子 T028 把「对这张卡做\n"
-            + "AT+QPRTPARA 出厂 NV 重置」列成一个「无物理接触、没有第二次机会」的选项，\n"
-            + "并且没有执行 —— 它被留给人来决定。\n\n"
-            + "这三根经 USB/IP 过来，没有人能拔插。重置之后模组没回来，就没有别的办法。\n\n"
+            + "这是 Quectel 的 NV 备份/恢复命令。出厂 NV 重置擦掉的东西没有第二次机会，\n"
+            + "而这三根经 USB/IP 过来，没有人能拔插 —— 重置之后模组没回来，就没有别的办法。\n\n"
+            + "出处说清楚：这一条不来自本仓库。lib.rs 与 edge-bin 里都没有 AT+QPRTPARA，\n"
+            + "它来自 vowifi 板子 T028 的 receipt —— 那张卡把「对这张卡做 AT+QPRTPARA\n"
+            + "出厂 NV 重置」列成一个「无物理接触、没有第二次机会」的选项，\n"
+            + "并且没有执行，把它留给人来决定。这个框就是那个人打字的地方。\n\n"
             + "确定要发出去吗？";
         },
       },

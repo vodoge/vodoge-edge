@@ -1511,9 +1511,10 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
     let panel = Panel::load().await;
     let guards = guard_table(&panel.code);
     assert!(
-        guards.len() >= 7,
+        guards.len() >= 8,
         "the guard table has {} entries; it should carry usbnet, both AT+CFUN forms, \
-         both AT+COPS forms, AT+CRSM writes, AT+CSIM and AT+QPRTPARA",
+         AT+COPS manual selection, AT+CRSM writes, AT+CSIM, the logical-channel trio \
+         and AT+QPRTPARA",
         guards.len()
     );
 
@@ -1546,16 +1547,36 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
             "cfun\\s*=\\s*(0|4|7)",
             vec!["立刻脱网", "AT+CFUN=1", "+CME ERROR: 4", "没有人能物理接触"],
         ),
-        // `AT+COPS=?`: the same sweep the network tab's button runs, and that
-        // button asks first.
-        ("cops\\s*=\\s*\\?", vec!["扫网", "SCAN_TIMEOUT", "不注册"]),
-        // `AT+COPS=1,…` / `=2`: manual selection and deregistration.
+        // `AT+COPS=1,…` / `=2`: manual selection and deregistration. The query
+        // form `AT+COPS=?` is deliberately *not* here — see
+        // `the_sweep_is_not_guarded_and_the_manual_selection_still_is`.
         ("cops\\s*=\\s*([12])", vec!["手动", "脱网", "AT+COPS=0"]),
         // `AT+CRSM` writes. The read form is deliberately not trapped, and the
         // dialog says so by naming the read the agent itself sends.
         ("crsm", vec!["没有撤销", "AT+CRSM=176", "换卡不是退路"]),
-        // `AT+CSIM`: a raw APDU, which the panel cannot classify at all.
-        ("csim", vec!["APDU", "逻辑通道", "+CME ERROR: 13"]),
+        // `AT+CSIM`: a raw APDU, which the panel cannot classify at all. The
+        // dialog has to say which channel it runs on, because the entry below
+        // is the one that opens channels and two rows claiming the same
+        // consequence is how an operator learns neither of them.
+        ("csim", vec!["APDU", "基本通道", "AT+CCHO", "+CME ERROR: 13"]),
+        // `AT+CCHO` / `AT+CGLA` / `AT+CCHC`: the logical-channel trio, and the
+        // only commands here that can exhaust a card-level resource for good.
+        // vowifi T089 found them missing while running one on real hardware.
+        // The close is in the same entry as the open on purpose: on its own
+        // row it reads as optional, and a leaked channel has no software way
+        // back on hardware nobody can unplug.
+        (
+            "(ccho|cgla|cchc)",
+            vec![
+                "逻辑通道只有 3",
+                "开了就必须关",
+                "没有软件办法收回",
+                "没有人能拔插",
+                "AT+CCHC",
+                "T089",
+                "必须失败",
+            ],
+        ),
         // `AT+QPRTPARA`: NV.
         ("qprtpara", vec!["NV", "没有第二次机会", "没有人能拔插"]),
     ] {
@@ -1628,6 +1649,26 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
         cfun_ask.contains("CFUN_MEANING[value]"),
         "the radio-down dialog does not say which of the three values was typed"
     );
+
+    // One entry's provenance is not this repository, and the dialog has to say
+    // so in its own words rather than let an operator assume it was read off a
+    // line in `lib.rs`. `AT+QPRTPARA` appears in no source file here; it comes
+    // from the vowifi board's T028, which listed a factory NV reset as an
+    // option it did not take. The entry earns its row on the property — no
+    // second chance, no physical access — not on the citation, so the citation
+    // is stated rather than implied. A dialog that quietly dropped it would be
+    // one whose reader cannot check it.
+    let nv = &guards
+        .iter()
+        .find(|g| g.pattern.contains("qprtpara"))
+        .expect("no NV guard")
+        .ask;
+    for source in ["vowifi", "T028", "不来自本仓库"] {
+        assert!(
+            nv.contains(source),
+            "the NV dialog does not say where its evidence comes from: no {source} in it"
+        );
+    }
 }
 
 /// A guard fires on the form that cannot be undone and stays out of the way of
@@ -1691,6 +1732,46 @@ async fn the_guards_fire_on_the_form_that_does_not_come_back() {
          which is the way back: {cops}"
     );
 
+    // The logical-channel trio is one entry covering all three spellings. Not
+    // three entries: `AT+CCHC` on a row of its own is a row an operator can
+    // decide not to read, and closing is not a separate decision from opening.
+    let channel = pattern_for("(ccho|cgla|cchc)");
+    for verb in ["ccho", "cgla", "cchc"] {
+        assert!(
+            channel.contains(verb),
+            "the logical-channel guard misses AT+{}: {channel}",
+            verb.to_uppercase()
+        );
+    }
+    assert_eq!(
+        guards
+            .iter()
+            .filter(|g| g.pattern.contains("ccho")
+                || g.pattern.contains("cgla")
+                || g.pattern.contains("cchc"))
+            .count(),
+        1,
+        "the logical-channel commands are split across rows; the close then reads as optional"
+    );
+    // And the row the operator reads before typing has to carry all three too,
+    // or the on-screen list announces an open with no close.
+    let channel_guard = guards
+        .iter()
+        .find(|g| g.pattern.contains("(ccho|cgla|cchc)"))
+        .expect("no logical-channel guard");
+    for spelling in ["CCHO", "CGLA", "CCHC"] {
+        assert!(
+            channel_guard.label.contains(spelling),
+            "the on-screen label for the channel guard does not name AT+{spelling}: {}",
+            channel_guard.label
+        );
+    }
+    assert!(
+        channel_guard.warn.contains("开了必须关"),
+        "the one-line warning does not say the close is not optional: {}",
+        channel_guard.warn
+    );
+
     // Every guard is anchored. An unanchored pattern matches the command
     // somewhere in the middle of a longer one, which is how a guard starts
     // firing on things nobody meant it to.
@@ -1700,6 +1781,65 @@ async fn the_guards_fire_on_the_form_that_does_not_come_back() {
             "{} is not anchored at the start of the command: {}",
             guard.label,
             guard.pattern
+        );
+    }
+}
+
+/// The sweep is not guarded, and the manual selection still is.
+///
+/// `AT+COPS=?` had an entry for one card. The argument for it was symmetry —
+/// the 网络 tab's button asks before running the same command, so typing it
+/// should not be the cheaper way round that dialog — and symmetry is not the
+/// test this table applies. The sweep is slow, not irreversible: `edge-bin`
+/// runs it under `SCAN_TIMEOUT` and the modem returns by itself with nothing
+/// to undo. A dialog in front of a command that comes back is what teaches an
+/// operator to confirm without reading, which is how the entries that cannot
+/// come back stop working. The complaint underneath it — nobody expects three
+/// minutes — is answered by the progress bar on the 网络 tab, asserted in
+/// `a_slow_sweep_shows_progress_rather_than_looking_hung`.
+///
+/// This test exists because "we removed one" is the easy half. The hard half
+/// is that removing one must not widen the rest, and the way that happens
+/// quietly is the manual form going with it: `AT+COPS=1,…` locks the stick to
+/// a PLMN that may not be here, and there is nothing on screen to tell that
+/// apart from no coverage.
+#[tokio::test]
+async fn the_sweep_is_not_guarded_and_the_manual_selection_still_is() {
+    let panel = Panel::load().await;
+    let guards = guard_table(&panel.code);
+    let cops: Vec<_> = guards.iter().filter(|g| g.pattern.contains("cops")).collect();
+    assert_eq!(
+        cops.len(),
+        1,
+        "there should be exactly one COPS guard, the manual one; found {:?}",
+        cops.iter().map(|g| &g.label).collect::<Vec<_>>()
+    );
+    let cops = cops[0];
+    assert!(
+        cops.pattern.contains("([12])"),
+        "the surviving COPS guard is not the manual one: {}",
+        cops.pattern
+    );
+    assert!(
+        !cops.pattern.contains("\\?"),
+        "the surviving COPS guard also traps the query form: {}",
+        cops.pattern
+    );
+    assert!(
+        cops.label.contains('1') && !cops.label.contains('?'),
+        "the on-screen row still advertises the sweep as guarded: {}",
+        cops.label
+    );
+    // The sweep's own dialog stays where it belongs — on the button, which
+    // reaches `/api/scan` rather than the command box — and it is the place
+    // that says why the sweep is not in the table. Removing the typed guard
+    // must not have taken that sentence with it, or the distinction this card
+    // drew survives only in a commit message.
+    let scan = body_of(&panel.code, "function scanAsk(imei) {", "\n    }");
+    for consequence in ["AT+COPS=?", "没有走不回来的那一半"] {
+        assert!(
+            scan.contains(consequence),
+            "the scan button's dialog no longer mentions {consequence}"
         );
     }
 }
