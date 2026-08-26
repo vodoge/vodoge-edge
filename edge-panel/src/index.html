@@ -83,11 +83,14 @@
       --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
         "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
       --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      --font-eyebrow: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace;
 
       --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2rem; --s7:3rem;
 
-      --radius:10px;
-      --radius-lg:14px;
+      --radius:3px;
+      --radius-md:4px;
+      --radius-lg:6px;
       --radius-pill:999px;
 
       --shadow:0 1px 2px rgba(0,0,0,.35);
@@ -269,7 +272,7 @@
     }
     .brand { display:flex; align-items:center; gap:var(--s2); font-weight:650; font-size:var(--text-sm); white-space:nowrap; }
     .brand-mark {
-      width:20px; height:20px; border-radius:6px; display:grid; place-items:center;
+      width:20px; height:20px; border-radius:var(--radius-lg); display:grid; place-items:center;
       background:linear-gradient(135deg,var(--accent),var(--accent-strong));
       color:var(--accent-ink); font-size:11px; font-weight:800;
     }
@@ -292,7 +295,7 @@
     .chip-probe { border-left:1px solid var(--line); color:var(--fg-faint); gap:var(--s2); }
     .probe-cta {
       color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-      border-radius:4px; padding:0 4px; font-size:10px; line-height:1.4;
+      border-radius:var(--radius); padding:0 4px; font-size:10px; line-height:1.4;
     }
     .chip-probe:hover .probe-cta { background:var(--accent-wash); }
     .chip-probe b { font-family:var(--font-mono); color:var(--fg); font-weight:600; }
@@ -302,7 +305,7 @@
 
     kbd.key {
       display:inline-grid; place-items:center; min-width:1.15rem; height:1.15rem;
-      padding:0 3px; border-radius:4px; background:var(--surface-hover);
+      padding:0 3px; border-radius:var(--radius); background:var(--surface-hover);
       color:var(--fg-faint); font-family:var(--font-mono); font-size:10px;
       font-weight:600; line-height:1; border:1px solid var(--line-strong);
     }
@@ -375,7 +378,7 @@
     .field:focus { border-color:var(--accent); }
     .field.mono { font-family:var(--font-mono); }
     .tick { display:inline-flex; align-items:center; gap:var(--s1); font-size:var(--text-xs); color:var(--fg-muted); margin:0; white-space:nowrap; }
-    .tick input { margin:0; width:.85rem; height:.85rem; border-radius:3px; --pico-border-width:1px; }
+    .tick input { margin:0; width:.85rem; height:.85rem; border-radius:var(--radius); --pico-border-width:1px; }
     input.field[type="search"] { background-image:none; padding-left:var(--s2); }
 
     /* ── Badges ─────────────────────────────────────────────────────────── */
@@ -396,7 +399,7 @@
     .modem {
       text-align:left; width:100%; cursor:pointer; box-shadow:none;
       background:var(--surface); border:1px solid var(--line);
-      border-radius:var(--radius); padding:var(--s2) var(--s3);
+      border-radius:var(--radius-md); padding:var(--s2) var(--s3);
       display:grid; gap:2px; font:inherit; color:inherit;
       transition:border-color .12s ease, background .12s ease;
     }
@@ -445,7 +448,7 @@
        look for "this bit is unfinished" is an invitation to add another one
        without writing down which card finishes it. */
 
-    .block { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); }
+    .block { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md); }
     .block > .block-head { display:flex; align-items:center; gap:var(--s2); padding:var(--s2) var(--s3); border-bottom:1px solid var(--line); font-size:var(--text-xs); color:var(--fg-muted); }
     .block > .block-body { padding:var(--s3); display:grid; gap:var(--s2); }
     .row { display:flex; gap:var(--s2); align-items:center; flex-wrap:wrap; margin:0; }
@@ -462,7 +465,20 @@
 
     table { font-size:var(--text-xs); margin:0; }
     th, td { padding:var(--s1) var(--s2); border-bottom:1px solid var(--line); vertical-align:top; }
-    th { color:var(--fg-faint); font-size:10px; text-transform:uppercase; letter-spacing:.06em; font-weight:600; --pico-font-weight:600; }
+    /* ── Eyebrow ──────────────────────────────────────────────────────
+       Column heads and group labels share one treatment so the two cannot
+       drift apart again: mono, caps, 1.4px of tracking. The mono stack
+       covers no CJK and these heads are mixed (名称 / ICCID / MCC/MNC), so
+       --font-eyebrow splices the CJK faces --font-ui already names in ahead
+       of the generic. Without it the Chinese heads would fall back to
+       whatever the browser picks for the script rather than the face the
+       rest of the panel uses; Latin and digits still get the mono face,
+       which is the whole point of the treatment. */
+    th, .health-group {
+      font-family:var(--font-eyebrow); font-size:10px; font-weight:600;
+      text-transform:uppercase; letter-spacing:1.4px; color:var(--fg-faint);
+    }
+    th { --pico-font-weight:600; }
     .table-wrap { overflow:auto; max-height:100%; }
     td.wrap { white-space:pre-wrap; word-break:break-word; max-width:28rem; }
     .mono { font-family:var(--font-mono); }
@@ -471,7 +487,7 @@
       margin:0; padding:var(--s2) var(--s3); overflow:auto;
       font-family:var(--font-mono); font-size:var(--text-xs); line-height:1.55;
       white-space:pre-wrap; word-break:break-word;
-      background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+      background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md);
       min-height:8rem; max-height:26rem;
     }
     .stream:empty::before { content:attr(data-empty); color:var(--fg-faint); }
@@ -495,7 +511,7 @@
     .con-keys { color:var(--fg-faint); white-space:nowrap; display:inline-flex; align-items:center; gap:3px; }
 
     .con-ussd {
-      margin:0; padding:var(--s1) var(--s2); border-radius:var(--radius);
+      margin:0; padding:var(--s1) var(--s2); border-radius:var(--radius-md);
       background:var(--warn-wash); border:1px solid color-mix(in srgb, var(--warn) 35%, transparent);
       color:var(--warn); font-size:var(--text-xs);
     }
@@ -519,7 +535,7 @@
     .con-entry.is-warn { border-left-color:var(--warn); }
     .con-entry.is-fail { border-left-color:var(--bad); }
     .con-head { display:flex; align-items:center; gap:var(--s2); min-width:0; }
-    .con-time { color:var(--fg-faint); flex:0 0 auto; -webkit-user-select:all; user-select:all; }
+    .con-time { color:var(--fg-faint); font-family:var(--font-mono); flex:0 0 auto; -webkit-user-select:all; user-select:all; }
     .con-title { color:var(--fg); font-weight:600; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .con-title.out-cmd { color:var(--accent); }
     .con-title.out-warn { color:var(--warn); }
@@ -528,7 +544,7 @@
     .con-act {
       font:inherit; font-size:10px; line-height:1; width:auto; min-height:0; margin:0;
       padding:0 4px; box-shadow:none; cursor:pointer; flex:0 0 auto;
-      border:1px solid var(--line-strong); border-radius:4px;
+      border:1px solid var(--line-strong); border-radius:var(--radius);
       background:var(--surface-raised); color:var(--fg-faint); visibility:hidden;
     }
     .con-entry:hover .con-act, .con-act:focus-visible { visibility:visible; }
@@ -607,7 +623,7 @@
        reached — a form that accepts a message and then explains why it could
        not send it has already wasted the operator's typing. */
     .sms-block {
-      margin:0; padding:var(--s2) var(--s3); border-radius:var(--radius);
+      margin:0; padding:var(--s2) var(--s3); border-radius:var(--radius-md);
       background:var(--warn-wash); border:1px solid color-mix(in srgb, var(--warn) 35%, transparent);
       color:var(--fg); font-size:var(--text-xs); line-height:1.6; display:grid; gap:var(--s1);
     }
@@ -632,7 +648,7 @@
     .health-line.warn .health-say { color:var(--warn); }
     .health-line.bad .health-say { color:var(--bad); }
     .health-line.idle .health-say { color:var(--fg-faint); }
-    .health-group { font-size:10px; color:var(--fg-faint); text-transform:uppercase; letter-spacing:.06em; font-weight:600; padding-top:var(--s2); }
+    .health-group { padding-top:var(--s2); }
 
     /* ── Log column ──────────────────────────────────────────────────────
        This is the column the operator actually watches, so it is permanent
@@ -698,7 +714,7 @@
     }
     .log-pane:empty::before { content:attr(data-empty); color:var(--fg-faint); }
     .log-row {
-      display:flex; gap:var(--s2); padding:1px 0 1px var(--s1); border-radius:3px;
+      display:flex; gap:var(--s2); padding:1px 0 1px var(--s1); border-radius:var(--radius);
       border-left:2px solid transparent;
     }
     .log-row:hover { background:var(--surface-hover); }
@@ -711,7 +727,7 @@
     .log-row.lvl-err .log-text { color:var(--bad); }
     .log-row.lvl-warn .log-text { color:var(--warn); }
     .log-row.lvl-info .log-text { color:var(--fg-muted); }
-    .log-row mark { background:var(--accent-wash); color:var(--accent); border-radius:2px; padding:0 1px; }
+    .log-row mark { background:var(--accent-wash); color:var(--accent); border-radius:var(--radius); padding:0 1px; }
     .log-row.is-cursor { background:var(--accent-wash); outline:1px solid var(--accent); }
     /* The heartbeat is not news. Flashing every arrival would mean this column
        blinks 18 times a minute on a fleet where nothing is wrong, so only the
@@ -725,7 +741,7 @@
     .log-copy {
       font:inherit; font-size:10px; line-height:1; width:auto; min-height:0; margin:0;
       padding:0 4px; box-shadow:none; cursor:pointer; flex:0 0 auto; align-self:flex-start;
-      border:1px solid var(--line-strong); border-radius:4px;
+      border:1px solid var(--line-strong); border-radius:var(--radius);
       background:var(--surface-raised); color:var(--fg-faint); visibility:hidden;
     }
     .log-row:hover .log-copy, .log-copy:focus-visible { visibility:visible; }
