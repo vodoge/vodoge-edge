@@ -70,6 +70,21 @@ impl AtExchange {
         self.terminator == "OK"
     }
 
+    /// The call-progress code this exchange ended on, if it ended on one.
+    ///
+    /// `BUSY`, `NO ANSWER`, `NO DIALTONE` and `NO CARRIER` are four different
+    /// answers — the far end is engaged, it rang out, the module never got a
+    /// line, the call is gone — and each asks for something different of the
+    /// caller. Folding them into one generic failure throws away the only
+    /// part that says what to do next, so every code is handed back as
+    /// itself.
+    pub fn call_progress(&self) -> Option<&'static str> {
+        CALL_PROGRESS_CODES
+            .iter()
+            .copied()
+            .find(|code| *code == self.terminator)
+    }
+
     /// Full text as it appeared on the wire, for a console transcript.
     pub fn transcript(&self) -> String {
         let mut out = self.lines.join("\n");
@@ -431,14 +446,45 @@ fn wait_readable(_file: &File, _timeout: Duration) -> Result<bool, AtError> {
     Err(AtError::Io("AT ports are only supported on Linux".into()))
 }
 
+/// Result codes that end a call-originating command instead of `OK`.
+///
+/// These are terminators, not status lines: a module that answers `BUSY` says
+/// nothing more, so a reader that does not know the word waits out the entire
+/// port timeout and then reports the command as hung. That shape is much
+/// harder to diagnose than a rejection — nothing in the log says the module
+/// answered at all — which is why these belong here even though no code path
+/// in this agent dials yet.
+///
+/// `RING`, `RDY`, `SMS Ready`, `Call Ready` and `NORMAL POWER DOWN` are
+/// deliberately absent. Those are unsolicited, and a call arriving while an
+/// unrelated command is in flight must not cut that command's answer short.
+///
+/// The same caveat applies in reverse to the four below, and it is a trade
+/// rather than a free win: a voice dial on these modules is `ATD<number>;`,
+/// which answers `OK` immediately and reports the outcome later as an
+/// unsolicited line, so these words can also land in the middle of some other
+/// exchange and end it early. A truncated answer is at least visible in the
+/// transcript; a timeout tells the operator nothing.
+const CALL_PROGRESS_CODES: [&str; 4] = ["NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE"];
+
 /// Terminal result code present in `buffer`, if the response is complete.
+///
+/// `None` is not a neutral outcome. It sends `command()` back to waiting on
+/// the port, so an unrecognised terminator costs the full timeout and is then
+/// reported as `AtError::Timeout`. Keeping the two paths straight matters:
+/// what is matched here ends the exchange at once and is carried in
+/// `AtExchange::terminator`; everything else is treated as more response
+/// still on its way.
 fn terminal_code(buffer: &str) -> Option<String> {
     for line in buffer.lines().rev() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if line == "OK" || line == "ERROR" || line == "NO CARRIER" || line == "ABORTED" {
+        if line == "OK" || line == "ERROR" || line == "ABORTED" {
+            return Some(line.to_string());
+        }
+        if CALL_PROGRESS_CODES.contains(&line) {
             return Some(line.to_string());
         }
         if line.starts_with("+CME ERROR:") || line.starts_with("+CMS ERROR:") {
@@ -492,6 +538,101 @@ mod tests {
         assert_eq!(
             terminal_code("AT+CPIN?\r\r\n+CME ERROR: 10\r\n").as_deref(),
             Some("+CME ERROR: 10")
+        );
+    }
+
+    #[test]
+    fn busy_terminates_a_dial() {
+        assert_eq!(
+            terminal_code("ATD10086;\r\r\nBUSY\r\n").as_deref(),
+            Some("BUSY")
+        );
+    }
+
+    #[test]
+    fn no_answer_terminates_a_dial() {
+        assert_eq!(
+            terminal_code("ATD10086;\r\r\nNO ANSWER\r\n").as_deref(),
+            Some("NO ANSWER")
+        );
+    }
+
+    #[test]
+    fn no_dialtone_terminates_a_dial() {
+        assert_eq!(
+            terminal_code("ATD10086;\r\r\nNO DIALTONE\r\n").as_deref(),
+            Some("NO DIALTONE")
+        );
+    }
+
+    #[test]
+    fn no_carrier_and_aborted_still_terminate() {
+        assert_eq!(
+            terminal_code("ATD10086;\r\r\nNO CARRIER\r\n").as_deref(),
+            Some("NO CARRIER")
+        );
+        assert_eq!(
+            terminal_code("AT+COPS=?\r\r\nABORTED\r\n").as_deref(),
+            Some("ABORTED")
+        );
+    }
+
+    #[test]
+    fn an_unsolicited_ring_leaves_the_read_waiting() {
+        // A call arriving while another command is in flight must not end that
+        // command: its own result code has not been sent yet, so this input
+        // takes the same path as any partial response.
+        assert_eq!(terminal_code("AT+CSQ\r\r\nRING\r\n"), None);
+    }
+
+    #[test]
+    fn a_call_progress_word_inside_a_line_leaves_the_read_waiting() {
+        // Matching is on the whole line. Text that merely contains the words —
+        // here a network's USSD reply — is response body, not a terminator.
+        assert_eq!(
+            terminal_code("AT+CUSD=1\r\r\n+CUSD: 0,\"NO ANSWER FROM 10086\",15\r\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn each_call_progress_code_reaches_the_caller_as_itself() {
+        for code in ["NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE"] {
+            let exchange = AtExchange {
+                command: "ATD10086;".to_string(),
+                lines: Vec::new(),
+                terminator: code.to_string(),
+                elapsed: Duration::from_millis(1),
+            };
+            assert!(!exchange.succeeded(), "{code} is not a success");
+            assert_eq!(exchange.call_progress(), Some(code));
+        }
+    }
+
+    #[test]
+    fn a_rejection_is_not_call_progress() {
+        let exchange = AtExchange {
+            command: "AT+CPIN?".to_string(),
+            lines: Vec::new(),
+            terminator: "+CME ERROR: 10".to_string(),
+            elapsed: Duration::from_millis(1),
+        };
+        assert_eq!(exchange.call_progress(), None);
+        let ok = AtExchange {
+            command: "AT".to_string(),
+            lines: Vec::new(),
+            terminator: "OK".to_string(),
+            elapsed: Duration::from_millis(1),
+        };
+        assert_eq!(ok.call_progress(), None);
+    }
+
+    #[test]
+    fn a_failed_dial_keeps_its_code_out_of_the_body() {
+        let buffer = "ATD10086;\r\r\nNO ANSWER\r\n";
+        assert_eq!(
+            response_lines(buffer, "ATD10086;", "NO ANSWER"),
+            Vec::<String>::new()
         );
     }
 
