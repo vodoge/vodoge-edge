@@ -15,7 +15,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use vodoge_contract::{
     Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload, ContextValue,
-    Envelope, MessageKind,
+    Envelope, EsimInventoryPayload, MessageKind,
 };
 
 /// Receipt status: first durable accept of a `cmd_id`.
@@ -420,6 +420,14 @@ pub struct DeliveryOutcome {
     pub result: CommandResultPayload,
     pub result_sequence: u64,
     pub executed: bool,
+    /// The chip contents this command happened to read, when it read a whole
+    /// one and the reading is fit to send.
+    ///
+    /// Set only on the delivery that actually ran the command. A replay must
+    /// not resend it: the inventory is a separate sequenced envelope with its
+    /// own id, so a second copy would consume a second sequence number and
+    /// project the same rows again for nothing.
+    pub inventory: Option<EsimInventoryPayload>,
 }
 
 /// Accepts `CommandDeliver`, persists `cmd_id`, executes at most once, and
@@ -561,6 +569,11 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             now_ms,
         );
         let attempts = payload.attempt.unwrap_or(1);
+        // Filled by `execute`, and only by the two branches of it that read a
+        // whole chip. A delivery that did not execute -- expired, replayed, or
+        // interrupted -- leaves it empty, which is what stops a reconnect from
+        // spending a second sequence number to project rows that are there.
+        let mut inventory = None;
         let (result, executed) = if now_ms >= payload.expires_at {
             (
                 terminal_result(
@@ -574,7 +587,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 false,
             )
         } else {
-            self.execute(&payload, now_ms, attempts)?
+            self.execute(&payload, now_ms, attempts, &mut inventory)?
         };
         let sequence = self.store_terminal(&payload.cmd_id, result.clone())?;
 
@@ -583,6 +596,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             result,
             result_sequence: sequence,
             executed,
+            inventory,
         })
     }
 
@@ -600,6 +614,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             result,
             result_sequence: sequence,
             executed: false,
+            inventory: None,
         })
     }
 
@@ -608,6 +623,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
         payload: &CommandDeliverPayload,
         now_ms: i64,
         attempts: i64,
+        inventory: &mut Option<EsimInventoryPayload>,
     ) -> Result<(CommandResultPayload, bool), CommandError> {
         match &payload.command {
             Command::SendSms {
@@ -856,6 +872,10 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.switch_esim_profile(modem_imei, target_iccid);
+                // The list changes at exactly this moment and at no other, so
+                // this is where the stored inventory has to be brought level
+                // with the card.
+                *inventory = esim_inventory(outcome.as_ref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -864,6 +884,9 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::ReadEsimInfo { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.read_esim_info(modem_imei);
+                // The chip is already on the stack here. The envelope costs no
+                // extra APDU and no second ISD-R channel.
+                *inventory = esim_inventory(outcome.as_ref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -989,6 +1012,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             result,
             result_sequence: sequence,
             executed: false,
+            inventory: None,
         })
     }
 
@@ -1122,6 +1146,77 @@ fn context_value(value: JsonValue) -> ContextValue {
         ),
     }
 }
+
+/// Key the edge carries an `EsimInventory` payload under inside the reading a
+/// chip command returns.
+///
+/// The inventory travels with the reading rather than on a side channel so
+/// that what the projection stores and what the console displays come from one
+/// read of one chip. Two paths would eventually disagree, and the disagreement
+/// would look exactly like a card that had changed.
+const INVENTORY_DETAIL_KEY: &str = "inventory";
+
+/// The chip inventory a reading is carrying, if it is fit to send.
+///
+/// Read out of the port's own JSON rather than out of the finished
+/// `CommandResult`. The result's `details` are a `ContextValue`, whose numbers
+/// are `f64` -- `collected_at` survives the trip as `1756000000000.0`, which is
+/// not an integer and will not parse back into the payload. The reading is also
+/// the earlier and more truthful of the two.
+///
+/// Only two commands ever call this, and that is enforced by where it is
+/// called from: `read_esim_info`, which has the whole chip on hand already so
+/// the envelope costs no extra APDU, and `switch_esim_profile`, the one
+/// operation that changes which ICCID is enabled. Nothing polls: this payload
+/// is `sequenced` and may be 128 KiB, so a periodic copy would be an expensive
+/// heartbeat carrying an answer that only changes when a person changes it.
+fn esim_inventory(reading: Result<&JsonValue, &SendError>) -> Option<EsimInventoryPayload> {
+    let payload: EsimInventoryPayload =
+        serde_json::from_value(reading.ok()?.get(INVENTORY_DETAIL_KEY)?.clone()).ok()?;
+    // The last gate before the wire, and the only one that knows the contract.
+    // The modem crate decides what the inventory *is*; this decides whether it
+    // may be sent, because a payload the cloud cannot store is worse than none:
+    // it is counted as a contract violation, and a projection run against half
+    // an inventory marks the profiles it is missing as deleted.
+    inventory_fits_contract(&payload).then_some(payload)
+}
+
+/// Whether an inventory payload matches every shape the uplink schema fixes.
+fn inventory_fits_contract(payload: &EsimInventoryPayload) -> bool {
+    if !digits_within(&payload.modem_imei, 14, 16) {
+        return false;
+    }
+    if !digits_within(&payload.eid, 32, 32) {
+        return false;
+    }
+    if !(0..=MAX_EPOCH_MILLIS).contains(&payload.collected_at) {
+        return false;
+    }
+    if payload.profiles.len() > MAX_INVENTORY_PROFILES {
+        return false;
+    }
+    payload.profiles.iter().all(|profile| {
+        digits_within(&profile.iccid, 19, 20)
+            && PROFILE_STATES.contains(&profile.state.as_str())
+            && profile
+                .nickname
+                .as_ref()
+                .map_or(true, |nickname| nickname.chars().count() <= 256)
+    })
+}
+
+fn digits_within(value: &str, shortest: usize, longest: usize) -> bool {
+    (shortest..=longest).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The four profile states the cloud will store, from the uplink schema.
+const PROFILE_STATES: [&str; 4] = ["enabled", "disabled", "deleted", "unknown"];
+
+/// Largest `collected_at` the uplink schema allows, in epoch milliseconds.
+const MAX_EPOCH_MILLIS: i64 = 253_402_300_799_999;
+
+/// Most profiles one inventory payload may carry.
+const MAX_INVENTORY_PROFILES: usize = 64;
 
 /// One diagnostic action's outcome, in the shape every branch of `execute`
 /// needs it. Written once because there are now ten of them and each was

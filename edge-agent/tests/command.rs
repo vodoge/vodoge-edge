@@ -723,3 +723,330 @@ fn an_explicit_ussd_stage_reaches_the_port_unflattened() {
         assert_eq!(calls, vec![format!("send_ussd 2 {stage}")]);
     }
 }
+
+/// The bench eUICC in `867018069514820`, read on 2026-08-25 (T089).
+const EID: &str = "89086030202200000026000178339240";
+/// WEBBING, the profile that is enabled on it. Twenty digits.
+const WEBBING_ICCID: &str = "89852351225042214201";
+/// The US profile T031 switched to and back from. Nineteen digits, which is
+/// the other end of the range the cloud accepts.
+const US_ICCID: &str = "8901240527197122156";
+
+/// A port whose eSIM commands answer with whatever a test hands it.
+struct EsimPort {
+    details: serde_json::Value,
+    fails: bool,
+}
+
+impl EsimPort {
+    fn answering(details: serde_json::Value) -> Self {
+        Self {
+            details,
+            fails: false,
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            details: serde_json::Value::Null,
+            fails: true,
+        }
+    }
+
+    fn answer(&self) -> Result<serde_json::Value, edge_agent::SendError> {
+        if self.fails {
+            return Err(edge_agent::SendError::new(
+                "esim_info_failed",
+                "open ISD-R channel: no such applet",
+            ));
+        }
+        Ok(self.details.clone())
+    }
+}
+
+impl edge_agent::SendPort for EsimPort {
+    fn send_sms(
+        &mut self,
+        _send: &edge_agent::SmsSend,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn read_esim_info(
+        &mut self,
+        _imei: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.answer()
+    }
+
+    fn switch_esim_profile(
+        &mut self,
+        _imei: &str,
+        _target: &str,
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.answer()
+    }
+
+    fn modem_report(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.answer()
+    }
+}
+
+fn inventory_details(profiles: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "imei": IMEI,
+        "eid": EID,
+        "inventory": {
+            "modem_imei": IMEI,
+            "eid": EID,
+            "collected_at": 1_756_000_000_000_i64,
+            "profiles": profiles,
+        },
+    })
+}
+
+fn bench_profiles() -> serde_json::Value {
+    serde_json::json!([
+        {"iccid": WEBBING_ICCID, "state": "enabled", "nickname": "WEBBING"},
+        {"iccid": US_ICCID, "state": "disabled"},
+    ])
+}
+
+fn deliver_esim(command: Command, port: EsimPort) -> edge_agent::DeliveryOutcome {
+    let mut executor = CommandExecutor::new(port);
+    executor
+        .deliver(
+            DELIVERY_A,
+            CommandDeliverPayload {
+                cmd_id: CMD_ID.into(),
+                issued_at: 1_000,
+                expires_at: 10_000,
+                attempt: Some(1),
+                command,
+            },
+            1_500,
+        )
+        .expect("deliver")
+}
+
+fn read_chip() -> Command {
+    Command::ReadEsimInfo {
+        modem_imei: IMEI.into(),
+    }
+}
+
+fn switch_chip() -> Command {
+    Command::SwitchEsimProfile {
+        modem_imei: IMEI.into(),
+        target_iccid: US_ICCID.into(),
+    }
+}
+
+/// The whole point of the card: a chip read has to leave the command with an
+/// inventory the cloud can project, not just a reading the console can draw.
+#[test]
+fn a_chip_read_carries_its_inventory_out_of_the_command() {
+    let outcome = deliver_esim(
+        read_chip(),
+        EsimPort::answering(inventory_details(bench_profiles())),
+    );
+
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    let inventory = outcome
+        .inventory
+        .expect("read_esim_info produces an inventory");
+    assert_eq!(inventory.eid, EID);
+    assert_eq!(inventory.modem_imei, IMEI);
+    assert_eq!(inventory.profiles.len(), 2);
+    assert_eq!(inventory.profiles[0].iccid, WEBBING_ICCID);
+    assert_eq!(inventory.profiles[0].state, "enabled");
+    assert_eq!(inventory.profiles[0].nickname.as_deref(), Some("WEBBING"));
+    assert_eq!(inventory.profiles[1].state, "disabled");
+    assert!(inventory.profiles[1].nickname.is_none());
+    assert!(MessageKind::EsimInventory.is_sequenced());
+}
+
+/// A switch is the only thing that changes which ICCID is enabled, so it is
+/// the one other moment an inventory may be produced. Without it the stored
+/// inventory would contradict the card from the moment an operator acted.
+#[test]
+fn a_switch_carries_the_chip_it_read_back() {
+    let outcome = deliver_esim(
+        switch_chip(),
+        EsimPort::answering(inventory_details(serde_json::json!([
+            {"iccid": WEBBING_ICCID, "state": "disabled"},
+            {"iccid": US_ICCID, "state": "enabled"}
+        ]))),
+    );
+
+    let inventory = outcome
+        .inventory
+        .expect("a switch reports the chip it left");
+    assert_eq!(inventory.profiles[0].state, "disabled");
+    assert_eq!(inventory.profiles[1].state, "enabled");
+}
+
+/// Redelivery must not produce a second envelope. It carries its own sequence
+/// number and its own envelope id, so a replay would spend a sequence to
+/// project rows that are already there.
+#[test]
+fn a_replayed_delivery_does_not_send_the_inventory_again() {
+    let mut executor =
+        CommandExecutor::new(EsimPort::answering(inventory_details(bench_profiles())));
+    let payload = CommandDeliverPayload {
+        cmd_id: CMD_ID.into(),
+        issued_at: 1_000,
+        expires_at: 10_000,
+        attempt: Some(1),
+        command: read_chip(),
+    };
+
+    let first = executor
+        .deliver(DELIVERY_A, payload.clone(), 1_500)
+        .expect("first");
+    let second = executor
+        .deliver(DELIVERY_B, payload, 1_600)
+        .expect("replay");
+
+    assert!(first.inventory.is_some());
+    assert!(first.executed);
+    assert!(!second.executed);
+    assert!(
+        second.inventory.is_none(),
+        "a replay must not resend the inventory",
+    );
+}
+
+/// Only two commands may produce one. Any other command carrying a key of the
+/// same name is a coincidence, not an inventory, and treating it as one would
+/// let an unrelated diagnostic write to the eSIM projection.
+#[test]
+fn only_the_two_chip_commands_produce_an_inventory() {
+    let outcome = deliver_esim(
+        Command::ModemReport {
+            modem_imei: IMEI.into(),
+        },
+        EsimPort::answering(inventory_details(bench_profiles())),
+    );
+
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    assert!(outcome.inventory.is_none());
+}
+
+/// A command that failed read nothing, whatever it managed to say on the way
+/// out. `867018069509705` is not an eUICC and this is the path it takes.
+#[test]
+fn a_failed_chip_read_carries_no_inventory() {
+    let outcome = deliver_esim(read_chip(), EsimPort::failing());
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("esim_info_failed")
+    );
+    assert!(outcome.inventory.is_none());
+}
+
+/// A read that produced no inventory is normal, not an error: a card that is
+/// not an eUICC has no EID, and the payload cannot be written without one.
+#[test]
+fn a_read_without_an_inventory_still_succeeds() {
+    let outcome = deliver_esim(
+        read_chip(),
+        EsimPort::answering(
+            serde_json::json!({"imei": IMEI, "inventory": serde_json::Value::Null}),
+        ),
+    );
+
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    assert!(outcome.inventory.is_none());
+}
+
+/// The last gate before the wire. A payload the cloud cannot store is worse
+/// than none: it is counted as a contract violation, and the projection treats
+/// an inventory as the complete contents of a chip -- so one that arrives with
+/// half its profiles marks the other half deleted.
+#[test]
+fn an_inventory_the_cloud_could_not_store_never_leaves() {
+    let rejected: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "an EID one digit short",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": "8908603020220000002600017833924",
+                "collected_at": 1_756_000_000_000_i64, "profiles": [],
+            }),
+        ),
+        (
+            "an EID that is not digits",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": "8908603020220000002600017833924x",
+                "collected_at": 1_756_000_000_000_i64, "profiles": [],
+            }),
+        ),
+        (
+            "an IMEI that is not one",
+            serde_json::json!({
+                "modem_imei": "867018", "eid": EID,
+                "collected_at": 1_756_000_000_000_i64, "profiles": [],
+            }),
+        ),
+        (
+            "an ICCID that is too short",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": EID, "collected_at": 1_756_000_000_000_i64,
+                "profiles": [{"iccid": "890124052719712", "state": "enabled"}],
+            }),
+        ),
+        (
+            "a state the column would refuse",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": EID, "collected_at": 1_756_000_000_000_i64,
+                "profiles": [{"iccid": WEBBING_ICCID, "state": "active"}],
+            }),
+        ),
+        (
+            "a collected_at before the epoch",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": EID, "collected_at": -1_i64, "profiles": [],
+            }),
+        ),
+        (
+            "a field the payload does not have",
+            serde_json::json!({
+                "modem_imei": IMEI, "eid": EID, "collected_at": 1_756_000_000_000_i64,
+                "profiles": [], "chip": "EC20",
+            }),
+        ),
+    ];
+
+    for (why, inventory) in rejected {
+        let outcome = deliver_esim(
+            read_chip(),
+            EsimPort::answering(serde_json::json!({"imei": IMEI, "inventory": inventory})),
+        );
+        assert_eq!(outcome.result.status, RESULT_SUCCEEDED, "{why}");
+        assert!(outcome.inventory.is_none(), "{why} must not reach the wire");
+    }
+}
+
+/// Sixty-four is the schema's limit, so sixty-four must pass and sixty-five
+/// must not. Truncating would be the worst of the three outcomes: the cloud
+/// would mark every profile that fell off the end as deleted.
+#[test]
+fn an_inventory_stops_being_sendable_one_profile_past_the_limit() {
+    for (count, expected) in [(64_usize, true), (65_usize, false)] {
+        let profiles: Vec<serde_json::Value> = (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "iccid": format!("8985235122504221{index:04}"),
+                    "state": "disabled",
+                })
+            })
+            .collect();
+        let outcome = deliver_esim(
+            read_chip(),
+            EsimPort::answering(inventory_details(serde_json::Value::Array(profiles))),
+        );
+        assert_eq!(outcome.inventory.is_some(), expected, "{count} profiles");
+    }
+}

@@ -32,7 +32,7 @@ mod linux {
     use edge_core::{assemble, CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
     use edge_modem::{
         collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice, Es9pClient,
-        NasRegistrationState, OperatingMode, QmiClient,
+        EsimLocalInfo, NasRegistrationState, OperatingMode, QmiClient,
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
@@ -46,13 +46,30 @@ mod linux {
     use edge_uplink::worker::{Outbox, RetainedRecord, UplinkWorker};
     use edge_uplink::{EnvelopeId, RetentionClass, UplinkAck, UplinkError};
     use rustls_pemfile::{certs, pkcs8_private_keys};
-    use vodoge_contract::{Envelope, MessageKind, PROTOCOL_VERSION};
+    use vodoge_contract::{Envelope, EsimInventoryPayload, MessageKind, PROTOCOL_VERSION};
 
     const DEVICE_ID: &str = "b0000000-0000-4000-8000-00000000000b";
 
     /// Primary UICC slot. These modules expose one card slot, and the eUICC
     /// always sits in it.
     const ESIM_SLOT: u8 = 1;
+
+    /// How many times the chip is read back after a profile switch.
+    ///
+    /// An upper bound on patience, not a prediction. A REFRESH is a card
+    /// re-initialisation rather than a module restart, and nobody has timed one
+    /// on this bench — T031 switched twice and saw registration return without
+    /// a single poll, which says it is quick but not how quick. Three attempts
+    /// bound the extra time a switch takes at roughly three seconds.
+    const ESIM_READBACK_ATTEMPTS: usize = 3;
+
+    /// The gap between those attempts.
+    ///
+    /// The 1.5s `edge-modem` already gives a module to act on a mode change
+    /// before a read-back is believed. Borrowed rather than measured, and said
+    /// so: `readback_attempts` in the result is what will eventually replace
+    /// this reasoning with a number.
+    const ESIM_READBACK_GAP: Duration = Duration::from_millis(1_500);
 
     /// A full band sweep on an EC20 routinely runs past a minute, and the
     /// module answers nothing until it finishes.
@@ -765,6 +782,54 @@ mod linux {
     }
 
     impl RadioPort {
+        /// Read the chip back after a switch, waiting for it to come back.
+        ///
+        /// `set_profile` asks the card for a REFRESH, so the card re-initialises
+        /// and the ISD-R channel this needs cannot be opened until it has.
+        ///
+        /// Never an error to the caller. The profile is already enabled by the
+        /// time this runs; a failure here means the picture of the card is
+        /// missing, not that the switch is in doubt, and turning it into one
+        /// would invite a retry of an operation that already happened.
+        fn esim_inventory_after_switch(&mut self, imei: &str) -> EsimReadback {
+            let mut last_error: Option<String> = None;
+            for attempt in 1..=ESIM_READBACK_ATTEMPTS {
+                if attempt > 1 {
+                    std::thread::sleep(ESIM_READBACK_GAP);
+                }
+                match self.radio.with_client(Some(imei), |client| {
+                    client
+                        .read_esim_local_info(ESIM_SLOT)
+                        .map_err(|error| SendError::new("esim_info_failed", error.to_string()))
+                }) {
+                    Ok(info) => {
+                        let inventory = info.inventory_json(imei, unix_ms());
+                        // A chip that answered but cannot be expressed says so
+                        // with its own words where it has them: an incomplete
+                        // profile list is the reason that will actually happen.
+                        let error = match (&inventory, &info.profiles_error) {
+                            (Some(_), _) => None,
+                            (None, Some(reason)) => Some(reason.clone()),
+                            (None, None) => Some(
+                                "chip read back but does not fit an inventory payload".to_string(),
+                            ),
+                        };
+                        return EsimReadback {
+                            inventory,
+                            error,
+                            attempts: attempt,
+                        };
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                }
+            }
+            EsimReadback {
+                inventory: None,
+                error: last_error,
+                attempts: ESIM_READBACK_ATTEMPTS,
+            }
+        }
+
         /// One AT exchange, with whatever the module answered left intact.
         fn at_exchange(
             &mut self,
@@ -1317,6 +1382,17 @@ mod linux {
             json_details(&result)
         }
 
+        /// Enable one profile, then read the chip back.
+        ///
+        /// The read-back is what lets the cloud inventory keep up with an
+        /// operator. A switch is the only thing that changes which ICCID is
+        /// enabled, so without a fresh reading the stored inventory would
+        /// contradict the card from the moment somebody pressed the button.
+        ///
+        /// It is one extra read after a deliberate action, not a poll, and it
+        /// can never fail the switch: the profile has already been enabled by
+        /// the time it runs, and reporting failure would invite a retry of an
+        /// operation that already happened.
         fn switch_esim_profile(
             &mut self,
             imei: &str,
@@ -1324,7 +1400,14 @@ mod linux {
         ) -> Result<JsonValue, SendError> {
             Actions::switch_profile(self, Some(imei.to_string()), target_iccid.to_string(), true)
                 .map_err(action_failed)?;
-            Ok(JsonValue::Null)
+            let readback = self.esim_inventory_after_switch(imei);
+            json_details(&SwitchEsimBody {
+                imei: imei.to_string(),
+                target_iccid: target_iccid.to_string(),
+                inventory: readback.inventory,
+                inventory_error: readback.error,
+                readback_attempts: readback.attempts,
+            })
         }
 
         /// Everything ES10b will say about the chip, on one ISD-R channel.
@@ -1339,28 +1422,7 @@ mod linux {
                     .read_esim_local_info(ESIM_SLOT)
                     .map_err(|error| SendError::new("esim_info_failed", error.to_string()))
             })?;
-            json_details(&EsimInfoBody {
-                imei: imei.to_string(),
-                eid: info.eid,
-                chip: euicc_info_body(&info.info),
-                notifications: info.notifications.iter().map(notification_body).collect(),
-                notifications_error: info.notifications_error,
-                profiles: info
-                    .profiles
-                    .into_iter()
-                    .map(|profile| ProfileBody {
-                        label: profile.label(),
-                        iccid: profile.iccid,
-                        enabled: profile.enabled,
-                        provider: profile.provider,
-                        name: profile.name,
-                        nickname: profile.nickname,
-                        class: profile.class,
-                        isdp_aid: profile.isdp_aid,
-                    })
-                    .collect(),
-                profiles_error: info.profiles_error,
-            })
+            json_details(&esim_info_body(imei, info, unix_ms()))
         }
 
         fn retrieve_esim_notification(
@@ -1709,6 +1771,13 @@ mod linux {
         /// 32 digits identifying the chip. Unchanged by profile switches, which
         /// is what makes it the right key for everything else here.
         eid: String,
+        /// This same read in the shape the cloud projects, or `null` when it
+        /// cannot be one.
+        ///
+        /// Carried inside the command result rather than assembled separately
+        /// upstream, so the rows the cloud stores and the table the console
+        /// draws come from one read of one chip and cannot drift apart.
+        inventory: Option<JsonValue>,
         chip: EuiccInfoBody,
         notifications: Vec<NotificationBody>,
         /// Set when the card refused the query rather than having nothing
@@ -1716,6 +1785,178 @@ mod linux {
         notifications_error: Option<String>,
         profiles: Vec<ProfileBody>,
         profiles_error: Option<String>,
+    }
+
+    /// One `read_esim_local_info` in the shape the console and the cloud both
+    /// receive it.
+    ///
+    /// Separate from `read_esim_info` because the read needs a modem and this
+    /// does not: this is the part that decides what is *said* about a chip, and
+    /// a test can only reach it if it stands on its own.
+    fn esim_info_body(imei: &str, info: EsimLocalInfo, collected_at: i64) -> EsimInfoBody {
+        // Before the reading is taken apart, because it is the reading.
+        let inventory = info.inventory_json(imei, collected_at);
+        EsimInfoBody {
+            imei: imei.to_string(),
+            eid: info.eid,
+            inventory,
+            chip: euicc_info_body(&info.info),
+            notifications: info.notifications.iter().map(notification_body).collect(),
+            notifications_error: info.notifications_error,
+            profiles: info
+                .profiles
+                .into_iter()
+                .map(|profile| ProfileBody {
+                    label: profile.label(),
+                    iccid: profile.iccid,
+                    enabled: profile.enabled,
+                    provider: profile.provider,
+                    name: profile.name,
+                    nickname: profile.nickname,
+                    class: profile.class,
+                    isdp_aid: profile.isdp_aid,
+                })
+                .collect(),
+            profiles_error: info.profiles_error,
+        }
+    }
+
+    /// `switch_esim_profile` as the console receives it.
+    ///
+    /// It used to answer with nothing at all, which was honest while a switch
+    /// had nothing to report. It has something to report now: the chip as it
+    /// reads afterwards.
+    #[derive(serde::Serialize)]
+    struct SwitchEsimBody {
+        imei: String,
+        target_iccid: String,
+        /// The chip as it reads after the switch, or `null` when the read-back
+        /// produced nothing the cloud can store.
+        inventory: Option<JsonValue>,
+        /// Why there is no inventory. The switch itself still succeeded — this
+        /// only says the picture of the card afterwards is missing.
+        inventory_error: Option<String>,
+        /// How many read-backs it took. Reported because nobody has ever timed
+        /// how long a REFRESH keeps ISD-R shut on this bench, and a number that
+        /// comes back from real switches is worth more than the guess below it.
+        readback_attempts: usize,
+    }
+
+    /// The outcome of reading a chip back after a switch.
+    struct EsimReadback {
+        inventory: Option<JsonValue>,
+        error: Option<String>,
+        attempts: usize,
+    }
+
+    /// The seam between what this binary reads off a chip and what the cloud
+    /// is able to store. Three crates meet here and only one of them can see
+    /// both sides, so this is where the join is checked.
+    #[cfg(test)]
+    mod esim_inventory_tests {
+        use super::*;
+        use edge_modem::{EuiccInfo2, Profile};
+        use vodoge_contract::EsimInventoryPayload;
+
+        /// The bench eUICC in `867018069514820`, read on 2026-08-25 (T089).
+        const BENCH_EID: &str = "89086030202200000026000178339240";
+        const WEBBING_ICCID: &str = "89852351225042214201";
+        const US_ICCID: &str = "8901240527197122156";
+        const BENCH_IMEI: &str = "867018069514820";
+        const COLLECTED_AT: i64 = 1_756_000_000_000;
+
+        fn profile(iccid: &str, enabled: bool, nickname: Option<&str>) -> Profile {
+            Profile {
+                iccid: iccid.to_string(),
+                enabled,
+                nickname: nickname.map(str::to_string),
+                ..Profile::default()
+            }
+        }
+
+        fn chip(eid: &str, profiles: Vec<Profile>) -> EsimLocalInfo {
+            EsimLocalInfo {
+                eid: eid.to_string(),
+                info: EuiccInfo2::default(),
+                notifications: Vec::new(),
+                notifications_error: None,
+                profiles,
+                profiles_error: None,
+            }
+        }
+
+        /// What this binary puts on the wire has to be exactly what the agent
+        /// will accept as a payload -- the two agree by the name of one JSON
+        /// key and by the shape underneath it, and nothing else would notice
+        /// them drifting apart until `app.esim_profiles` quietly stayed empty.
+        #[test]
+        fn a_reading_carries_an_inventory_the_contract_accepts() {
+            let body = esim_info_body(
+                BENCH_IMEI,
+                chip(
+                    BENCH_EID,
+                    vec![
+                        profile(WEBBING_ICCID, true, Some("WEBBING")),
+                        profile(US_ICCID, false, None),
+                    ],
+                ),
+                COLLECTED_AT,
+            );
+            let encoded = serde_json::to_value(&body).expect("body json");
+
+            let payload: EsimInventoryPayload =
+                serde_json::from_value(encoded["inventory"].clone())
+                    .expect("the agent parses this same value");
+            assert_eq!(payload.eid, BENCH_EID);
+            assert_eq!(payload.modem_imei, BENCH_IMEI);
+            assert_eq!(payload.collected_at, COLLECTED_AT);
+            assert_eq!(payload.profiles.len(), 2);
+            assert_eq!(payload.profiles[0].state, "enabled");
+            assert_eq!(payload.profiles[1].iccid, US_ICCID);
+
+            // And the reading the console draws still says the same thing, out
+            // of its own fields.
+            assert_eq!(encoded["profiles"][0]["enabled"], serde_json::json!(true));
+            assert_eq!(encoded["profiles"][0]["label"], serde_json::json!("WEBBING"));
+        }
+
+        /// `867018069509705` has no ISD-R, so it never reaches this function at
+        /// all. A chip that answered without a usable EID is the case that can:
+        /// the reading is still delivered in full, and only the inventory is
+        /// absent. The console is where that card gets reported, not here.
+        #[test]
+        fn a_reading_without_an_inventory_is_still_a_whole_reading() {
+            let body = esim_info_body(
+                BENCH_IMEI,
+                chip("", vec![profile(WEBBING_ICCID, true, None)]),
+                COLLECTED_AT,
+            );
+            let encoded = serde_json::to_value(&body).expect("body json");
+
+            assert_eq!(encoded["inventory"], serde_json::Value::Null);
+            assert_eq!(encoded["profiles"][0]["iccid"], serde_json::json!(WEBBING_ICCID));
+            assert_eq!(encoded["imei"], serde_json::json!(BENCH_IMEI));
+        }
+
+        /// A read-back that failed must not be reported as a switch that
+        /// failed. The profile is already enabled by then, and an operator who
+        /// is told otherwise will press the button again.
+        #[test]
+        fn a_switch_says_separately_whether_it_worked_and_whether_it_could_look() {
+            let body = SwitchEsimBody {
+                imei: BENCH_IMEI.to_string(),
+                target_iccid: US_ICCID.to_string(),
+                inventory: None,
+                inventory_error: Some("open ISD-R channel: SW 6985".to_string()),
+                readback_attempts: ESIM_READBACK_ATTEMPTS,
+            };
+            let encoded = serde_json::to_value(&body).expect("body json");
+
+            assert_eq!(encoded["inventory"], serde_json::Value::Null);
+            assert_eq!(encoded["target_iccid"], serde_json::json!(US_ICCID));
+            assert!(encoded["inventory_error"].is_string());
+            assert_eq!(encoded["readback_attempts"], serde_json::json!(3));
+        }
     }
 
     /// `GetEUICCInfo2`, every field of it.
@@ -4530,6 +4771,61 @@ mod linux {
         println!(
             "command {} {} seq={sequence}",
             outcome.result.cmd_id, outcome.result.status
+        );
+        if let Some(inventory) = &outcome.inventory {
+            if let Err(error) = send_esim_inventory(inventory, socket, outbox, now) {
+                // Logged, never fatal, and never a reason to fail the command.
+                // The command result is what the operator is waiting on and it
+                // has already been sequenced; losing the inventory costs a
+                // stale projection until the next read, which is a smaller
+                // harm than an error on an action that worked.
+                log_error(format!("esim inventory: {error}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Sequence and send one `EsimInventory` envelope.
+    ///
+    /// Its own envelope id, deliberately not the `cmd_id`: that id already
+    /// belongs to this command's `CommandResult`, and reusing it would collide
+    /// in the outbox, hand this payload the result's sequence number, and drop
+    /// one of the two on the floor.
+    fn send_esim_inventory(
+        payload: &EsimInventoryPayload,
+        socket: &mut Socket,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        now: i64,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let envelope_id = EnvelopeId::new(id.clone()).map_err(|e| e.to_string())?;
+        let (sequence, _) = outbox
+            .lock()
+            .expect("outbox")
+            .append(
+                envelope_id,
+                "EsimInventory",
+                bytes,
+                RetentionClass::Protected,
+            )
+            .map_err(|e| e.to_string())?;
+        socket
+            .send_envelope(&Envelope {
+                v: PROTOCOL_VERSION,
+                kind: MessageKind::EsimInventory,
+                id,
+                ts: now,
+                device_id: DEVICE_ID.into(),
+                seq: Some(sequence),
+                trace_id: None,
+                payload: serde_json::to_value(payload).map_err(|e| e.to_string())?,
+            })
+            .map_err(|e| e.to_string())?;
+        println!(
+            "esim inventory {} profiles={} seq={sequence}",
+            payload.eid,
+            payload.profiles.len()
         );
         Ok(())
     }

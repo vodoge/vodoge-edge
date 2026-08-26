@@ -531,6 +531,109 @@ pub struct EsimLocalInfo {
     pub profiles_error: Option<String>,
 }
 
+/// Digits an EID has, and the only length the cloud will store one at.
+///
+/// A chip that answers `GetEID` with anything else has not been read: the
+/// number is fixed by SGP.22 and is not a local formatting choice.
+const EID_DIGITS: usize = 32;
+
+/// The widest inventory the uplink contract will carry in one payload.
+const MAX_INVENTORY_PROFILES: usize = 64;
+
+/// Shortest and longest ICCID the cloud accepts.
+const ICCID_DIGITS: std::ops::RangeInclusive<usize> = 19..=20;
+
+/// Largest `collected_at` the cloud will store, in epoch milliseconds.
+const MAX_EPOCH_MILLIS: i64 = 253_402_300_799_999;
+
+impl EsimLocalInfo {
+    /// This read as an `EsimInventory` payload, or `None` when it cannot
+    /// honestly stand for one.
+    ///
+    /// The cloud treats an inventory as *the complete contents of one chip*:
+    /// every ICCID it has on record for this EID and does not find in the
+    /// payload is marked deleted. That makes a partial answer worse than no
+    /// answer, so this is deliberately all-or-nothing. A list the card refused
+    /// (`profiles_error`), a profile whose ICCID came back the wrong shape, or
+    /// more profiles than one payload can carry each produce `None` rather
+    /// than a shorter inventory that would erase what it left out.
+    ///
+    /// `None` is also the answer for a card that is not an eUICC. Such a card
+    /// has no EID, the payload requires one, and so it cannot be represented
+    /// here at all — the projection is not where that card gets reported.
+    ///
+    /// JSON rather than a type of its own: this crate speaks to modems and
+    /// carries no dependency on the wire contract. The caller that does have
+    /// one parses this back into the generated type, and that parse is what
+    /// checks it.
+    pub fn inventory_json(
+        &self,
+        modem_imei: &str,
+        collected_at: i64,
+    ) -> Option<serde_json::Value> {
+        if self.profiles_error.is_some() {
+            return None;
+        }
+        if !is_eid(&self.eid) {
+            return None;
+        }
+        if !(0..=MAX_EPOCH_MILLIS).contains(&collected_at) {
+            return None;
+        }
+        if self.profiles.len() > MAX_INVENTORY_PROFILES {
+            return None;
+        }
+
+        let mut profiles = Vec::with_capacity(self.profiles.len());
+        for profile in &self.profiles {
+            if !is_iccid(&profile.iccid) {
+                return None;
+            }
+            let mut entry = serde_json::Map::new();
+            entry.insert("iccid".into(), profile.iccid.clone().into());
+            // Only two of the contract's four states can come from a card that
+            // answered: it lists what it holds, and the enabled flag is the
+            // whole of what it says about each one. `deleted` is the cloud's
+            // own inference from an ICCID going missing, and `unknown` would be
+            // this code declining to report a boolean it has in hand.
+            entry.insert(
+                "state".into(),
+                if profile.enabled { "enabled" } else { "disabled" }.into(),
+            );
+            if let Some(nickname) = profile.nickname.as_deref() {
+                let nickname = nickname.trim();
+                // An empty nickname is not a nickname. Upstream would keep the
+                // one it already had either way, but sending it would still be
+                // claiming the operator had named this profile something.
+                if !nickname.is_empty() {
+                    entry.insert("nickname".into(), nickname.to_string().into());
+                }
+            }
+            profiles.push(serde_json::Value::Object(entry));
+        }
+
+        Some(serde_json::json!({
+            "modem_imei": modem_imei,
+            "eid": self.eid,
+            "collected_at": collected_at,
+            "profiles": profiles,
+        }))
+    }
+}
+
+/// True for the 32 decimal digits an eUICC reports as its EID.
+///
+/// What separates an eUICC from a card that is not one, once the chip has
+/// answered at all. It lives here rather than at the caller because the caller
+/// cannot see what the difference is for.
+fn is_eid(value: &str) -> bool {
+    value.len() == EID_DIGITS && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_iccid(value: &str) -> bool {
+    ICCID_DIGITS.contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// What an ES9+ session needs from the chip before it can start.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EsimAuthenticationInputs {

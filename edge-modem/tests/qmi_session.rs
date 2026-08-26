@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use edge_modem::{
     parse_cfun, parse_cpin, parse_qinistat, parse_qsimstat, restart_radio, CardEvidence, CardState,
-    ClientAllocationRequest, ModuleRadio, OperatingMode, QmiClient, QmiTransport, ServiceId,
-    SessionError, CARD_RECOVERY_NOTE, CFUN_DISABLE_RF, CFUN_FULL, CFUN_OFFLINE, CFUN_RESET_NOTE,
-    CTL_SYNC, GET_DEVICE_REV_ID, GET_DEVICE_SERIAL_NUMBERS, GET_MANUFACTURER, GET_MODEL_ID,
-    GET_OPERATING_MODE, SET_OPERATING_MODE,
+    ClientAllocationRequest, EsimLocalInfo, EuiccInfo2, ModuleRadio, OperatingMode, Profile,
+    QmiClient, QmiTransport, ServiceId, SessionError, CARD_RECOVERY_NOTE, CFUN_DISABLE_RF,
+    CFUN_FULL, CFUN_OFFLINE, CFUN_RESET_NOTE, CTL_SYNC, GET_DEVICE_REV_ID,
+    GET_DEVICE_SERIAL_NUMBERS, GET_MANUFACTURER, GET_MODEL_ID, GET_OPERATING_MODE,
+    SET_OPERATING_MODE,
 };
 
 struct FakeModem {
@@ -1231,4 +1232,216 @@ fn failure_result_tlv(error: u16) -> Vec<u8> {
     let mut tlv = vec![0x02, 0x04, 0x00, 0x01, 0x00];
     tlv.extend_from_slice(&error.to_le_bytes());
     tlv
+}
+
+/// The bench eUICC in `867018069514820`, read on 2026-08-25 (T089).
+const BENCH_EID: &str = "89086030202200000026000178339240";
+/// WEBBING, the profile enabled on it. Twenty digits.
+const WEBBING_ICCID: &str = "89852351225042214201";
+/// The US profile T031 switched to and back from. Nineteen digits, which is
+/// the other end of the range the cloud accepts.
+const US_ICCID: &str = "8901240527197122156";
+/// `867018069514820`, the one modem on the bench that may be read freely.
+const BENCH_IMEI: &str = "867018069514820";
+/// An arbitrary but fixed instant, so the JSON below can be compared whole.
+const COLLECTED_AT: i64 = 1_756_000_000_000;
+
+fn chip(eid: &str, profiles: Vec<Profile>) -> EsimLocalInfo {
+    EsimLocalInfo {
+        eid: eid.to_string(),
+        info: EuiccInfo2::default(),
+        notifications: Vec::new(),
+        notifications_error: None,
+        profiles,
+        profiles_error: None,
+    }
+}
+
+fn profile(iccid: &str, enabled: bool, nickname: Option<&str>) -> Profile {
+    Profile {
+        iccid: iccid.to_string(),
+        enabled,
+        nickname: nickname.map(str::to_string),
+        ..Profile::default()
+    }
+}
+
+fn bench_chip() -> EsimLocalInfo {
+    chip(
+        BENCH_EID,
+        vec![
+            profile(WEBBING_ICCID, true, Some("WEBBING")),
+            profile(US_ICCID, false, None),
+        ],
+    )
+}
+
+/// The shape the cloud stores, written out whole rather than field by field.
+///
+/// Every one of these keys and values is load-bearing somewhere upstream: the
+/// payload rejects an unknown field, the `esim_profiles` table has a CHECK on
+/// each of `eid`, `iccid` and `state`, and the projection keys on `eid`
+/// together with `iccid`. A field renamed here would be silently dropped there.
+#[test]
+fn a_chip_read_becomes_the_inventory_the_cloud_stores() {
+    let json = bench_chip()
+        .inventory_json(BENCH_IMEI, COLLECTED_AT)
+        .expect("an eUICC that answered produces an inventory");
+
+    assert_eq!(
+        json.to_string(),
+        concat!(
+            r#"{"collected_at":1756000000000,"#,
+            r#""eid":"89086030202200000026000178339240","#,
+            r#""modem_imei":"867018069514820","#,
+            r#""profiles":["#,
+            r#"{"iccid":"89852351225042214201","nickname":"WEBBING","state":"enabled"},"#,
+            r#"{"iccid":"8901240527197122156","state":"disabled"}"#,
+            r#"]}"#,
+        ),
+    );
+}
+
+/// `867018069509705` is not an eUICC. It has no EID, and the payload requires
+/// one, so it cannot be expressed on this path at all.
+///
+/// That is a deliberate exclusion, not an oversight: the alternative is
+/// widening the contract, and a card with no EID has nothing to key an
+/// inventory on even after that. Where it does get reported is the console,
+/// out of the failed reading -- not out of this projection.
+#[test]
+fn a_card_that_is_not_an_euicc_produces_no_inventory() {
+    for not_an_eid in [
+        "",
+        // An IMEI is what a reader confused about which number it holds would
+        // most plausibly put here.
+        "867018069509705",
+        // One digit short, and one digit long.
+        "8908603020220000002600017833924",
+        "890860302022000000260001783392401",
+        // Right length, wrong alphabet.
+        "8908603020220000002600017833924x",
+    ] {
+        assert!(
+            chip(not_an_eid, vec![profile(WEBBING_ICCID, true, None)])
+                .inventory_json(BENCH_IMEI, COLLECTED_AT)
+                .is_none(),
+            "{not_an_eid:?} is not an EID",
+        );
+    }
+}
+
+/// The single most damaging thing this could get wrong.
+///
+/// An inventory is the complete contents of one chip, and the cloud marks
+/// every ICCID it knows for that EID and does not find in the payload as
+/// deleted. A list the card refused halfway would therefore not merely be
+/// incomplete -- it would erase the profiles it failed to read.
+#[test]
+fn a_profile_list_the_card_refused_is_not_an_inventory() {
+    let mut refused = bench_chip();
+    refused.profiles = Vec::new();
+    refused.profiles_error = Some("ES10c GetProfilesInfo: SW 6982".to_string());
+
+    assert!(refused.inventory_json(BENCH_IMEI, COLLECTED_AT).is_none());
+}
+
+/// Same erasure, arrived at differently: dropping the one profile whose ICCID
+/// came back malformed would send an inventory that says the others are all
+/// there and that one is gone.
+#[test]
+fn one_unusable_profile_voids_the_whole_inventory() {
+    let partly_unreadable = chip(
+        BENCH_EID,
+        vec![
+            profile(WEBBING_ICCID, true, None),
+            profile("8901240527197", false, None),
+        ],
+    );
+
+    assert!(partly_unreadable
+        .inventory_json(BENCH_IMEI, COLLECTED_AT)
+        .is_none());
+}
+
+/// Sixty-four is what one payload may carry, so sixty-four goes and sixty-five
+/// does not. Truncating would be the erasure again, from the far end.
+#[test]
+fn an_inventory_stops_at_the_size_the_payload_allows() {
+    for (count, expected) in [(64_usize, true), (65_usize, false)] {
+        let profiles = (0..count)
+            .map(|index| profile(&format!("8985235122504221{index:04}"), false, None))
+            .collect();
+        assert_eq!(
+            chip(BENCH_EID, profiles)
+                .inventory_json(BENCH_IMEI, COLLECTED_AT)
+                .is_some(),
+            expected,
+            "{count} profiles",
+        );
+    }
+}
+
+/// An eUICC with nothing on it is a fact worth storing, and it is not the same
+/// fact as a read that failed. This is the one empty list that may be sent.
+#[test]
+fn a_chip_with_no_profiles_still_reports_an_inventory() {
+    let json = chip(BENCH_EID, Vec::new())
+        .inventory_json(BENCH_IMEI, COLLECTED_AT)
+        .expect("an empty chip is still a chip");
+
+    assert_eq!(json["profiles"].as_array().map(Vec::len), Some(0));
+    assert_eq!(json["eid"], serde_json::json!(BENCH_EID));
+}
+
+/// A profile the operator has not named must carry no nickname at all. An
+/// empty string would claim they had named it that, and upstream keeps the
+/// last non-null nickname it saw, so the claim would outlive the read.
+#[test]
+fn an_empty_nickname_is_not_a_nickname() {
+    for blank in [Some(""), Some("   "), None] {
+        let json = chip(BENCH_EID, vec![profile(WEBBING_ICCID, true, blank)])
+            .inventory_json(BENCH_IMEI, COLLECTED_AT)
+            .expect("inventory");
+        assert_eq!(
+            json["profiles"][0].get("nickname"),
+            None,
+            "{blank:?} should leave the field out",
+        );
+    }
+
+    let trimmed = chip(BENCH_EID, vec![profile(WEBBING_ICCID, true, Some(" US "))])
+        .inventory_json(BENCH_IMEI, COLLECTED_AT)
+        .expect("inventory");
+    assert_eq!(trimmed["profiles"][0]["nickname"], serde_json::json!("US"));
+}
+
+/// Only the two states a card can actually report. `deleted` is the cloud's
+/// inference from an ICCID disappearing, and `unknown` would be this code
+/// declining to report a boolean it is holding.
+#[test]
+fn a_card_reports_only_the_two_states_it_knows() {
+    let json = bench_chip()
+        .inventory_json(BENCH_IMEI, COLLECTED_AT)
+        .expect("inventory");
+
+    assert_eq!(json["profiles"][0]["state"], serde_json::json!("enabled"));
+    assert_eq!(json["profiles"][1]["state"], serde_json::json!("disabled"));
+}
+
+/// A timestamp the cloud's column cannot hold makes the whole inventory
+/// unsendable rather than being clamped: the projection compares
+/// `collected_at` to decide whether an inventory is newer than the stored one,
+/// so a wrong instant either loses a real read or overwrites one forever.
+#[test]
+fn a_collected_at_the_cloud_cannot_store_produces_no_inventory() {
+    for instant in [-1, 253_402_300_800_000] {
+        assert!(
+            bench_chip().inventory_json(BENCH_IMEI, instant).is_none(),
+            "{instant} is outside the column",
+        );
+    }
+    assert!(bench_chip()
+        .inventory_json(BENCH_IMEI, 253_402_300_799_999)
+        .is_some());
 }
