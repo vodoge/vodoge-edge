@@ -675,3 +675,175 @@ func TestAnUnknownConfigVariantNeverReachesTheCard(t *testing.T) {
 		t.Fatalf("%d datagram(s) left the box", socket.Stats().IKESent)
 	}
 }
+
+// The three tests below are the offline control for T088's single live run.
+//
+// A run with no CP payload has exactly three possible answers and each one
+// means something different, so each one has to arrive at a named outcome
+// before the run happens. The failure this guards against is not a wrong
+// answer, it is a correct answer that lands in a generic bucket: an SQN step
+// spent to learn "invalid IKE_AUTH response" would have to be spent again.
+
+// TestARequestWithNoCPIsRefusedWithFailedCPRequired is answer one: the ePDG
+// reads the configuration payload and minds that it is absent. That is the
+// result that would make bisecting the attribute list worth another SQN step.
+func TestARequestWithNoCPIsRefusedWithFailedCPRequired(t *testing.T) {
+	sub := benchSubscription(t)
+	f, a := startLiveFake(t, sub, func(a *epdgAuth) { a.requireCP = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	cfg.ConfigVariant = ConfigVariantNone
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if err == nil {
+		t.Fatalf("notify 37 must not come back as a working tunnel")
+	}
+	if !errors.Is(err, ErrFailedCPRequired) {
+		t.Fatalf("err = %v, want ErrFailedCPRequired", err)
+	}
+	if errors.Is(err, ErrInternalAddressFailure) {
+		t.Fatalf("notify 37 was folded into the notify 36 class: %v", err)
+	}
+	// The mirror's own classification survives underneath ours, the same way it
+	// does for notify 36.
+	if !errors.Is(err, ikev2.ErrNotifyFailedCPRequired) {
+		t.Fatalf("err = %v, want the mirror's notify class to survive the wrapping", err)
+	}
+	if !errors.Is(err, ErrInvalidAuthResponse) {
+		t.Fatalf("err = %v, want ErrInvalidAuthResponse to survive the wrapping", err)
+	}
+	if result.Outcome != OutcomeConfigurationRequired {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeConfigurationRequired)
+	}
+	if result.ConfigVariantUsed != ConfigVariantNone {
+		t.Fatalf("variant = %q, want %q", result.ConfigVariantUsed, ConfigVariantNone)
+	}
+	if result.AuthDetail.SentCP {
+		t.Fatalf("a CP payload went out on the run that is defined by not sending one")
+	}
+	if containsPayloadType(result.AuthDetail.InitialPayloadTypes, ikev2.PayloadCP) {
+		t.Fatalf("the first request carried a CP: %v", result.AuthDetail.InitialPayloadTypes)
+	}
+	// Everything before the refusal still happened, and the refusal must not
+	// erase it: the card answered and the carrier accepted the answer.
+	if !result.CardAnsweredChallenge() || result.AuthDetail.EAPSuccessMessageID == 0 {
+		t.Fatalf("the EAP-AKA evidence was lost behind notify 37")
+	}
+	if result.TunnelIsUp() {
+		t.Fatalf("TunnelIsUp on a run that was refused")
+	}
+	if a.refusalReason == "" {
+		t.Fatalf("the fixture did not take the notify 37 path")
+	}
+
+	var saw37 bool
+	for _, n := range result.AuthDetail.ResponseNotifies {
+		if n.Type == ikev2.NotifyFailedCPRequired {
+			saw37 = true
+		}
+		if n.Type == ikev2.NotifyInternalAddressFailure {
+			t.Fatalf("the responder sent notify 36 as well; the two answers must not overlap")
+		}
+	}
+	if !saw37 {
+		t.Fatalf("notify 37 was not kept as data: %+v", result.AuthDetail.ResponseNotifies)
+	}
+	// The error says what was sent, so a receipt does not have to decrypt a
+	// capture to establish that the payload really was absent.
+	for _, want := range []string{string(ConfigVariantNone), "(no CP payload)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error does not mention %q: %v", want, err)
+		}
+	}
+	if !strings.Contains(result.Outcome.Explain(), "parses the CP") {
+		t.Fatalf("the explanation does not say what notify 37 licenses next: %q",
+			result.Outcome.Explain())
+	}
+}
+
+// TestARequestWithNoCPCanStillBringUpAChildSA is answer two: a responder that
+// never needed the payload builds the SA anyway.
+//
+// The assertion that matters is not that the CHILD_SA exists, it is that
+// TunnelIsUp stays false. An SA with no internal address and no P-CSCF is not
+// criterion 4, and reporting it as a tunnel is exactly the "implemented versus
+// works on the bench" mistake this goal's charter opens with.
+func TestARequestWithNoCPCanStillBringUpAChildSA(t *testing.T) {
+	sub := benchSubscription(t)
+	f, _ := startLiveFake(t, sub, nil)
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	cfg.ConfigVariant = ConfigVariantNone
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("RunLiveTunnel: %v", err)
+	}
+	if result.Outcome != OutcomeEstablished {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeEstablished)
+	}
+	if result.Auth.ChildSA == nil {
+		t.Fatalf("outcome says established and there is no CHILD_SA")
+	}
+	if result.AuthDetail.SentCP {
+		t.Fatalf("a CP payload went out under the none variant")
+	}
+	reply := result.Config()
+	if reply.Present() {
+		t.Fatalf("a CFG_REPLY answered a request that was never sent: %v", reply.Describe())
+	}
+	if reply.HaveInternalAddress() || reply.HavePCSCF() {
+		t.Fatalf("an address appeared out of a reply that does not exist: %v", reply.Describe())
+	}
+	if result.TunnelIsUp() {
+		t.Fatalf("TunnelIsUp on a CHILD_SA with no internal address; criterion 4 needs an " +
+			"address to source packets from and a P-CSCF to send REGISTER to")
+	}
+	if !strings.Contains(result.Outcome.Explain(), "criterion 4") {
+		t.Fatalf("the explanation lets a bare CHILD_SA read as criterion 4: %q",
+			result.Outcome.Explain())
+	}
+}
+
+// TestARequestWithNoCPCanStillGetNotify36 is answer three, and it is the one
+// that would hurt: the refusal was never about the configuration payload.
+//
+// It has to be distinguishable from answer one at the level of the outcome
+// string, because the two say opposite things about whether any further -cfg
+// variant is worth an SQN step.
+func TestARequestWithNoCPCanStillGetNotify36(t *testing.T) {
+	sub := benchSubscription(t)
+	f, _ := startLiveFake(t, sub, func(a *epdgAuth) { a.addressFailure = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	cfg.ConfigVariant = ConfigVariantNone
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if !errors.Is(err, ErrInternalAddressFailure) {
+		t.Fatalf("err = %v, want ErrInternalAddressFailure", err)
+	}
+	if errors.Is(err, ErrFailedCPRequired) {
+		t.Fatalf("notify 36 was reported as notify 37: %v", err)
+	}
+	if result.Outcome != OutcomeAddressRejected {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeAddressRejected)
+	}
+	if result.Outcome == OutcomeConfigurationRequired {
+		t.Fatalf("the two configuration verdicts share one label")
+	}
+	if result.AuthDetail.SentCP {
+		t.Fatalf("a CP payload went out under the none variant")
+	}
+	// The error text is the whole finding in this branch: "refused an internal
+	// address to a request that asked for nothing" is the sentence that points
+	// at the subscription instead of at this package.
+	if !strings.Contains(err.Error(), "(no CP payload)") {
+		t.Fatalf("the error does not record that nothing was asked for: %v", err)
+	}
+}
+
+func containsPayloadType(types []uint8, want uint8) bool {
+	for _, t := range types {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}

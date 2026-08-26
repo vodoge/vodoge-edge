@@ -395,3 +395,92 @@ func configurationHasAttribute(cfg ikev2.Configuration, attrType uint16) bool {
 	}
 	return false
 }
+
+// TestTheNoneVariantIsAnAbsentPayloadAndNotAnEmptyOne pins the distinction the
+// whole experiment rests on.
+//
+// An empty CFG_REQUEST is still a UE asking to be configured (RFC 7296 section
+// 3.15), so an ePDG answering FAILED_CP_REQUIRED to one would be answering a
+// different question than the one T088 asked. If ConfigurationOfType ever
+// starts returning a typed-but-empty payload for this variant, the live
+// measurement stops meaning what the note says it means, and nothing else in
+// the package would notice.
+func TestTheNoneVariantIsAnAbsentPayloadAndNotAnEmptyOne(t *testing.T) {
+	got, err := ConfigVariantNone.Configuration()
+	if err != nil {
+		t.Fatalf("Configuration: %v", err)
+	}
+	if got.Type != 0 || len(got.Attributes) != 0 {
+		t.Fatalf("the none variant produced a payload: type %d, %d attributes",
+			got.Type, len(got.Attributes))
+	}
+	// -cfg-type has nothing to apply itself to. Returning CFG_SET with no
+	// attributes here would put an empty payload on the wire under a name that
+	// promises no payload at all.
+	set, err := ConfigVariantNone.ConfigurationOfType(ikev2.CFGSet)
+	if err != nil {
+		t.Fatalf("ConfigurationOfType: %v", err)
+	}
+	if set.Type != 0 || len(set.Attributes) != 0 {
+		t.Fatalf("-cfg-type set resurrected the payload: type %d, %d attributes",
+			set.Type, len(set.Attributes))
+	}
+	if DescribeConfiguration(got) != "(no CP payload)" {
+		t.Fatalf("DescribeConfiguration = %q; a receipt has to be able to say the payload was "+
+			"absent", DescribeConfiguration(got))
+	}
+	if ConfigVariantNone.SendsConfiguration() {
+		t.Fatalf("SendsConfiguration is true for the one variant that sends none")
+	}
+	if ConfigVariantNone.RequestsPCSCF() {
+		t.Fatalf("a request that does not exist cannot ask for a P-CSCF address")
+	}
+}
+
+// TestOnlyTheNoneVariantSuppressesTheCPPayload guards the blast radius.
+//
+// SendsConfiguration decides whether BuildAuthInitialPayloads omits a payload,
+// so a shape that answered false by accident would silently turn somebody
+// else's measurement into T088's. Unknown and empty names answer true because
+// the empty name means DefaultConfigVariant and a typo must not become the
+// experiment that is hardest to attribute to the wrong request.
+func TestOnlyTheNoneVariantSuppressesTheCPPayload(t *testing.T) {
+	for _, variant := range AllConfigVariants {
+		want := variant != ConfigVariantNone
+		if got := variant.SendsConfiguration(); got != want {
+			t.Fatalf("%s.SendsConfiguration() = %v, want %v", variant, got, want)
+		}
+	}
+	if !ConfigVariant("").SendsConfiguration() {
+		t.Fatalf("the empty name means the default, which carries a request")
+	}
+	if !ConfigVariant("nonsense").SendsConfiguration() {
+		t.Fatalf("a typo must not be read as an instruction to drop the payload")
+	}
+	if _, err := ParseConfigVariant("none"); err != nil {
+		t.Fatalf("ParseConfigVariant(none): %v", err)
+	}
+	// One axis from the default: same traffic selectors, so the only thing that
+	// changed between the dual run T081 measured and the none run T088 measured
+	// is the presence of the payload.
+	selectors, err := ConfigVariantNone.TrafficSelectors()
+	if err != nil {
+		t.Fatalf("TrafficSelectors: %v", err)
+	}
+	dual, err := ConfigVariantDual.TrafficSelectors()
+	if err != nil {
+		t.Fatalf("TrafficSelectors: %v", err)
+	}
+	got, err := selectors.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	want, err := dual.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the none variant moved the traffic selectors as well as dropping the payload:\n"+
+			" got %x\nwant %x", got, want)
+	}
+}

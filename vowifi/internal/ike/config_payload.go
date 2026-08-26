@@ -118,6 +118,28 @@ const (
 	// without inventing a shape at 3am.
 	ConfigVariantIPv4NoPCSCF ConfigVariant = "ipv4-nopcscf"
 	ConfigVariantIPv6NoPCSCF ConfigVariant = "ipv6-nopcscf"
+	// ConfigVariantNone sends no CP payload at all. It is not an empty
+	// CFG_REQUEST: the payload is absent from the message.
+	//
+	// Every other variant is a guess about which attribute T-Mobile objected
+	// to, and T081 spent two SQN steps finding out that three different guesses
+	// are all wrong (mirror, dual and ipv6 were each answered notify 36). This
+	// one is not a guess, it is the only shape whose three possible answers each
+	// eliminate a different two thirds of the remaining space:
+	//
+	//   - FAILED_CP_REQUIRED (notify 37) means the ePDG reads the CP payload and
+	//     needs it, so the attribute list is worth bisecting after all.
+	//   - A CHILD_SA means the ePDG will build a tunnel without being asked for
+	//     an address, so the fault is entirely inside the attribute list. Note
+	//     that such a tunnel has no internal address and no P-CSCF, so it is not
+	//     criterion 4 - see LiveResult.TunnelIsUp.
+	//   - Another INTERNAL_ADDRESS_FAILURE means the refusal was never about the
+	//     contents of the CP at all, which points at the subscription rather
+	//     than at this package. See notes/T081-cfg-request.md section 5.2.
+	//
+	// It is deliberately one axis from ConfigVariantDual: same IPv4 traffic
+	// selectors, same everything else, minus the payload.
+	ConfigVariantNone ConfigVariant = "none"
 )
 
 // DefaultConfigVariant is what the live path sends when nothing overrides it.
@@ -141,13 +163,19 @@ var AllConfigVariants = []ConfigVariant{
 	ConfigVariantIPv4,
 	ConfigVariantIPv4NoPCSCF,
 	ConfigVariantIPv6NoPCSCF,
+	ConfigVariantNone,
 }
 
 // configShape is the definition of one variant.
 type configShape struct {
 	attributes []uint16
 	ipv6TS     bool
-	why        string
+	// omitCP means the request carries no configuration payload at all. It is a
+	// separate flag rather than an empty attribute list because those two are
+	// different messages on the wire, and RFC 7296 section 3.15 gives them
+	// different meanings: an empty CFG_REQUEST still asks to be configured.
+	omitCP bool
+	why    string
 }
 
 var configShapes = map[ConfigVariant]configShape{
@@ -192,6 +220,12 @@ var configShapes = map[ConfigVariant]configShape{
 		ipv6TS:     true,
 		why:        "IPv6 only, no P-CSCF: isolates the family axis from the P-CSCF axis",
 	},
+	ConfigVariantNone: {
+		omitCP: true,
+		why: "no CP payload at all: FAILED_CP_REQUIRED means the attribute list is worth " +
+			"bisecting, a CHILD_SA means the fault is entirely in it, and a third notify 36 " +
+			"means notify 36 was never about the CP",
+	},
 }
 
 // ParseConfigVariant turns a command line word into a variant.
@@ -233,6 +267,13 @@ func (v ConfigVariant) ConfigurationOfType(cfgType uint8) (ikev2.Configuration, 
 	if !ok {
 		return ikev2.Configuration{}, fmt.Errorf("%w: %q", ErrUnknownConfigVariant, string(v))
 	}
+	// The zero value, and not an empty CFG_REQUEST of the asked-for type. This
+	// is what BuildAuthInitialPayloads tests for when deciding whether there is
+	// a payload to send, and -cfg-type has nothing to apply itself to when
+	// there is no payload.
+	if shape.omitCP {
+		return ikev2.Configuration{}, nil
+	}
 	if cfgType == 0 {
 		cfgType = ikev2.CFGRequest
 	}
@@ -259,6 +300,24 @@ func (v ConfigVariant) TrafficSelectors() (ikev2.TrafficSelectors, error) {
 		return IPv6AnyTrafficSelectors(), nil
 	}
 	return ikev2.IPv4AnyTrafficSelectors(), nil
+}
+
+// SendsConfiguration reports whether this variant puts a CP payload in the
+// first IKE_AUTH request at all.
+//
+// An unknown or empty name answers true, because the empty name means
+// DefaultConfigVariant and every defined shape except ConfigVariantNone carries
+// a request. Callers that need an unknown name rejected use Configuration or
+// ConfigurationOfType, which return ErrUnknownConfigVariant; this predicate is
+// only ever asked "is the CP payload suppressed", and answering "yes" for a
+// typo would silently turn a mistyped -cfg into the one experiment that is
+// most expensive to attribute to the wrong request.
+func (v ConfigVariant) SendsConfiguration() bool {
+	shape, ok := configShapes[v]
+	if !ok {
+		return true
+	}
+	return !shape.omitCP
 }
 
 // RequestsPCSCF reports whether this shape asks for a P-CSCF address.

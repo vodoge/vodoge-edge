@@ -78,8 +78,10 @@ func run() error {
 		apn       = flag.String("apn", ike.WellKnownIMSAPN, "APN network identifier for -idr apn; the operator half of the name still comes from the card")
 		noEAPOnly = flag.Bool("no-eap-only", false, "drop N(EAP_ONLY_AUTHENTICATION) from the first IKE_AUTH request")
 		cfgName   = flag.String("cfg", string(ike.DefaultConfigVariant), "CFG_REQUEST shape: "+configVariantList()+
-			". T072 sent \"mirror\" and T-Mobile US answered INTERNAL_ADDRESS_FAILURE; every other value is an "+
-			"attempt to find out which part of that request it objected to. One run costs one SQN step.")
+			". T072 sent \"mirror\" and T-Mobile US answered INTERNAL_ADDRESS_FAILURE; T081 got the same "+
+			"answer for \"dual\" and \"ipv6\", so every remaining attribute guess is a guess. \"none\" sends "+
+			"no CP payload at all and is the one shape whose three possible answers each rule out a "+
+			"different part of the space. One run costs one SQN step.")
 		cfgType = flag.String("cfg-type", "request", "CP payload type: request or set. A UE sends CFG_REQUEST; "+
 			"set is reachable only so that axis can be measured")
 	)
@@ -1042,8 +1044,8 @@ func reportLiveResult(result ike.LiveResult, err error) {
 	}
 	detail := result.AuthDetail
 	if result.AuthAttempted {
-		fmt.Printf("  IKE_AUTH   %d exchange(s); IDr sent %v; EAP_ONLY_AUTHENTICATION sent %v; peer sent IDr %v\n",
-			len(detail.Rounds), detail.SentIDr, detail.SentEAPOnlyNotify, detail.PeerSentIDr)
+		fmt.Printf("  IKE_AUTH   %d exchange(s); IDr sent %v; CP sent %v; EAP_ONLY_AUTHENTICATION sent %v; peer sent IDr %v\n",
+			len(detail.Rounds), detail.SentIDr, detail.SentCP, detail.SentEAPOnlyNotify, detail.PeerSentIDr)
 		if len(detail.PeerIDBody) > 0 {
 			fmt.Printf("  peer IDr   %x\n", detail.PeerIDBody)
 		}
@@ -1119,27 +1121,33 @@ func reportLiveResult(result ike.LiveResult, err error) {
 // way to tell what produced it short of decrypting the capture.
 func reportConfiguration(result ike.LiveResult) {
 	detail := result.AuthDetail
-	if len(detail.SentConfiguration.Attributes) > 0 || detail.SentConfiguration.Type != 0 {
-		fmt.Printf("  CFG sent   %s (%s)\n", ike.DescribeConfiguration(detail.SentConfiguration),
-			orUnnamed(string(result.ConfigVariantUsed)))
-	}
+	// Printed unconditionally, including when there was nothing to send.
+	// "(no CP payload)" is the finding on a -cfg none run, and a line that
+	// disappeared exactly when the request was the interesting one would leave
+	// the receipt unable to say which of the two absences it was looking at:
+	// no payload, or no run.
+	fmt.Printf("  CFG sent   %s (%s)\n", ike.DescribeConfiguration(detail.SentConfiguration),
+		orUnnamed(string(result.ConfigVariantUsed)))
 	if detail.PeerConfigurationError != "" {
 		fmt.Printf("  CFG_REPLY  would not decode: %s\n", detail.PeerConfigurationError)
 	}
 	reply := result.Config()
-	if !reply.Present() {
-		if result.AuthDone {
-			fmt.Printf("  CFG_REPLY  none: the ePDG answered without a configuration payload\n")
+	switch {
+	case reply.Present():
+		for i, line := range reply.Describe() {
+			if i == 0 {
+				fmt.Printf("  CFG_REPLY  %s\n", line)
+				continue
+			}
+			fmt.Printf("             %s\n", line)
 		}
-		return
+	case result.AuthDone:
+		fmt.Printf("  CFG_REPLY  none: the ePDG answered without a configuration payload\n")
 	}
-	for i, line := range reply.Describe() {
-		if i == 0 {
-			fmt.Printf("  CFG_REPLY  %s\n", line)
-			continue
-		}
-		fmt.Printf("             %s\n", line)
-	}
+	// Reached even when there was no reply at all, which is the case that
+	// matters most: a CHILD_SA that came up under -cfg none has no address and
+	// no P-CSCF, and returning early here would have printed a tunnel with no
+	// verdict attached to it.
 	switch {
 	case reply.HavePCSCF():
 		fmt.Printf("  P-CSCF     acquired: IMS registration has a destination\n")

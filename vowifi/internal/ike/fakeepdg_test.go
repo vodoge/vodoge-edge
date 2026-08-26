@@ -649,6 +649,16 @@ type epdgAuth struct {
 	// an IPv4 and an IPv6 internal address. It models the other candidate cause
 	// of notify 36, so the two can be told apart offline.
 	requireSingleFamily bool
+	// requireCP answers FAILED_CP_REQUIRED (notify 37) when the first IKE_AUTH
+	// request carried no CP payload at all. It is the responder T088's live run
+	// is hoping to have been talking to: one that reads the configuration
+	// payload closely enough to mind its absence.
+	//
+	// It is a separate knob from requirePCSCF because the two are answers to
+	// different questions, and a fixture that conflated them would let a run
+	// with no CP be "explained" by the P-CSCF rule it cannot possibly have
+	// broken.
+	requireCP bool
 	// pcscfIPv4 and pcscfIPv6 are what the CFG_REPLY hands back when the
 	// request asked for them.
 	pcscfIPv4 net.IP
@@ -968,6 +978,20 @@ func (f *fakeEPDG) epdgFinalRound(msg ikev2.Message, a *epdgAuth, authBody []byt
 	}
 	a.clientAuthVerified = true
 
+	// A responder that needs a CP payload complains before it tries to satisfy
+	// one, because there is nothing to satisfy. RFC 7296 section 3.10.1 puts
+	// FAILED_CP_REQUIRED and INTERNAL_ADDRESS_FAILURE in the same place in the
+	// exchange, and this fixture sends exactly one of them.
+	if a.requireCP && !a.sawCP {
+		a.refusalReason = "the first IKE_AUTH request carried no CP payload"
+		notify, err := ikev2.NotifyPayload(ikev2.Notify{NotifyType: ikev2.NotifyFailedCPRequired})
+		if err != nil {
+			return nil, err
+		}
+		f.logStage(msg.Header.MessageID, authStage{})
+		return f.protectLocked(msg, []ikev2.Payload{notify})
+	}
+
 	// The address decision happens here and not earlier, which is exactly where
 	// T-Mobile made it: the initiator's AUTH is verified first, and only then
 	// does the responder try to satisfy the CFG_REQUEST. That ordering is why
@@ -1065,16 +1089,26 @@ func (a *epdgAuth) childPayloads() ([]ikev2.Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := ikev2.ConfigurationPayload(a.configReply())
-	if err != nil {
-		return nil, err
+	// No CFG_REPLY when nothing was asked for. RFC 7296 section 2.19 has the
+	// reply answer a request, and a fixture that volunteered an address anyway
+	// would make the "CHILD_SA came up without a CP" branch of T088's
+	// experiment untestable: the tunnel would appear to have an internal
+	// address it was never granted, and LiveResult.TunnelIsUp - the one
+	// predicate criterion 4 is measured with - would go true on it.
+	payloads := make([]ikev2.Payload, 0, 4)
+	if a.sawCP {
+		cfg, err := ikev2.ConfigurationPayload(a.configReply())
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, cfg)
 	}
-	return []ikev2.Payload{cfg, sa, tsi, tsr}, nil
+	return append(payloads, sa, tsi, tsr), nil
 }
 
 func (a *epdgAuth) configReply() ikev2.Configuration {
 	out := ikev2.Configuration{Type: ikev2.CFGReply}
-	if configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv4Address) || !a.sawCP {
+	if configAsksFor(a.observedConfig, ikev2.ConfigInternalIPv4Address) {
 		out.Attributes = append(out.Attributes,
 			ikev2.ConfigurationAttribute{Type: ikev2.ConfigInternalIPv4Address, Value: []byte{10, 64, 0, 7}},
 			ikev2.ConfigurationAttribute{Type: ikev2.ConfigInternalIPv4DNS, Value: []byte{10, 64, 0, 1}},

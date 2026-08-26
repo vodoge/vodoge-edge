@@ -52,6 +52,16 @@ var (
 	// already paid for once with the IDr, so the error carries the request that
 	// was refused in its own text.
 	ErrInternalAddressFailure = errors.New("vowifi/ike: the responder refused to assign an internal address")
+	// ErrFailedCPRequired is notify 37, and it is the answer T088 went looking
+	// for.
+	//
+	// RFC 7296 section 3.10.1 defines FAILED_CP_REQUIRED as "the responder is
+	// unwilling to accept the request without a configuration payload". It can
+	// only be sent in reply to a request that had none, so unlike notify 36 it
+	// is unambiguous: the ePDG read the CP payload's absence and minded. Given
+	// that three different CFG_REQUEST shapes were all answered notify 36, this
+	// is the notify that says the attribute list is still worth searching.
+	ErrFailedCPRequired = errors.New("vowifi/ike: the responder requires a configuration payload")
 )
 
 // DefaultMaxEAPRounds bounds the EAP conversation. RFC 4187 full authentication
@@ -128,6 +138,10 @@ type AuthRunner struct {
 	// hand-built payload has no name a replay could reconstruct it from. Use
 	// ConfigVariant for anything that has to survive into a recording.
 	Configuration ikev2.Configuration
+	// AllowMissingConfiguration sends IKE_AUTH with no CP payload. Off by
+	// default; ConfigVariantNone turns it on by itself, so this field is only
+	// for a caller driving the runner directly.
+	AllowMissingConfiguration bool
 	// ConfigVariant selects a named CFG_REQUEST shape and the traffic
 	// selectors that go with it. Empty means whatever
 	// BuildAuthInitialPayloads defaults to.
@@ -216,6 +230,11 @@ type AuthDetail struct {
 	// SentIDr and SentEAPOnlyNotify are two of the additions over the mirror.
 	SentIDr           bool
 	SentEAPOnlyNotify bool
+	// SentCP says whether a configuration payload was on the wire at all.
+	// SentConfiguration cannot answer that on its own: the zero value is both
+	// "no payload" and "a payload nobody could decode", and notify 37 is a
+	// verdict on precisely this boolean.
+	SentCP bool
 	// ConfigVariant is the named CFG_REQUEST shape, when one was used.
 	ConfigVariant ConfigVariant
 	// SentConfiguration is the CFG_REQUEST as it went out. Notify 36 is a
@@ -470,16 +489,17 @@ func (s *authSession) run(ctx context.Context) (ikev2.FullAuthResult, error) {
 		return s.result, err
 	}
 	initial, err := BuildAuthInitialPayloads(AuthInitialPayloads{
-		InitiatorID:             s.initiatorID,
-		ResponderID:             s.runner.ResponderID,
-		AllowMissingResponderID: s.runner.AllowMissingResponderID,
-		ChildSA:                 s.offeredChildSA(),
-		ChildSPI:                s.childSPI,
-		TSi:                     tsi,
-		TSr:                     tsr,
-		Configuration:           configuration,
-		EAPOnlyAuthentication:   !s.runner.DisableEAPOnlyAuthentication,
-		Extra:                   s.runner.ExtraInitialPayloads,
+		InitiatorID:               s.initiatorID,
+		ResponderID:               s.runner.ResponderID,
+		AllowMissingResponderID:   s.runner.AllowMissingResponderID,
+		ChildSA:                   s.offeredChildSA(),
+		ChildSPI:                  s.childSPI,
+		TSi:                       tsi,
+		TSr:                       tsr,
+		Configuration:             configuration,
+		AllowMissingConfiguration: s.allowMissingConfiguration(),
+		EAPOnlyAuthentication:     !s.runner.DisableEAPOnlyAuthentication,
+		Extra:                     s.runner.ExtraInitialPayloads,
 	})
 	if err != nil {
 		return s.result, err
@@ -490,6 +510,7 @@ func (s *authSession) run(ctx context.Context) (ikev2.FullAuthResult, error) {
 	s.detail.ConfigVariant = s.runner.ConfigVariant
 	s.detail.SentConfiguration = configFromPayloads(initial, configuration)
 	s.detail.InitialPayloadTypes = payloadTypes(initial)
+	s.detail.SentCP = containsPayload(initial, ikev2.PayloadCP)
 	s.detail.SentIDr = containsPayload(initial, ikev2.PayloadIDr)
 	s.detail.SentEAPOnlyNotify = containsNotify(initial, NotifyEAPOnlyAuthentication)
 
@@ -759,25 +780,50 @@ func (s *authSession) exchange(ctx context.Context, payloads []ikev2.Payload) ([
 // nameNotifyError keeps the mirror's classification and adds the one thing it
 // cannot know: what we had asked for.
 //
-// INTERNAL_ADDRESS_FAILURE is singled out because it is the only rejection in
-// this ladder that is not about authentication at all. T072 read
+// The two configuration notifies are singled out because they are the only
+// rejections in this ladder that are not about authentication at all. T072 read
 // "invalid IKE_AUTH response: message 3: ikev2 notify error:
 // INTERNAL_ADDRESS_FAILURE" and had to decrypt a capture to find out which
 // CFG_REQUEST had produced it. Every wrapper in the chain is preserved, so
-// errors.Is still finds ErrInvalidAuthResponse and
-// ikev2.ErrNotifyInternalAddressFailure.
+// errors.Is still finds ErrInvalidAuthResponse and the mirror's own notify
+// class.
+//
+// Notify 37 gets the same treatment for the opposite reason: it can only be a
+// verdict on a request that carried no CP payload, and a run that reported it
+// as a generic "invalid IKE_AUTH response" would bury the single most
+// informative answer the ePDG has ever given this project.
 func (s *authSession) nameNotifyError(messageID uint32, err error) error {
 	wrapped := fmt.Errorf("%w: message %d: %w", ErrInvalidAuthResponse, messageID, err)
-	if !errors.Is(err, ikev2.ErrNotifyInternalAddressFailure) {
-		return wrapped
-	}
 	variant := "unnamed"
 	if s.detail.ConfigVariant != "" {
 		variant = string(s.detail.ConfigVariant)
 	}
-	return fmt.Errorf("%w: %w; authentication had already succeeded, so this is a verdict on the "+
-		"CFG_REQUEST variant %q: %s", ErrInternalAddressFailure, wrapped, variant,
-		DescribeConfiguration(s.detail.SentConfiguration))
+	switch {
+	case errors.Is(err, ikev2.ErrNotifyInternalAddressFailure):
+		return fmt.Errorf("%w: %w; authentication had already succeeded, so this is a verdict on the "+
+			"CFG_REQUEST variant %q: %s", ErrInternalAddressFailure, wrapped, variant,
+			DescribeConfiguration(s.detail.SentConfiguration))
+	case errors.Is(err, ikev2.ErrNotifyFailedCPRequired):
+		return fmt.Errorf("%w: %w; the request under variant %q sent %s, and the responder reads the "+
+			"configuration payload closely enough to mind that it was absent",
+			ErrFailedCPRequired, wrapped, variant, DescribeConfiguration(s.detail.SentConfiguration))
+	default:
+		return wrapped
+	}
+}
+
+// allowMissingConfiguration decides whether the CP payload is suppressed.
+//
+// The variant is the source of truth rather than a second flag the operator has
+// to remember, because the variant name is what travels into the capture
+// sidecar: a run whose sidecar says "none" has to replay as a request with no
+// CP, or RequireExactRequests would be comparing today's default against
+// yesterday's recording.
+func (s *authSession) allowMissingConfiguration() bool {
+	if s.runner.AllowMissingConfiguration {
+		return true
+	}
+	return !s.runner.ConfigVariant.SendsConfiguration()
 }
 
 // absorbConfigReply decodes a CP payload out of a response.

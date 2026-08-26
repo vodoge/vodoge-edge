@@ -209,6 +209,23 @@ type AuthInitialPayloads struct {
 	// Configuration defaults to DefaultConfigVariant, which is the mirror's
 	// SWu CFG_REQUEST plus the two P-CSCF attributes it never had.
 	Configuration ikev2.Configuration
+	// AllowMissingConfiguration drops the CP payload entirely when
+	// Configuration is the zero value. Off by default, and the default is the
+	// substitution above rather than an omission, for the same reason
+	// AllowMissingResponderID exists: a request with no CP is not a smaller
+	// request, it is a different question. RFC 7296 section 3.15 has the
+	// initiator ask to be configured by sending the payload, so an IKE_AUTH
+	// without one is a UE saying it needs no address - and 3GPP TS 24.302
+	// section 7.2.2 says a UE on SWu does need one.
+	//
+	// It is reachable because the answer to it is worth more than a working
+	// tunnel would be right now. See ConfigVariantNone.
+	//
+	// Configuration wins if it is set: an explicit payload is sent even with
+	// this flag on, because a caller that built a request by hand asked for
+	// that request. AuthDetail.SentCP records which of the two actually
+	// happened.
+	AllowMissingConfiguration bool
 	// EAPOnlyAuthentication adds the RFC 5998 notify.
 	EAPOnlyAuthentication bool
 	// Extra payloads are appended last, for callers that need
@@ -225,6 +242,10 @@ type AuthInitialPayloads struct {
 // is a compatibility choice rather than a correctness one, and it is spelled out
 // here because a wrong guess stays invisible until an ePDG answers
 // AUTHENTICATION_FAILED.
+//
+// IDr and CP are the two payloads that can be absent, and both absences are
+// opt-in flags rather than a consequence of leaving a field empty. Every other
+// payload in that list is always there.
 func BuildAuthInitialPayloads(p AuthInitialPayloads) ([]ikev2.Payload, error) {
 	if p.InitiatorID.Type == 0 || len(p.InitiatorID.Data) == 0 {
 		return nil, fmt.Errorf("%w: IDi is empty", ErrMissingInitiatorID)
@@ -257,18 +278,30 @@ func BuildAuthInitialPayloads(p AuthInitialPayloads) ([]ikev2.Payload, error) {
 	// request has no P-CSCF attribute at all - so even a tunnel that came up on
 	// it would have had nowhere to send REGISTER. See config_payload.go.
 	cfg := p.Configuration
-	if cfg.Type == 0 && len(cfg.Attributes) == 0 {
+	haveConfiguration := cfg.Type != 0 || len(cfg.Attributes) > 0
+	switch {
+	case haveConfiguration:
+		// Sent as given, including when AllowMissingConfiguration is set.
+	case p.AllowMissingConfiguration:
+		// Explicitly opted out: no CP payload reaches the wire. Unlike the IDr
+		// case this is not silent - AuthDetail.SentCP is false, the sidecar
+		// records the variant name, and DescribeConfiguration of the zero value
+		// reads "(no CP payload)" everywhere a request would otherwise print.
+	default:
 		derived, err := DefaultConfigVariant.Configuration()
 		if err != nil {
 			return nil, err
 		}
 		cfg = derived
+		haveConfiguration = true
 	}
-	cp, err := ikev2.ConfigurationPayload(cfg)
-	if err != nil {
-		return nil, err
+	if haveConfiguration {
+		cp, err := ikev2.ConfigurationPayload(cfg)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cp)
 	}
-	out = append(out, cp)
 
 	childSA := p.ChildSA
 	if len(childSA.Proposals) == 0 {

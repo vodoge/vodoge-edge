@@ -79,7 +79,21 @@ const (
 	// file, so it gets its own label rather than being folded into "the ladder
 	// did not finish".
 	OutcomeAddressRejected LiveOutcome = "internal-address-rejected"
-	// OutcomeEstablished means the CHILD_SA came up.
+	// OutcomeConfigurationRequired is notify 37, the answer only
+	// ConfigVariantNone can provoke: authentication completed and the ePDG then
+	// said it will not proceed without a CP payload.
+	//
+	// It sits next to OutcomeAddressRejected because they are the same kind of
+	// verdict at the same point in the ladder, and it is separate from it
+	// because they say opposite things about what to do next. Notify 36 after
+	// three different requests says stop guessing at attributes; notify 37 says
+	// the responder parses the attribute list, so a bisection of it is worth an
+	// SQN step.
+	OutcomeConfigurationRequired LiveOutcome = "configuration-required"
+	// OutcomeEstablished means the CHILD_SA came up. It does not mean criterion
+	// 4 is met: see LiveResult.TunnelIsUp, which also wants an internal
+	// address, and which is false for a CHILD_SA built on a request that never
+	// asked for one.
 	OutcomeEstablished LiveOutcome = "tunnel-established"
 	// OutcomeLocalFault means we broke before the network could answer.
 	OutcomeLocalFault LiveOutcome = "local-fault"
@@ -395,6 +409,14 @@ func classifyAuthFailure(out LiveResult, err error) LiveOutcome {
 	if errors.Is(err, ErrInternalAddressFailure) {
 		return OutcomeAddressRejected
 	}
+	// Same reasoning, opposite conclusion. Notify 37 arrives at the same place
+	// in the ladder and must not be folded into the notify 36 bucket: the whole
+	// value of a run with no CP payload is that its three possible answers are
+	// distinguishable, and two of them collapsing into one label would put the
+	// distinction back into somebody's reading of a hex dump.
+	if errors.Is(err, ErrFailedCPRequired) {
+		return OutcomeConfigurationRequired
+	}
 	if out.CardAnsweredChallenge() {
 		return OutcomeChallengeAnswered
 	}
@@ -440,8 +462,16 @@ func (o LiveOutcome) Explain() string {
 			"accepted. T081 measured three requests refused this way - mirror, dual and ipv6 - " +
 			"so a fourth -cfg variant is a guess, not a diagnosis. See " +
 			"notes/T081-cfg-request.md for what is still untried."
+	case OutcomeConfigurationRequired:
+		return "authentication finished and the ePDG then refused a request that carried no " +
+			"configuration payload (notify 37, FAILED_CP_REQUIRED). Nothing here is a carrier " +
+			"verdict on the card either. What it does say is that this ePDG parses the CP " +
+			"payload rather than ignoring it, so the attribute list is worth bisecting after " +
+			"all - which is the opposite of what a fourth notify 36 would have meant."
 	case OutcomeEstablished:
-		return "the ladder completed and a CHILD_SA came up."
+		return "the ladder completed and a CHILD_SA came up. Whether that is criterion 4 " +
+			"depends on the CFG_REPLY: an SA with no internal address and no P-CSCF is a " +
+			"tunnel with nothing to put in a source field and nowhere to send REGISTER."
 	default:
 		return "we failed before the network had a chance to answer."
 	}

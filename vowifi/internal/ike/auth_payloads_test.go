@@ -362,3 +362,68 @@ func TestIdentityFromString(t *testing.T) {
 		t.Fatalf("an empty identity was accepted")
 	}
 }
+
+// TestBuildAuthInitialPayloadsOmitsTheCPOnlyWhenAskedTo covers both halves of
+// the switch, because only one of them is a change.
+//
+// The dangerous direction is not "no CP when asked for none", it is "no CP by
+// accident". Leaving Configuration at its zero value is how every caller in
+// this repository asks for the default request, so if the opt-out ever leaked
+// into that path, the live default would quietly become the experiment - and it
+// would look identical in a log until an ePDG answered notify 37.
+func TestBuildAuthInitialPayloadsOmitsTheCPOnlyWhenAskedTo(t *testing.T) {
+	base := AuthInitialPayloads{
+		InitiatorID:             ikev2.Identity{Type: ikev2.IDRFC822Addr, Data: []byte("user@example")},
+		AllowMissingResponderID: true,
+		ChildSPI:                []byte{1, 2, 3, 4},
+		EAPOnlyAuthentication:   true,
+	}
+
+	withCP, err := BuildAuthInitialPayloads(base)
+	if err != nil {
+		t.Fatalf("BuildAuthInitialPayloads: %v", err)
+	}
+	if !containsPayload(withCP, ikev2.PayloadCP) {
+		t.Fatalf("the zero Configuration stopped meaning the default: %v", payloadTypes(withCP))
+	}
+
+	opted := base
+	opted.AllowMissingConfiguration = true
+	without, err := BuildAuthInitialPayloads(opted)
+	if err != nil {
+		t.Fatalf("BuildAuthInitialPayloads: %v", err)
+	}
+	if containsPayload(without, ikev2.PayloadCP) {
+		t.Fatalf("AllowMissingConfiguration still sent a CP: %v", payloadTypes(without))
+	}
+	// Everything else is unchanged, which is what makes the live run a
+	// one-variable experiment against T081's.
+	want := []uint8{
+		ikev2.PayloadIDi, ikev2.PayloadSA, ikev2.PayloadTSi, ikev2.PayloadTSr, ikev2.PayloadNotify,
+	}
+	got := payloadTypes(without)
+	if len(got) != len(want) {
+		t.Fatalf("payload types = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("payload types = %v, want %v", got, want)
+		}
+	}
+
+	// An explicitly built request wins over the flag. A caller that handed in a
+	// payload asked for that payload; silently dropping it would be the same
+	// class of bug in the other direction.
+	explicit := opted
+	explicit.Configuration, err = ConfigVariantMirror.Configuration()
+	if err != nil {
+		t.Fatalf("Configuration: %v", err)
+	}
+	kept, err := BuildAuthInitialPayloads(explicit)
+	if err != nil {
+		t.Fatalf("BuildAuthInitialPayloads: %v", err)
+	}
+	if !containsPayload(kept, ikev2.PayloadCP) {
+		t.Fatalf("an explicit CFG_REQUEST was dropped by the opt-out: %v", payloadTypes(kept))
+	}
+}

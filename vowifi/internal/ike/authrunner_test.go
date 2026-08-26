@@ -812,3 +812,101 @@ func assertAuthPayloadsAreExportable(t *testing.T, c *capture.Capture, keys ikev
 			sent.MessageID, received.MessageID, detail.ChildSAMessageID)
 	}
 }
+
+// TestANoneVariantRecordingReplaysAsARequestWithNoCP is the same guarantee for
+// the one variant whose request is defined by a payload that is not there.
+//
+// It is a separate test rather than another value in the one above because the
+// failure mode is different in kind. Every other variant differs from its
+// neighbours by attribute bytes inside a payload that is always present; this
+// one differs by the payload's existence, and the code paths that could get it
+// wrong - the emptiness test in BuildAuthInitialPayloads, the opt-out
+// derivation in the session, configFromPayloads with nothing to read - are all
+// paths the other variants never take. A recording of the live run is the only
+// artefact T088 produces, so it has to reproduce its own bytes offline before
+// anyone spends an SQN step making one.
+func TestANoneVariantRecordingReplaysAsARequestWithNoCP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ike-auth-none.pcap")
+	writer, err := capture.NewWriter(capture.WriterOptions{
+		Path:          path,
+		RecordSecrets: true,
+		Note:          "T088 loopback fake ePDG, no CFG_REQUEST at all",
+	})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	l := startLadder(t, nil, func(r *AuthRunner) { r.ConfigVariant = ConfigVariantNone }, writer)
+	if _, err := l.run(t); err != nil {
+		t.Fatalf("live IKE_AUTH: %v", err)
+	}
+	liveDetail, _ := l.runner.LastDetail()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer Close: %v", err)
+	}
+	if liveDetail.SentCP {
+		t.Fatalf("the recorded run sent a CP payload")
+	}
+	if DescribeConfiguration(liveDetail.SentConfiguration) != "(no CP payload)" {
+		t.Fatalf("SentConfiguration does not describe an absent payload: %s",
+			DescribeConfiguration(liveDetail.SentConfiguration))
+	}
+	// The responder is the only witness that the payload was absent on the wire
+	// rather than merely absent from our own bookkeeping.
+	if l.epdg.sawCP {
+		t.Fatalf("the responder decoded a CP payload on a run that sent none")
+	}
+
+	recording, err := capture.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	seed := recording.Session.AuthSeed
+	if seed == nil || seed.ConfigVariant != string(ConfigVariantNone) {
+		t.Fatalf("the sidecar does not carry the variant: %+v", seed)
+	}
+
+	transport, initSeed, err := capture.OpenReplay(path, capture.ReplayOptions{
+		UseNonESPMarker:      true,
+		RequireExactRequests: true,
+	})
+	if err != nil {
+		t.Fatalf("OpenReplay: %v", err)
+	}
+	offlineInit := NewInitRunner()
+	offlineInit.Seed = initSeed
+	replayedInit, err := offlineInit.Run(context.Background(), ikev2.InitConfig{
+		Transport:  transport,
+		LocalIP:    l.socket.LocalIP(),
+		LocalPort:  l.socket.LocalPort(),
+		RemoteIP:   l.fake.Addr().IP,
+		RemotePort: uint16(l.fake.Addr().Port),
+	})
+	if err != nil {
+		t.Fatalf("replaying IKE_SA_INIT: %v", err)
+	}
+	offlineAuth := NewAuthRunner(ikev2.Identity{Type: seed.ResponderIDType, Data: seed.ResponderID})
+	offlineAuth.ChildSPI = seed.ChildSPI
+	offlineAuth.PinnedIVs = seed.IVs
+	offlineAuth.ConfigVariant = ConfigVariant(seed.ConfigVariant)
+	if _, err := offlineAuth.Run(context.Background(), ikev2.FullAuthConfig{
+		Transport:   transport,
+		Init:        replayedInit,
+		Keys:        replayedInit.Keys,
+		SIM:         NewRecordedAKAProvider(seed.AKA),
+		InitiatorID: ikev2.Identity{Type: seed.InitiatorIDType, Data: seed.InitiatorID},
+		EAPIdentity: seed.EAPIdentity,
+	}); err != nil {
+		t.Fatalf("replaying IKE_AUTH from the recorded variant: %v", err)
+	}
+	offlineDetail, _ := offlineAuth.LastDetail()
+	if len(offlineDetail.Rounds) == 0 || len(liveDetail.Rounds) == 0 {
+		t.Fatalf("no rounds to compare")
+	}
+	if !bytes.Equal(offlineDetail.Rounds[0].RequestBytes, liveDetail.Rounds[0].RequestBytes) {
+		t.Fatalf("the recorded variant did not reproduce the first request byte for byte")
+	}
+	if offlineDetail.SentCP {
+		t.Fatalf("the replay put a CP payload back into a request that had none")
+	}
+}
