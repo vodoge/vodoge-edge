@@ -6,7 +6,7 @@ use edge_core::{
 };
 use edge_modem::{
     collect_inbound, delete_inbound, discover, send_with_plan, with_restore, DiscoveredModem,
-    FakeEnumerator, FakeModem, MessageTag, ModemPort, TransportKind, UnsupportedPort,
+    FakeEnumerator, FakeModem, MessageTag, ModemPort, PortError, TransportKind, UnsupportedPort,
     StorageType,
 };
 
@@ -177,9 +177,55 @@ fn send_plan_without_a_bearer_does_not_touch_the_modem() {
     assert!(error.to_string().contains("no_cdma_fallback_and_no_ct_volte_mbn"));
 }
 
+/// Every stub transport refuses every call in the trait, with the error that
+/// names a missing implementation rather than a missing device.
+///
+/// This used to check one `imei()` per stub, which left the other eight calls
+/// free to answer `Ok` -- and one of them did: `sweep_slots` took the trait
+/// default and returned `Ok(vec![])`, an empty success no caller could tell
+/// from a real sweep that found nothing. Naming every call is the point: half
+/// an implementation is what this has to turn red on.
 #[test]
 fn at_mbim_pcsc_stubs_exist_and_are_unsupported() {
-    for mut port in [UnsupportedPort::at(), UnsupportedPort::mbim(), UnsupportedPort::pcsc()] {
-        assert!(port.imei().is_err());
+    for (kind, mut port) in [
+        (TransportKind::At, UnsupportedPort::at()),
+        (TransportKind::Mbim, UnsupportedPort::mbim()),
+        (TransportKind::Pcsc, UnsupportedPort::pcsc()),
+    ] {
+        let refused = PortError::Unsupported(kind);
+        assert_eq!(port.transport_kind(), kind, "a stub named the wrong transport");
+        assert_eq!(port.imei().unwrap_err(), refused);
+        assert_eq!(port.firmware().unwrap_err(), refused);
+        assert_eq!(port.registration_evidence().unwrap_err(), refused);
+        assert_eq!(port.list_sms().unwrap_err(), refused);
+        assert_eq!(
+            port.sweep_slots(0, 16).unwrap_err(),
+            refused,
+            "an empty sweep reads as 'nothing in those slots', not 'no such transport'"
+        );
+        assert_eq!(port.read_sms(StorageType::Uim, 1).unwrap_err(), refused);
+        assert_eq!(port.delete_sms(StorageType::Uim, 1).unwrap_err(), refused);
+        assert_eq!(port.send_pdu(b"pdu").unwrap_err(), refused);
+        assert_eq!(port.send_on(Bearer::Ims, b"pdu").unwrap_err(), refused);
     }
+}
+
+/// The PC/SC failure has to read as "this build has no PC/SC", because the
+/// other reading -- "no reader found" -- sends whoever hits it off to plug in
+/// hardware, and `goal.md:161` says nobody can reach that hardware to plug
+/// anything into. That is the same reason the stub stays a stub: T052
+/// (2026-08-25) decided against writing a path no one could ever run. See
+/// `docs/goals/vodoge-vowifi-call/notes/T052-pcsc-reader.md`.
+#[test]
+fn the_pcsc_stub_blames_the_build_not_a_missing_reader() {
+    let message = UnsupportedPort::pcsc().imei().unwrap_err().to_string();
+    assert!(message.contains("pcsc"), "does not say which transport: {message}");
+    assert!(
+        message.contains("not implemented"),
+        "does not name a missing implementation: {message}"
+    );
+    assert!(
+        message.contains("no device was contacted"),
+        "leaves 'no reader is plugged in' open as a reading: {message}"
+    );
 }
