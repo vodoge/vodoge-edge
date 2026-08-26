@@ -289,6 +289,7 @@ produced which answer:
 | `ipv4` | `IP4_ADDRESS`, `IP4_DNS`, `P_CSCF_IP4` | IPv4 |
 | `ipv6` | `IP6_ADDRESS`, `IP6_DNS`, `P_CSCF_IP6` | IPv6 |
 | `ipv4-nopcscf` / `ipv6-nopcscf` | the family axis without the P-CSCF axis | matching |
+| `none` | **no CP payload at all** - not an empty one | IPv4 |
 
 The traffic selectors belong to the variant rather than being a separate knob:
 asking for an IPv6 address over a tunnel whose `TSi` covers only `0.0.0.0/0`
@@ -311,6 +312,48 @@ dual-family ask. Both are still the right thing to send; neither is sufficient.
 `ipv4` is the one cell nobody has spent an SQN on. Full write-up, including what
 is left to try and why each candidate is ranked where it is, in
 `docs/goals/vodoge-vowifi-call/notes/T081-cfg-request.md`.
+
+#### `-cfg none`: the shape that is not a guess
+
+Every variant above is a guess about which attribute T-Mobile objected to, and
+three of those guesses have now been refused identically. A fourth costs an SQN
+step to learn a fourth "no". So `none` sends **no configuration payload at
+all** - the payload is absent from the message, which is not the same message as
+an empty `CFG_REQUEST`: RFC 7296 section 3.15 has the initiator ask to be
+configured *by sending the payload*, so an empty one is still asking.
+
+It is one axis from `dual`: same traffic selectors, same everything else, minus
+the payload. Its three possible answers each eliminate a different two thirds of
+what is left:
+
+| answer | `LiveOutcome` | what it licenses next |
+| --- | --- | --- |
+| `FAILED_CP_REQUIRED` (37) | `configuration-required` | the ePDG **parses** the CP, so bisecting the attribute list is worth an SQN step |
+| CHILD_SA | `tunnel-established` | the fault is **entirely** inside the attribute list |
+| `INTERNAL_ADDRESS_FAILURE` (36) again | `internal-address-rejected` | notify 36 was **never about the CP**; the arrow moves to the subscription |
+
+None of the three is criterion 4, including the second: an SA built on a request
+that asked for no address has no address to source packets from and no P-CSCF to
+send `REGISTER` to, so `LiveResult.TunnelIsUp` stays false in all three.
+`ike.ErrFailedCPRequired` wraps the mirror's `ikev2.ErrNotifyFailedCPRequired`
+the same way `ErrInternalAddressFailure` wraps its own, and the two are kept in
+separate outcomes on purpose - they arrive at the same point in the ladder and
+say opposite things.
+
+**All three branches are proven offline before any of them is measured.** The
+fake ePDG grew one knob, `requireCP`, and
+`TestTheNoCPExperimentHasThreeDistinguishableAnswers` drives the *same*
+production code past the *same* fixture three times, varying only how the
+responder answers, and asserts the three land in three distinct named outcomes
+with non-overlapping error classes. `TestTheFixtureAsksForACPOnlyWhenNoneWasSent`
+is its negative control: the same `requireCP` responder must build a CHILD_SA
+for a request that *does* carry a CP, so the notify-37 row is evidence about our
+code rather than about a fixture that recites 37. The recording round-trips too
+(`TestANoneVariantRecordingReplaysAsARequestWithNoCP`), because a request defined
+by an absent payload is the easiest one for a replay to silently put back.
+
+The live run is **not** in this deliverable. Write-up and the exact command in
+`docs/goals/vodoge-vowifi-call/notes/T088-no-cp-probe.md`.
 
 The fourth row is worth its own sentence. TS 24.302 section 7.2.2 says the SWu
 `IDr` is not the ePDG's name, it is the **APN-FQDN** of the PDN to attach to

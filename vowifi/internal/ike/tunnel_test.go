@@ -847,3 +847,178 @@ func containsPayloadType(types []uint8, want uint8) bool {
 	}
 	return false
 }
+
+// TestTheNoCPExperimentHasThreeDistinguishableAnswers is the control the live
+// run is licensed by, and it is the test T097 has to re-read before firing.
+//
+// The three tests above each pin one branch. This one asserts the property that
+// makes the experiment an experiment: run the same production code, unchanged,
+// against one fake ePDG whose only difference between rows is how it answers,
+// and the three answers must land in three different named outcomes. A branch
+// that is individually correct is still worthless if two branches collapse into
+// one label, because then the live run comes back with a word that does not
+// identify what happened.
+//
+// TunnelIsUp is checked in every row for the same reason: none of the three
+// possible answers is criterion 4, not even the one that builds a CHILD_SA, and
+// a receipt that read "tunnel-established" as "VoWiFi works" would be the exact
+// mistake this goal's charter opens with.
+func TestTheNoCPExperimentHasThreeDistinguishableAnswers(t *testing.T) {
+	cases := []struct {
+		name        string
+		responder   func(*epdgAuth)
+		wantOutcome LiveOutcome
+		wantErr     error
+		// mirrorErr is the mirror's own notify class, which has to survive our
+		// wrapping so errors.Is keeps working for callers that never heard of
+		// this package's error values.
+		mirrorErr error
+		// means is what a receipt is entitled to conclude, and it is asserted
+		// against Explain() so the three explanations cannot drift into saying
+		// the same thing.
+		means string
+	}{
+		{
+			name:        "the ePDG reads the CP and minds that it is gone",
+			responder:   func(a *epdgAuth) { a.requireCP = true },
+			wantOutcome: OutcomeConfigurationRequired,
+			wantErr:     ErrFailedCPRequired,
+			mirrorErr:   ikev2.ErrNotifyFailedCPRequired,
+			means:       "parses the CP",
+		},
+		{
+			name:        "the ePDG never needed the CP and builds the SA",
+			responder:   nil,
+			wantOutcome: OutcomeEstablished,
+			wantErr:     nil,
+			means:       "criterion 4",
+		},
+		{
+			name:        "the refusal was never about the CP",
+			responder:   func(a *epdgAuth) { a.addressFailure = true },
+			wantOutcome: OutcomeAddressRejected,
+			wantErr:     ErrInternalAddressFailure,
+			mirrorErr:   ikev2.ErrNotifyInternalAddressFailure,
+			means:       "a fourth -cfg variant is a guess",
+		},
+	}
+
+	seen := make(map[LiveOutcome]string, len(cases))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := benchSubscription(t)
+			f, _ := startLiveFake(t, sub, tc.responder)
+			cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+			// The only thing this test varies is the responder. The request is
+			// byte-identical across all three rows, which is what lets the
+			// outcome be attributed to the answer rather than to the question.
+			cfg.ConfigVariant = ConfigVariantNone
+
+			result, err := RunLiveTunnel(context.Background(), cfg)
+			if result.Outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %s, want %s (err %v)", result.Outcome, tc.wantOutcome, err)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("RunLiveTunnel: %v", err)
+				}
+			} else {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				if !errors.Is(err, tc.mirrorErr) {
+					t.Fatalf("err = %v, want the mirror's notify class to survive", err)
+				}
+				if !errors.Is(err, ErrInvalidAuthResponse) {
+					t.Fatalf("err = %v, want ErrInvalidAuthResponse to survive", err)
+				}
+			}
+			// The other two error classes must not also match, or "which of the
+			// three was it" would be answered by whichever errors.Is a reader
+			// happened to try first.
+			for _, other := range []error{ErrFailedCPRequired, ErrInternalAddressFailure} {
+				if other == tc.wantErr {
+					continue
+				}
+				if errors.Is(err, other) {
+					t.Fatalf("err = %v also matches %v; the answers overlap", err, other)
+				}
+			}
+			// Every row sent the same request, and none of them sent a CP.
+			if result.AuthDetail.SentCP {
+				t.Fatalf("a CP payload went out under the none variant")
+			}
+			if containsPayloadType(result.AuthDetail.InitialPayloadTypes, ikev2.PayloadCP) {
+				t.Fatalf("the first request carried a CP: %v", result.AuthDetail.InitialPayloadTypes)
+			}
+			// The card answered in all three: whatever the ePDG decided, it
+			// decided it after EAP-AKA succeeded, so no row is a verdict on the
+			// SIM.
+			if !result.CardAnsweredChallenge() {
+				t.Fatalf("the card did not answer, so this row is not a verdict on the CP at all")
+			}
+			// Not one of the three is criterion 4.
+			if result.TunnelIsUp() {
+				t.Fatalf("TunnelIsUp under -cfg none; no branch of this experiment can " +
+					"produce an internal address, because none of them asked for one")
+			}
+			if result.Config().Present() {
+				t.Fatalf("a CFG_REPLY answered a request that was never sent")
+			}
+			if !strings.Contains(result.Outcome.Explain(), tc.means) {
+				t.Fatalf("Explain() does not say what this answer licenses next (%q): %q",
+					tc.means, result.Outcome.Explain())
+			}
+			if prior, ok := seen[result.Outcome]; ok {
+				t.Fatalf("%q and %q both report %s; the experiment cannot tell them apart",
+					prior, tc.name, result.Outcome)
+			}
+			seen[result.Outcome] = tc.name
+		})
+	}
+	if len(seen) != len(cases) {
+		t.Fatalf("%d answers produced %d distinct outcomes: %v", len(cases), len(seen), seen)
+	}
+}
+
+// TestTheFixtureAsksForACPOnlyWhenNoneWasSent is the negative control for the
+// control above.
+//
+// requireCP is set in exactly one place in this package, on the one run that
+// sends no CP payload, so nothing else would notice if it degenerated into a
+// responder that answers notify 37 unconditionally. That fixture would make
+// TestARequestWithNoCPIsRefusedWithFailedCPRequired pass for the wrong reason,
+// and the offline evidence T097 relies on would be evidence that the fake says
+// 37 rather than evidence that our code reads it.
+//
+// So: same responder, same knob, a request that does carry a CP - and it has to
+// go all the way to a CHILD_SA.
+func TestTheFixtureAsksForACPOnlyWhenNoneWasSent(t *testing.T) {
+	sub := benchSubscription(t)
+	f, a := startLiveFake(t, sub, func(a *epdgAuth) { a.requireCP = true })
+	cfg, _ := liveConfigFor(t, f, sub, newTestAKAProvider())
+	cfg.ConfigVariant = ConfigVariantDual
+
+	result, err := RunLiveTunnel(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("a responder that requires a CP refused a request that carried one: %v", err)
+	}
+	if errors.Is(err, ErrFailedCPRequired) || result.Outcome == OutcomeConfigurationRequired {
+		t.Fatalf("notify 37 answered a request that had a CP payload")
+	}
+	if result.Outcome != OutcomeEstablished {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, OutcomeEstablished)
+	}
+	if !result.AuthDetail.SentCP || !a.sawCP {
+		t.Fatalf("the request under %s did not carry a CP payload", ConfigVariantDual)
+	}
+	if a.refusalReason != "" {
+		t.Fatalf("the fixture took a refusal path anyway: %s", a.refusalReason)
+	}
+	// And with a request present, the reply is too - which is the other half of
+	// what makes the none rows above meaningful: their empty Config() is a
+	// consequence of the absent request, not of a fixture that never replies.
+	if !result.Config().Present() {
+		t.Fatalf("no CFG_REPLY came back for a request that was sent")
+	}
+}

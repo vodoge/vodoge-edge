@@ -910,3 +910,55 @@ func TestANoneVariantRecordingReplaysAsARequestWithNoCP(t *testing.T) {
 		t.Fatalf("the replay put a CP payload back into a request that had none")
 	}
 }
+
+// TestAHandBuiltConfigurationSurvivesTheNoneVariant pins the one way the CP
+// payload can come back after the variant asked for it to be gone.
+//
+// AllowMissingConfiguration documents that an explicit Configuration wins,
+// deliberately: a caller who assembled a payload by hand asked for that
+// payload, and silently discarding it would be a worse surprise than sending
+// it. Nothing else exercises that precedence - the live probe has no field that
+// can set Configuration - so the rule is one edit away from inverting with the
+// whole suite still green, and the inverted version would make -cfg none
+// unfalsifiable for anyone driving the runner directly.
+//
+// The responder is the witness again: sawCP is what the payload did on the
+// wire, not what our bookkeeping believes about it.
+func TestAHandBuiltConfigurationSurvivesTheNoneVariant(t *testing.T) {
+	explicit := ikev2.Configuration{
+		Type: ikev2.CFGRequest,
+		Attributes: []ikev2.ConfigurationAttribute{
+			{Type: ikev2.ConfigInternalIPv4Address},
+		},
+	}
+	l := startLadder(t, nil, func(r *AuthRunner) {
+		r.ConfigVariant = ConfigVariantNone
+		r.Configuration = explicit
+	}, nil)
+	if _, err := l.run(t); err != nil {
+		t.Fatalf("live IKE_AUTH: %v", err)
+	}
+	detail, ok := l.runner.LastDetail()
+	if !ok {
+		t.Fatalf("LastDetail is empty")
+	}
+	if !detail.SentCP {
+		t.Fatalf("the hand-built CFG_REQUEST was dropped because the variant said none")
+	}
+	if !l.epdg.sawCP {
+		t.Fatalf("the responder saw no CP payload, so the hand-built request never reached it")
+	}
+	if len(detail.SentConfiguration.Attributes) != 1 ||
+		detail.SentConfiguration.Attributes[0].Type != ikev2.ConfigInternalIPv4Address {
+		t.Fatalf("the request on the wire is not the one that was handed in: %s",
+			DescribeConfiguration(detail.SentConfiguration))
+	}
+	// And the variant name still travels, so a capture of this run does not
+	// claim to be a recording of the no-CP experiment while carrying a CP.
+	if detail.ConfigVariant != ConfigVariantNone {
+		t.Fatalf("variant = %q, want %q", detail.ConfigVariant, ConfigVariantNone)
+	}
+	if DescribeConfiguration(detail.SentConfiguration) == "(no CP payload)" {
+		t.Fatalf("a run that sent a payload describes itself as having sent none")
+	}
+}
