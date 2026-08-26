@@ -10,6 +10,9 @@ pub enum TransportKind {
     Qmi,
     At,
     Mbim,
+    /// A SIM reached through an external smart-card reader instead of through
+    /// the modem. Named here and nowhere else -- see [`UnsupportedPort::pcsc`]
+    /// for why nothing implements it and nothing is going to.
     Pcsc,
 }
 
@@ -66,7 +69,20 @@ pub trait ModemPort {
     fn send_on(&mut self, bearer: Bearer, pdu: &[u8]) -> Result<(), PortError>;
 }
 
-/// A transport that exists in the discovery chain but is not implemented yet.
+/// A transport this build names but does not implement.
+///
+/// Every call fails, and the failure means *this build has no code for that
+/// transport* -- not *no device was found*, not *the device refused*. The port
+/// opens nothing, sends nothing, and never looks for hardware, so none of what
+/// it returns is evidence about any device. Keeping those apart is most of the
+/// value of the type: "no device found" sends someone off to check cables, and
+/// on this deployment there is nobody who can go check them (`goal.md:161`).
+///
+/// So no method here may report success -- including the ones whose natural
+/// empty answer would pass for one. [`ModemPort::sweep_slots`] defaults to
+/// `Ok(vec![])`, which is right for a transport whose listing is already
+/// complete and wrong here, because a caller cannot tell "swept, nothing in
+/// those slots" from "there is no transport". It is overridden below.
 pub struct UnsupportedPort {
     kind: TransportKind,
 }
@@ -84,6 +100,35 @@ impl UnsupportedPort {
         }
     }
 
+    /// PC/SC: the SIM reached through an external smart-card reader.
+    ///
+    /// This is not "not implemented yet". It is not implementable on this
+    /// deployment, and it is left a stub deliberately (T052, decided
+    /// 2026-08-25).
+    ///
+    /// PC/SC needs a reader physically plugged into the edge machine, and
+    /// `docs/goals/vodoge-vowifi-call/goal.md:161` records the constraint that
+    /// kills it: **nobody can physically touch that hardware.** The modems
+    /// reach the VM over USB/IP and there is no one at the far end to plug
+    /// anything in. Code written against that could never be run, never be
+    /// tested against a card, never be falsified -- and a PC/SC path that has
+    /// never met a reader is worse than none, because it would read as
+    /// implemented.
+    ///
+    /// Two further gaps, both cheap and neither sufficient: no `pcsc` crate in
+    /// any manifest in this workspace, and no PC/SC step in
+    /// [`crate::DeviceEnumerator`], whose steps are QMI, then MBIM, then
+    /// VID/AT -- so a finished `PcscPort` would still have nothing routing to
+    /// it.
+    ///
+    /// If a reader is ever attached, the first move is not this file: it is
+    /// teaching `DeviceEnumerator` to enumerate readers, since that decides
+    /// what a `PcscPort` is handed at all. And `tests/hardware_layer.rs` goes
+    /// red the moment this stops being a stub -- that red is the correct
+    /// signal. Claim it and rewrite those assertions; do not route around it.
+    ///
+    /// Full account:
+    /// `docs/goals/vodoge-vowifi-call/notes/T052-pcsc-reader.md`.
     pub fn pcsc() -> Self {
         Self {
             kind: TransportKind::Pcsc,
@@ -112,6 +157,12 @@ impl ModemPort for UnsupportedPort {
         Err(PortError::Unsupported(self.kind))
     }
 
+    /// Overridden away from the trait default, which answers `Ok(vec![])`. An
+    /// empty success out of here is a lie the caller cannot detect.
+    fn sweep_slots(&mut self, _first: u32, _count: u32) -> Result<Vec<ListedMessage>, PortError> {
+        Err(PortError::Unsupported(self.kind))
+    }
+
     fn read_sms(&mut self, _storage: StorageType, _index: u32) -> Result<RawMessage, PortError> {
         Err(PortError::Unsupported(self.kind))
     }
@@ -137,7 +188,11 @@ pub enum PortError {
 impl std::fmt::Display for PortError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unsupported(kind) => write!(formatter, "{} transport is not implemented", kind.as_str()),
+            Self::Unsupported(kind) => write!(
+                formatter,
+                "{} transport is not implemented in this build; no device was contacted",
+                kind.as_str()
+            ),
             Self::Session(message) => formatter.write_str(message),
             Self::MissingImei => formatter.write_str("modem did not return an IMEI"),
             Self::PlanUnavailable(reason) => write!(formatter, "no SMS bearer: {reason}"),
