@@ -1,6 +1,6 @@
 VoDoge Edge
 Copyright (c) 2026 the VoDoge Edge authors
-https://github.com/yuanshuai1122/vodoge-edge
+https://github.com/vodoge/vodoge-edge
 
 This product contains software under two different licenses. The full map of
 which path is under which license is in LICENSE. In short:
@@ -45,6 +45,6 @@ If you interact with vodoge-voice or vodoge-ike-probe remotely over a network,
 AGPL-3.0 section 13 entitles you to the Corresponding Source. It is published,
 free of charge and without an account, at:
 
-    https://github.com/yuanshuai1122/vodoge-edge
+    https://github.com/vodoge/vodoge-edge
 
 See LICENSE section 5 and README.md for the full offer.

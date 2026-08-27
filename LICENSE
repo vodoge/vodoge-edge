@@ -2,7 +2,7 @@ VoDoge Edge -- licensing
 ========================
 
 Copyright (c) 2026 the VoDoge Edge authors
-Source: https://github.com/yuanshuai1122/vodoge-edge
+Source: https://github.com/vodoge/vodoge-edge
 
 This repository is NOT under a single license. It builds two independent sets
 of artifacts under two different licenses, and which one applies to you depends
@@ -171,12 +171,12 @@ Source. This is that offer, and it is deliberate rather than incidental:
 
     The complete Corresponding Source for these programs is published at
 
-        https://github.com/yuanshuai1122/vodoge-edge
+        https://github.com/vodoge/vodoge-edge
 
     and may be obtained by anyone, at no charge, over the network, without an
     account:
 
-        git clone https://github.com/yuanshuai1122/vodoge-edge
+        git clone https://github.com/vodoge/vodoge-edge
 
     The upstream AGPL dependency compiled into these binaries is at
     https://github.com/boa-z/vowifi-go, commit 1e9c6e6a.
