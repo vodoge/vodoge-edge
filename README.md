@@ -37,11 +37,11 @@ interacts with them remotely over a network the right to receive the
 Corresponding Source. Here is that offer. It is deliberate, not incidental:
 
 > The complete Corresponding Source for the version you are talking to is
-> published at <https://github.com/yuanshuai1122/vodoge-edge>, and may be
+> published at <https://github.com/vodoge/vodoge-edge>, and may be
 > obtained by anyone, at no charge, over the network, without an account:
 >
 > ```sh
-> git clone https://github.com/yuanshuai1122/vodoge-edge
+> git clone https://github.com/vodoge/vodoge-edge
 > ```
 >
 > The upstream AGPL dependency compiled into these binaries is at
