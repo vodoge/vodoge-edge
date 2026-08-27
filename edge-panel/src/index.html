@@ -89,9 +89,20 @@
       --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2rem; --s7:3rem;
 
       /* Derived, not written: one base and a ratio per step. The cloud
-         console declares these same names with these same values and a test
-         there holds its own copy equal to lib/tokens.ts, so the two repos
-         drift apart only by somebody editing this block by hand. */
+         console declares these same names with these same values.
+
+         🔴 Nothing checks that agreement on its own. The cloud test this
+         comment used to point at holds the cloud's OWN two copies equal to
+         each other; it never opens this file. So either end can drift by a
+         hand edit — this block, and the cloud's block just as easily. The
+         comparison is vodoge-cloud/scripts/check-token-parity.cjs, it needs
+         both repositories checked out side by side, and NOTHING RUNS IT
+         AUTOMATICALLY.
+
+         Adding a token here alone will be caught by it, but only if someone
+         runs it: the shared vocabulary is the union of both blocks, so a name
+         declared at one end only fails until it is either added at the other
+         end or exempted with a written reason. */
       --radius-base:10px;
       --radius:calc(var(--radius-base) * 0.8);
       --radius-md:var(--radius-base);
