@@ -91,18 +91,29 @@
       /* Derived, not written: one base and a ratio per step. The cloud
          console declares these same names with these same values.
 
-         🔴 Nothing checks that agreement on its own. The cloud test this
-         comment used to point at holds the cloud's OWN two copies equal to
-         each other; it never opens this file. So either end can drift by a
-         hand edit — this block, and the cloud's block just as easily. The
-         comparison is vodoge-cloud/scripts/check-token-parity.cjs, it needs
-         both repositories checked out side by side, and NOTHING RUNS IT
-         AUTOMATICALLY.
+         🔴 A check does exist and it runs — but NOT on this side. Since
+         SN-T024 the cloud repository's CI has a `tokens` job that clones this
+         repository beside its own checkout and runs
+         vodoge-cloud/scripts/check-token-parity.cjs over both trees, with
+         both roots passed explicitly. (The cloud test this comment used to
+         point at is a different thing, and it never opens this file: it holds
+         the cloud's OWN two copies equal to each other.)
 
-         Adding a token here alone will be caught by it, but only if someone
-         runs it: the shared vocabulary is the union of both blocks, so a name
-         declared at one end only fails until it is either added at the other
-         end or exempted with a written reason. */
+         🔴 THE COVERAGE IS ASYMMETRIC, AND THE WEAK HALF IS THIS ONE. That
+         job is triggered by activity in the CLOUD repository, and it clones
+         this repository's `main`. So an edit made here is caught neither by
+         this repository's CI nor at pull-request time on this side — it is
+         seen only once it has landed on `main` here AND the cloud pushes
+         next. A token added at this end alone will be found, but not by
+         anything this repository runs, and not on this repository's clock.
+         Do not read "CI checks the tokens" as "CI checks them when I change
+         them"; from here those are different claims.
+
+         Running the comparison yourself, with both repositories checked out
+         side by side, is still the only way to get an answer before then. The
+         shared vocabulary is the union of both blocks, so a name declared at
+         one end only fails until it is either added at the other end or
+         exempted with a written reason. */
       --radius-base:10px;
       --radius:calc(var(--radius-base) * 0.8);
       --radius-md:var(--radius-base);
