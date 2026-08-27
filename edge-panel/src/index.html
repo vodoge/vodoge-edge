@@ -128,7 +128,7 @@
       --pico-block-spacing-horizontal:var(--s3);
       --pico-typography-spacing-vertical:var(--s2);
       --pico-typography-spacing-top:var(--s3);
-      --pico-form-element-spacing-vertical:.3rem;
+      --pico-form-element-spacing-vertical:var(--s1);
       --pico-form-element-spacing-horizontal:var(--s2);
       --pico-grid-column-gap:var(--s3);
       --pico-grid-row-gap:var(--s3);
@@ -279,7 +279,7 @@
     .brand-mark {
       width:20px; height:20px; border-radius:var(--radius-lg); display:grid; place-items:center;
       background:linear-gradient(135deg,var(--accent),var(--accent-strong));
-      color:var(--accent-ink); font-size:11px; font-weight:800;
+      color:var(--accent-ink); font-size:var(--text-xs); font-weight:800;
     }
     .brand-note { color:var(--fg-faint); font-size:var(--text-xs); font-weight:400; }
 
@@ -310,7 +310,7 @@
 
     kbd.key {
       display:inline-grid; place-items:center; min-width:1.15rem; height:1.15rem;
-      padding:0 3px; border-radius:var(--radius); background:var(--surface-hover);
+      padding:0 var(--s1); border-radius:var(--radius); background:var(--surface-hover);
       color:var(--fg-faint); font-family:var(--font-mono); font-size:10px;
       font-weight:600; line-height:1; border:1px solid var(--line-strong);
     }
@@ -323,6 +323,9 @@
     .fresh.is-lost { color:var(--bad); }
 
     /* ── Three columns ───────────────────────────────────────────────────── */
+    /* The 1px gap is a rule, not spacing: the grid background shows through
+       it, so this draws the two column dividers. A spacing step here would be
+       a 4px grey bar. It tracks --pico-border-width, not the --sN ladder. */
     .deck {
       display:grid; min-height:0; overflow:hidden;
       grid-template-columns:var(--rail) minmax(0,1fr) var(--logs);
@@ -379,6 +382,8 @@
     input.field, select.field, textarea.field { width:auto; }
     input.field { height:1.75rem; }
     input.field[type="search"] { background-image:none; padding-left:var(--s2); }
+    /* Clearance for the arrow glyph, so it is paired with background-size
+       rather than with the spacing ladder. */
     select.field { padding-right:1.6rem; background-size:.85rem auto; }
     .field:focus { border-color:var(--accent); }
     .field.mono { font-family:var(--font-mono); }
@@ -387,6 +392,9 @@
     input.field[type="search"] { background-image:none; padding-left:var(--s2); }
 
     /* ── Badges ─────────────────────────────────────────────────────────── */
+    /* The vertical 1px is optical trim, not a gap: this pill's height is set
+       by its line-height, and a spacing step would add 6px to every row that
+       carries a badge -- including one per profile in the eSIM table. */
     .badge {
       display:inline-flex; align-items:center; gap:var(--s1);
       padding:1px var(--s2); border-radius:var(--radius-pill);
@@ -405,7 +413,7 @@
       text-align:left; width:100%; cursor:pointer; box-shadow:none;
       background:var(--surface); border:1px solid var(--line);
       border-radius:var(--radius-md); padding:var(--s2) var(--s3);
-      display:grid; gap:2px; font:inherit; color:inherit;
+      display:grid; gap:var(--s1); font:inherit; color:inherit;
       transition:border-color .12s ease, background .12s ease;
     }
     .modem:hover { border-color:var(--line-strong); background:var(--surface-hover); }
@@ -480,7 +488,7 @@
        rest of the panel uses; Latin and digits still get the mono face,
        which is the whole point of the treatment. */
     th, .health-group {
-      font-family:var(--font-eyebrow); font-size:10px; font-weight:600;
+      font-family:var(--font-eyebrow); font-size:var(--text-xs); font-weight:600;
       text-transform:uppercase; letter-spacing:1.4px; color:var(--fg-faint);
     }
     th { --pico-font-weight:600; }
@@ -513,7 +521,7 @@
        exchange began. */
     .con-aim { font-size:var(--text-xs); font-family:var(--font-mono); color:var(--fg-muted); white-space:nowrap; }
     .con-aim.is-loose { color:var(--warn); font-family:var(--font-ui); }
-    .con-keys { color:var(--fg-faint); white-space:nowrap; display:inline-flex; align-items:center; gap:3px; }
+    .con-keys { color:var(--fg-faint); white-space:nowrap; display:inline-flex; align-items:center; gap:var(--s1); }
 
     .con-ussd {
       margin:0; padding:var(--s1) var(--s2); border-radius:var(--radius-md);
@@ -523,7 +531,7 @@
     /* The one command in this box that takes the module away is named before
        anybody types it, rather than only in the dialog that appears too late
        to be a warning. */
-    .con-guard { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .con-guard { margin:0; font-size:var(--text-xs); color:var(--fg-faint); line-height:1.5; }
     .con-guard b { color:var(--warn); font-weight:600; }
 
     .quick-label { font-size:10px; color:var(--fg-faint); padding-right:var(--s1); white-space:nowrap; }
@@ -564,7 +572,7 @@
        switch that was asked for actually happened. Both are only ever drawn
        from a read of the card, never from what the switch endpoint answered,
        so the readout carries the time of that read. */
-    .esim-guard { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.6; }
+    .esim-guard { margin:0; font-size:var(--text-xs); color:var(--fg-faint); line-height:1.6; }
     .esim-guard b { color:var(--warn); font-weight:600; }
     .esim-live {
       display:flex; align-items:center; gap:var(--s2); flex-wrap:wrap;
@@ -598,8 +606,8 @@
        that is added without a line of copy is impossible: the copy is part of
        the entry. Two lines per row, because the command shape is what an
        operator scans for and the consequence is what they read once. */
-    .guard-list { margin:0; padding:0; list-style:none; display:grid; gap:2px; }
-    .guard-item { display:flex; gap:var(--s2); align-items:baseline; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .guard-list { margin:0; padding:0; list-style:none; display:grid; gap:var(--s1); }
+    .guard-item { display:flex; gap:var(--s2); align-items:baseline; font-size:var(--text-xs); color:var(--fg-faint); line-height:1.5; }
     .guard-cmd {
       font-family:var(--font-mono); color:var(--warn); font-weight:600;
       flex:0 0 auto; min-width:10.5rem; white-space:nowrap;
@@ -618,7 +626,7 @@
     .scan-live { display:grid; gap:var(--s1); }
     .scan-row { display:flex; align-items:center; gap:var(--s2); font-size:var(--text-xs); color:var(--warn); flex-wrap:wrap; }
     progress.scan-bar { width:100%; height:6px; margin:0; --pico-progress-color:var(--warn); }
-    .scan-note-late { color:var(--fg-faint); font-size:10px; margin:0; line-height:1.5; }
+    .scan-note-late { color:var(--fg-faint); font-size:var(--text-xs); margin:0; line-height:1.5; }
     tr.is-current > td { background:var(--accent-wash); }
     tr.is-forbidden > td { color:var(--fg-faint); }
 
@@ -634,7 +642,7 @@
     }
     .sms-block b { color:var(--warn); font-weight:700; }
     .sms-block .sms-src { color:var(--fg-faint); font-size:10px; }
-    .sms-meter { margin:0; font-size:10px; color:var(--fg-faint); line-height:1.5; }
+    .sms-meter { margin:0; font-size:var(--text-xs); color:var(--fg-faint); line-height:1.5; }
     .sms-meter b { font-family:var(--font-mono); color:var(--fg-muted); font-weight:600; }
     .sms-meter.is-over b, .sms-meter.is-over { color:var(--bad); }
     .msg-imei { font-family:var(--font-mono); color:var(--fg-faint); }
@@ -646,7 +654,7 @@
        three that decide whether this stick can carry anything are said in
        words above the grid instead of being left to a colour in a list of
        ten. */
-    .health-verdict { margin:0; font-size:var(--text-xs); line-height:1.6; display:grid; gap:2px; }
+    .health-verdict { margin:0; font-size:var(--text-xs); line-height:1.6; display:grid; gap:var(--s1); }
     .health-line { display:flex; gap:var(--s2); align-items:baseline; }
     .health-line .health-key { color:var(--fg-muted); flex:0 0 5.5rem; }
     .health-line.ok .health-say { color:var(--ok); }
@@ -677,19 +685,19 @@
     /* Every pixel this row costs is a log line the operator does not see, so
        it is sized down to what the controls actually need. */
     .log-facets {
-      display:flex; align-items:center; gap:3px; flex-wrap:wrap; row-gap:3px;
-      padding:3px var(--s2); border-bottom:1px solid var(--line); background:var(--surface);
+      display:flex; align-items:center; gap:var(--s1); flex-wrap:wrap; row-gap:var(--s1);
+      padding:var(--s1) var(--s2); border-bottom:1px solid var(--line); background:var(--surface);
     }
-    .log-facets select.field { height:1.35rem; font-size:10px; padding:0 1.15rem 0 3px; max-width:5rem; }
-    .log-facets .btn { min-height:1.35rem; font-size:10px; padding:0 4px; }
+    .log-facets select.field { height:1.35rem; font-size:var(--text-xs); padding:0 1.15rem 0 var(--s1); max-width:5rem; }
+    .log-facets .btn { min-height:1.35rem; font-size:var(--text-xs); padding:0 var(--s1); }
 
     /* Level chips carry their own count, which is what turns "colour the
        lines" into something an operator can act on: 3 errors in 500 lines is
        visible before any of them has scrolled past. */
     .lvl-chip {
-      font:inherit; font-size:10px; font-weight:600; line-height:1; width:auto;
-      min-height:1.35rem; padding:0 4px; box-shadow:none; cursor:pointer;
-      display:inline-flex; align-items:center; gap:3px; white-space:nowrap;
+      font:inherit; font-size:var(--text-xs); font-weight:600; line-height:1; width:auto;
+      min-height:1.35rem; padding:0 var(--s1); box-shadow:none; cursor:pointer;
+      display:inline-flex; align-items:center; gap:var(--s1); white-space:nowrap;
       border-radius:var(--radius); border:1px solid var(--line-strong);
       background:transparent; color:var(--fg-faint);
     }
@@ -701,23 +709,34 @@
     .lvl-chip.warn.on { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 45%, transparent); background:var(--warn-wash); }
     .lvl-chip.info.on { color:var(--fg-muted); border-color:var(--line-strong); background:var(--surface-hover); }
 
+    /* This row's type stays a literal 10px, and that is a measured choice,
+       not an oversight. At --text-xs it grows wide enough to wrap at 1280px --
+       the narrowest width the three-column promise covers -- which cost 27px
+       of log pane, about three quarters of a wrapped line, for nothing. That
+       is the very wrap the meta-acts rule below was written to prevent. */
     .log-meta {
-      display:flex; align-items:center; gap:var(--s1); flex-wrap:wrap; row-gap:2px;
-      padding:2px var(--s2); border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:var(--s1); flex-wrap:wrap; row-gap:var(--s1);
+      padding:var(--s1) var(--s2); border-bottom:1px solid var(--line);
       background:var(--surface); color:var(--fg-faint); font-size:10px;
     }
     .log-meta .warn { color:var(--warn); }
     .log-meta .bad { color:var(--bad); }
-    .log-meta .btn { min-height:1.15rem; font-size:10px; padding:0 4px; }
+    .log-meta .btn { min-height:1.15rem; font-size:10px; padding:0 var(--s1); }
     /* Kept together and pushed right as one unit, so the second button does not
        wrap onto a line of its own and cost a log line for nothing. */
-    .log-meta .meta-acts { display:inline-flex; gap:3px; margin-left:auto; flex:0 0 auto; }
+    .log-meta .meta-acts { display:inline-flex; gap:var(--s1); margin-left:auto; flex:0 0 auto; }
     .log-pane {
       overflow:auto; padding:var(--s1) var(--s2); display:block;
       font-family:var(--font-mono); font-size:var(--text-xs); line-height:1.5;
       overflow-anchor:none;
     }
     .log-pane:empty::before { content:attr(data-empty); color:var(--fg-faint); }
+    /* The vertical 1px stays a literal on purpose. This padding is paid once
+       per log line, so the smallest spacing step would add 6px to every row.
+       Measured in a browser at 1440x900: the row pitch goes 38px -> 44px and
+       the column shows 16 lines instead of 19. Three lines of history is a
+       poor trade for a gap nobody reads as a gap. The line-height above is
+       what gives this column its air; the padding only separates rows. */
     .log-row {
       display:flex; gap:var(--s2); padding:1px 0 1px var(--s1); border-radius:var(--radius);
       border-left:2px solid transparent;
@@ -732,6 +751,8 @@
     .log-row.lvl-err .log-text { color:var(--bad); }
     .log-row.lvl-warn .log-text { color:var(--warn); }
     .log-row.lvl-info .log-text { color:var(--fg-muted); }
+    /* Inline trim on a search hit, sized to the glyph edge rather than to the
+       layout ladder: a step here would make matches jump inside the line. */
     .log-row mark { background:var(--accent-wash); color:var(--accent); border-radius:var(--radius); padding:0 1px; }
     .log-row.is-cursor { background:var(--accent-wash); outline:1px solid var(--accent); }
     /* The heartbeat is not news. Flashing every arrival would mean this column
