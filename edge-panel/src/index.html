@@ -88,9 +88,14 @@
 
       --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2rem; --s7:3rem;
 
-      --radius:3px;
-      --radius-md:4px;
-      --radius-lg:6px;
+      /* Derived, not written: one base and a ratio per step. The cloud
+         console declares these same names with these same values and a test
+         there holds its own copy equal to lib/tokens.ts, so the two repos
+         drift apart only by somebody editing this block by hand. */
+      --radius-base:10px;
+      --radius:calc(var(--radius-base) * 0.8);
+      --radius-md:var(--radius-base);
+      --radius-lg:calc(var(--radius-base) * 1.4);
       --radius-pill:999px;
 
       --shadow:0 1px 2px rgba(0,0,0,.35);
