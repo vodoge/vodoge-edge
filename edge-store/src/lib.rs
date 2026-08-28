@@ -67,6 +67,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_modem_home.sql"),
     MODEM_USB_SITES,
     INGESTED_SMS,
+    include_str!("../migrations/0008_modem_discovery.sql"),
+    include_str!("../migrations/0009_manual_modem_profiles.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -118,8 +120,12 @@ impl Store {
             });
         }
         if target < current {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS manual_modem_profiles;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS ingested_sms;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS modem_usb_sites;")?;
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS local_modem_discoveries;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_messages;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS local_modems;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS uplink_gaps;")?;
@@ -359,13 +365,18 @@ impl Store {
 
     pub fn upsert_local_modem(&self, modem: &LocalModem) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO local_modems (imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO local_modems
+                (imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
+                 discovery, manageable, control_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(imei) DO UPDATE SET
                 family = excluded.family,
                 iccid = excluded.iccid,
                 state = excluded.state,
                 last_seen = excluded.last_seen,
+                discovery = excluded.discovery,
+                manageable = excluded.manageable,
+                control_port = excluded.control_port,
                 -- A poll taken while the modem is searching reports no network.
                 -- Keeping the last known one stops the card's identity from
                 -- blinking out every time it re-registers.
@@ -387,6 +398,47 @@ impl Store {
                 modem.home_mcc,
                 modem.home_mnc,
                 modem.imsi,
+                modem.discovery,
+                modem.manageable as i64,
+                modem.control_port,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Store the last probe result for a physical modem endpoint. Unlike the
+    /// modem inventory this is allowed to have no IMEI: making a broken port
+    /// visible is the point of the diagnostic list.
+    pub fn upsert_local_modem_discovery(
+        &self,
+        discovery: &LocalModemDiscovery,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO local_modem_discoveries
+                (candidate_key, usb_device, transport, control_port, vendor_id, product_id,
+                 state, imei, detail, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(candidate_key) DO UPDATE SET
+                usb_device = excluded.usb_device,
+                transport = excluded.transport,
+                control_port = excluded.control_port,
+                vendor_id = excluded.vendor_id,
+                product_id = excluded.product_id,
+                state = excluded.state,
+                imei = excluded.imei,
+                detail = excluded.detail,
+                last_seen = excluded.last_seen",
+            params![
+                discovery.candidate_key,
+                discovery.usb_device,
+                discovery.transport,
+                discovery.control_port,
+                discovery.vendor_id,
+                discovery.product_id,
+                discovery.state,
+                discovery.imei,
+                discovery.detail,
+                discovery.last_seen,
             ],
         )?;
         Ok(())
@@ -458,7 +510,8 @@ impl Store {
 
     pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi
+            "SELECT imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
+                    discovery, manageable, control_port
                FROM local_modems
               ORDER BY imei",
         )?;
@@ -475,10 +528,92 @@ impl Store {
                     home_mcc: row.get(7)?,
                     home_mnc: row.get(8)?,
                     imsi: row.get(9)?,
+                    discovery: row.get(10)?,
+                    manageable: row.get::<_, i64>(11)? != 0,
+                    control_port: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn list_local_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT candidate_key, usb_device, transport, control_port, vendor_id, product_id,
+                    state, imei, detail, last_seen
+               FROM local_modem_discoveries
+              ORDER BY last_seen DESC, candidate_key",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(LocalModemDiscovery {
+                    candidate_key: row.get(0)?,
+                    usb_device: row.get(1)?,
+                    transport: row.get(2)?,
+                    control_port: row.get(3)?,
+                    vendor_id: row.get(4)?,
+                    product_id: row.get(5)?,
+                    state: row.get(6)?,
+                    imei: row.get(7)?,
+                    detail: row.get(8)?,
+                    last_seen: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Save an operator's approval of an automatically discovered candidate.
+    ///
+    /// `candidate_key` is intentionally the identity here: a profile cannot
+    /// manufacture a modem from an arbitrary port, and live discovery must
+    /// still match the approved candidate before it can be used.
+    pub fn upsert_manual_modem_profile(
+        &self,
+        profile: &ManualModemProfile,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO manual_modem_profiles
+                (candidate_key, usb_device, vendor_id, product_id, control_port, approved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(candidate_key) DO UPDATE SET
+                usb_device = excluded.usb_device,
+                vendor_id = excluded.vendor_id,
+                product_id = excluded.product_id,
+                control_port = excluded.control_port,
+                approved_at = excluded.approved_at",
+            params![
+                profile.candidate_key,
+                profile.usb_device,
+                profile.vendor_id,
+                profile.product_id,
+                profile.control_port,
+                profile.approved_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return operator-approved candidates, with the latest approval first.
+    pub fn list_manual_modem_profiles(&self) -> Result<Vec<ManualModemProfile>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT candidate_key, usb_device, vendor_id, product_id, control_port, approved_at
+               FROM manual_modem_profiles
+              ORDER BY approved_at DESC, candidate_key",
+        )?;
+        let rows = statement
+            .query_map([], read_manual_modem_profile)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Withdraw an operator approval. Returns whether a saved profile existed.
+    pub fn remove_manual_modem_profile(&self, candidate_key: &str) -> Result<bool, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM manual_modem_profiles WHERE candidate_key = ?1",
+            params![candidate_key],
+        )?;
+        Ok(removed != 0)
     }
 }
 
@@ -511,6 +646,58 @@ pub struct LocalModem {
     pub home_mcc: Option<u16>,
     pub home_mnc: Option<u16>,
     pub imsi: Option<String>,
+    /// The transport that identified the modem: `qmi` is command-capable;
+    /// `at` is a visible fallback only.
+    pub discovery: String,
+    /// Whether structured agent actions can safely target this modem.
+    pub manageable: bool,
+    /// The endpoint observed on the latest successful poll.
+    pub control_port: Option<String>,
+}
+
+/// One observed QMI or serial endpoint, including endpoints that did not
+/// yield an IMEI and therefore cannot be inventory records yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalModemDiscovery {
+    pub candidate_key: String,
+    pub usb_device: Option<String>,
+    pub transport: String,
+    pub control_port: String,
+    pub vendor_id: Option<String>,
+    pub product_id: Option<String>,
+    pub state: String,
+    pub imei: Option<String>,
+    pub detail: String,
+    pub last_seen: i64,
+}
+
+/// An operator-approved configuration for a discovered modem candidate.
+///
+/// The optional USB identifiers are evidence captured when the candidate was
+/// approved. They are not used as a replacement for active discovery: USB
+/// topology and Linux endpoint names can change when a device re-enumerates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManualModemProfile {
+    pub candidate_key: String,
+    pub usb_device: Option<String>,
+    pub vendor_id: Option<String>,
+    pub product_id: Option<String>,
+    pub control_port: String,
+    /// Unix milliseconds when the operator approved or last updated it.
+    pub approved_at: i64,
+}
+
+fn read_manual_modem_profile(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ManualModemProfile> {
+    Ok(ManualModemProfile {
+        candidate_key: row.get(0)?,
+        usb_device: row.get(1)?,
+        vendor_id: row.get(2)?,
+        product_id: row.get(3)?,
+        control_port: row.get(4)?,
+        approved_at: row.get(5)?,
+    })
 }
 
 /// Where one module was last proven to sit on the USB bus.

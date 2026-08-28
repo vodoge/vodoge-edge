@@ -43,8 +43,9 @@ pub use aka::{
     USIM_ADF_AID_PREFIX,
 };
 pub use at::{
-    at_control_ports, at_port_for_qmi, first_bare_digits, handle_lease_request, lease_socket_path,
-    usb_device_of_at, ArbiterWaiting, AtError, AtExchange, AtLease, AtPort, LeaseFailure,
+    at_control_ports, at_port_candidates, at_port_for_qmi, first_bare_digits,
+    handle_lease_request, lease_socket_path, usb_device_of_at, ArbiterWaiting, AtError,
+    AtExchange, AtLease, AtPort, AtPortCandidate, AtPortKind, AtProbePolicy, LeaseFailure,
     ModemArbiter, ModemLease, ModemPriority, AT_CONTROL_INTERFACE, DEFAULT_LEASE_SOCKET,
     DEFAULT_LEASE_TIMEOUT, LEASE_SOCKET_ENV, MAX_LEASE_CLIENTS, MAX_LEASE_TIMEOUT,
 };

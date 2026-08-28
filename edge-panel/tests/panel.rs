@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use edge_panel::{
-    router, router_with_actions, Actions, AtResult, LogRing, MemoryInbox, PanelError, ProfileBody,
-    ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
+    router, router_with_actions, Actions, AtResult, CandidateClaimResult, LogRing, MemoryInbox,
+    PanelError, ProfileBody, ProfilesResult, ReportResult, RescanResult, ScanResult,
+    ScannedOperatorBody, UsbResetResult, UssdResult,
 };
-use edge_store::{LocalMessage, LocalModem};
+use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -782,7 +783,7 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
     let panel = Panel::load().await;
     let sites = api_call_sites(&panel.code);
     assert!(
-        sites.len() >= 13,
+        sites.len() >= 15,
         "the call-site scan found {} calls, which is fewer than there are endpoints — \
          it has stopped reading the code",
         sites.len()
@@ -802,6 +803,8 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
         "/api/ussd/cancel",
         "/api/radio",
         "/api/usb-reset",
+        "/api/rescan",
+        "/api/discoveries/claim",
     ] {
         assert!(
             sites.iter().any(|path| path == endpoint),
@@ -817,7 +820,8 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
             [
                 "/api/status", "/api/logs", "/api/messages", "/api/send", "/api/at",
                 "/api/report", "/api/esim", "/api/esim/switch", "/api/scan", "/api/ussd",
-                "/api/ussd/cancel", "/api/radio", "/api/usb-reset", "/api/restart",
+                "/api/ussd/cancel", "/api/radio", "/api/usb-reset", "/api/rescan",
+                "/api/discoveries/claim", "/api/restart",
             ]
             .contains(&site.as_str()),
             "the panel calls {site}, which the daemon does not serve"
@@ -844,6 +848,85 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
         panel.code.matches("fetch(").count() - panel.code.matches("fetch(\"").count(),
         1,
         "a fetch is built from something other than a literal path"
+    );
+}
+
+/// A cached status refresh and a hardware rescan are deliberately separate:
+/// the former can succeed while a module inserted after the last poll remains
+/// unseen. Candidates must stay visible even when they have no IMEI, because
+/// their failure detail is what makes a supportable next action possible.
+#[tokio::test]
+async fn panel_requests_a_real_usb_rescan_and_keeps_raw_candidates_visible() {
+    let panel = Panel::load().await;
+    panel.wired(
+        In::Tags,
+        "the panel has no real USB rescan control",
+        "@click=\"rescan()\"",
+    );
+    panel.wired(
+        In::Code,
+        "the USB control does not call the rescan endpoint",
+        "this.post(\"/api/rescan\", {})",
+    );
+    panel.wired(
+        In::Tags,
+        "raw discovery candidates are not rendered",
+        "x-for=\"d in discoveries\"",
+    );
+    assert!(
+        panel.code.contains("this.discoveries = Array.isArray(status.discoveries) ? status.discoveries : [];"),
+        "the status response never reaches the USB candidate list"
+    );
+    assert!(
+        panel.tags.contains("candidateDetail(d)"),
+        "a failed discovery loses its diagnostic detail in the list"
+    );
+}
+
+/// A serial candidate is first found by hardware discovery, then explicitly
+/// admitted to the next AT identity probe. The operator cannot turn this into
+/// a free-form port or IMEI entry: only the server-issued candidate key goes
+/// over the wire.
+#[tokio::test]
+async fn panel_claims_only_found_serial_candidates_for_later_at_identification() {
+    let panel = Panel::load().await;
+    panel.wired(
+        In::Tags,
+        "a found serial candidate has no controlled claim action",
+        "x-show=\"candidateCanClaim(d)\"",
+    );
+    panel.wired(
+        In::Tags,
+        "the claim action has no per-candidate busy state",
+        ":disabled=\"claimBusyFor(d)\"",
+    );
+    panel.wired(
+        In::Code,
+        "the claim action does not send the server-issued key",
+        "this.post(\"/api/discoveries/claim\", { candidate_key: candidateKey })",
+    );
+
+    let predicate = body_of(&panel.code, "candidateCanClaim(candidate) {", "\n        },");
+    assert!(
+        predicate.contains("candidate.transport === \"serial\"")
+            && predicate.contains("candidate.state === \"found\""),
+        "the claim action is available outside an exact serial/found candidate: {predicate}"
+    );
+
+    let claim = body_of(&panel.code, "async claimDiscovery(candidate) {", "\n        },");
+    for required in ["confirm(", "下一轮轮询", "AT+CGSN", "setTimeout(() => this.load().catch(() => {}), STATUS_EVERY)"] {
+        assert!(claim.contains(required), "the controlled claim flow omits {required}: {claim}");
+    }
+    for forbidden in ["prompt(", "control_port", "imei"] {
+        assert!(
+            !claim.contains(forbidden),
+            "the controlled claim flow accepts a manual {forbidden}: {claim}"
+        );
+    }
+    panel.wired(
+        In::Code,
+        "a claimed candidate is not rendered as another unclaimed candidate",
+        "return \"已纳入探测/等待识别\"",
     );
 }
 
@@ -1299,7 +1382,7 @@ async fn the_esim_tab_has_what_switching_a_profile_needs() {
         (
             "the receipt can be re-checked against the card",
             In::Tags,
-            ":disabled=\"!activeImei || esimSwitch.busy\"",
+            ":disabled=\"!activeImei || !activeManageable() || esimSwitch.busy\"",
         ),
         ("selecting another modem drops the old verdict", In::Code, "this.esimSwitch = null;"),
     ] {
@@ -2058,6 +2141,11 @@ async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
         gate.contains("!!this.activeImei") && gate.contains("!this.smsBlock(this.activeImei)"),
         "the send controls are enabled without both checks: {gate}"
     );
+    let policy = body_of(&panel.code, "smsBlock(imei) {", "\n        },");
+    assert!(
+        policy.contains("modem.manageable === false"),
+        "an AT-only modem can still reach the QMI SMS send path: {policy}"
+    );
 }
 
 /// The SMS tab shows what the payload already carries and what the encoder will
@@ -2390,6 +2478,21 @@ async fn panel_serves_embedded_html_and_local_json() {
         home_mcc: None,
         home_mnc: None,
         imsi: None,
+        discovery: "qmi".into(),
+        manageable: true,
+        control_port: Some("/dev/cdc-wdm0".into()),
+        }],
+        discoveries: vec![LocalModemDiscovery {
+            candidate_key: "qmi:usb:2-4.1".into(),
+            usb_device: Some("2-4.1".into()),
+            transport: "qmi".into(),
+            control_port: "/dev/cdc-wdm1".into(),
+            vendor_id: Some("2c7c".into()),
+            product_id: Some("0125".into()),
+            state: "probe_failed".into(),
+            imei: None,
+            detail: "POLLERR".into(),
+            last_seen: 1_700_000_000_000,
         }],
     });
     let app = router(inbox);
@@ -2430,6 +2533,10 @@ async fn panel_serves_embedded_html_and_local_json() {
         serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(status_json["mode"], "local");
     assert_eq!(status_json["modems"][0]["family"], "EC20");
+    assert_eq!(status_json["modems"][0]["discovery"], "qmi");
+    assert_eq!(status_json["modems"][0]["manageable"], true);
+    assert_eq!(status_json["discoveries"][0]["state"], "probe_failed");
+    assert_eq!(status_json["discoveries"][0]["detail"], "POLLERR");
 
     let messages = app
         .oneshot(
@@ -2451,6 +2558,8 @@ struct RecordingActions {
     switched: Mutex<Vec<(String, bool)>>,
     ussd: Mutex<Vec<String>>,
     radio: Mutex<Vec<bool>>,
+    rescans: Mutex<usize>,
+    claims: Mutex<Vec<String>>,
 }
 
 impl RecordingActions {
@@ -2461,11 +2570,32 @@ impl RecordingActions {
             switched: Mutex::new(Vec::new()),
             ussd: Mutex::new(Vec::new()),
             radio: Mutex::new(Vec::new()),
+            rescans: Mutex::new(0),
+            claims: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl Actions for RecordingActions {
+    fn rescan_modems(&self) -> Result<RescanResult, PanelError> {
+        *self.rescans.lock().expect("rescans") += 1;
+        Ok(RescanResult {
+            found: 2,
+            control_ports: vec!["/dev/cdc-wdm0".into(), "/dev/ttyUSB8".into()],
+        })
+    }
+
+    fn claim_modem_candidate(
+        &self,
+        candidate_key: String,
+    ) -> Result<CandidateClaimResult, PanelError> {
+        self.claims
+            .lock()
+            .expect("claims")
+            .push(candidate_key.clone());
+        Ok(CandidateClaimResult { candidate_key })
+    }
+
     fn send_sms(&self, to: String, body: String, _imei: Option<String>) -> Result<(), PanelError> {
         self.sent.lock().expect("sent").push((to, body));
         Ok(())
@@ -2586,6 +2716,75 @@ async fn panel_sends_sms_locally() {
         actions.sent.lock().expect("sent").as_slice(),
         &[("10086".into(), "hi".into())]
     );
+}
+
+#[tokio::test]
+async fn panel_requests_an_immediate_modem_rescan() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/rescan")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["status"], "requested");
+    assert_eq!(body["found"], 2);
+    assert_eq!(body["control_ports"][1], "/dev/ttyUSB8");
+    assert_eq!(*actions.rescans.lock().expect("rescans"), 1);
+}
+
+#[tokio::test]
+async fn panel_claims_only_a_discovery_key() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/discoveries/claim")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"candidate_key":"serial:usb:2-4.2:port:/dev/ttyUSB8"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["status"], "claimed");
+    assert_eq!(
+        actions.claims.lock().expect("claims").as_slice(),
+        &["serial:usb:2-4.2:port:/dev/ttyUSB8"]
+    );
+}
+
+#[tokio::test]
+async fn panel_rejects_an_empty_discovery_claim() {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/discoveries/claim")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"candidate_key":"  "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    assert!(actions.claims.lock().expect("claims").is_empty());
 }
 
 #[tokio::test]
@@ -2918,7 +3117,11 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
         home_mcc: None,
         home_mnc: None,
         imsi: None,
+        discovery: "qmi".into(),
+        manageable: true,
+        control_port: Some("/dev/cdc-wdm0".into()),
         }],
+        discoveries: Vec::new(),
     });
     let app = router_with_actions(inbox, Some(Arc::new(Busy)));
     let response = app

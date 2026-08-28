@@ -343,6 +343,7 @@
     }
     .fresh.is-stale { color:var(--warn); }
     .fresh.is-lost { color:var(--bad); }
+    .fresh .rescan { color:var(--accent); }
 
     /* ── Three columns ───────────────────────────────────────────────────── */
     /* The 1px gap is a rule, not spacing: the grid background shows through
@@ -457,6 +458,34 @@
     .modem-home { font-size:var(--text-sm); font-weight:600; color:var(--fg); }
     .modem-line { font-size:var(--text-xs); color:var(--fg-muted); }
     .modem-line.faint { color:var(--fg-faint); font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .modem-flags { display:flex; align-items:center; gap:var(--s1); flex-wrap:wrap; }
+
+    /* USB discovery is inventory, not a second modem list. The candidates
+       below include devices that cannot be managed yet, and retaining their
+       probe result is what turns a missing row into something actionable. */
+    .discovery-summary {
+      display:grid; gap:2px; padding:var(--s2) var(--s3);
+      border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface);
+    }
+    .discovery-summary-head { display:flex; align-items:center; gap:var(--s2); }
+    .discovery-summary-title { font-size:var(--text-xs); font-weight:650; color:var(--fg); }
+    .discovery-summary-note { color:var(--fg-faint); font-size:10px; margin:0; line-height:1.45; }
+    .candidate-list { display:grid; gap:var(--s1); }
+    .candidate-head { display:flex; align-items:center; gap:var(--s2); padding:var(--s1) var(--s1) 0; }
+    .candidate-head h3 { margin:0; font-size:var(--text-xs); font-weight:650; color:var(--fg-muted); }
+    .candidate {
+      display:grid; gap:var(--s1); padding:var(--s2) var(--s3);
+      border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface);
+    }
+    .candidate.is-issue { border-color:color-mix(in srgb, var(--warn) 42%, var(--line)); }
+    .candidate-top { display:flex; align-items:center; gap:var(--s2); min-width:0; }
+    .candidate-key { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--font-mono); font-size:var(--text-xs); font-weight:600; }
+    .candidate-top .badge { margin-left:auto; }
+    .candidate-line { color:var(--fg-muted); font-size:var(--text-xs); overflow-wrap:anywhere; }
+    .candidate-line.faint { color:var(--fg-faint); font-family:var(--font-mono); }
+    .candidate-detail { color:var(--warn); font-size:var(--text-xs); line-height:1.45; overflow-wrap:anywhere; }
+    .candidate-detail.is-bad { color:var(--bad); }
+    .candidate-action { justify-self:start; }
 
     .danger { border-top:1px solid color-mix(in srgb, var(--warn) 30%, var(--line)); }
     .danger-title { font-size:var(--text-xs); color:var(--warn); font-weight:600; display:flex; align-items:center; gap:var(--s1); }
@@ -826,8 +855,15 @@
     @media (max-width:1180px) { :root { --rail:12.5rem; --logs:19rem; } .probe-cta { display:none; } }
     @media (max-width:900px) {
       body { overflow:auto; }
+      .statusbar { flex-wrap:wrap; }
+      .statusbar .strip { order:3; flex:1 0 100%; }
       .deck { grid-template-columns:minmax(0,1fr); grid-auto-rows:minmax(14rem,auto); overflow:visible; }
       .pane { overflow:visible; }
+    }
+    @media (max-width:540px) {
+      .brand-note { display:none; }
+      .statusbar .fresh { order:2; flex:1 0 100%; }
+      .statusbar .fresh > :first-child { margin-right:auto; }
     }
   </style>
 </head>
@@ -868,7 +904,8 @@
           </button>
         </div>
       </template>
-      <span class="chip-empty" x-show="!modems.length" x-text="loaded ? '没有检测到模组' : '加载中…'"></span>
+      <span class="chip-empty" x-show="!modems.length"
+            x-text="loaded ? (discoveries.length ? '无可管理模组' : '没有检测到模组') : '加载中…'"></span>
     </div>
 
     <!-- Never claim to be live. What is on screen was true at a point in
@@ -876,6 +913,8 @@
     <span class="fresh" :class="freshTone()" :title="'每 ' + Math.round(STATUS_EVERY / 1000) + 's 自动刷新'">
       <span x-text="freshText()"></span>
       <button type="button" class="btn" @click="refresh()" :aria-busy="loading">刷新</button>
+      <button type="button" class="btn rescan" @click="rescan()" :disabled="rescanBusy"
+              :aria-busy="rescanBusy" x-text="rescanBusy ? '重扫中…' : '重扫 USB'"></button>
     </span>
   </header>
 
@@ -911,6 +950,12 @@
             <span class="modem-line" x-text="m.network ? '驻留 ' + m.network + (m.network_numeric ? ' (' + m.network_numeric + ')' : '') : '未驻留网络'"></span>
             <span class="modem-line faint" :title="m.iccid || ''" x-text="(m.iccid ? 'ICCID ' + m.iccid : 'ICCID —')"></span>
             <span class="modem-line faint" x-text="m.family + ' · 心跳 ' + since(m.last_seen)"></span>
+            <span class="modem-flags">
+              <span class="badge" :class="discoveryTone(m.discovery)" x-text="discoveryLabel(m.discovery)"></span>
+              <span class="badge" :class="manageableTone(m)" x-text="manageableLabel(m)"></span>
+            </span>
+            <span class="modem-line faint" x-show="modemDetail(m)" :title="modemDetail(m)"
+                  x-text="modemDetail(m)"></span>
             <!-- Said here, not only inside the SMS tab: an operator who
                  selects this stick to send a message should learn it cannot
                  before they change tabs, never mind before they type. -->
@@ -921,22 +966,65 @@
           </button>
         </template>
         <p class="empty" x-show="loaded && !modems.length">
-          <b>没有检测到模组</b>插上 USB 模组后会自动出现。
+          <b x-text="discoveries.length ? '没有可管理模组' : '没有检测到模组'"></b>
+          <span x-text="discoveries.length ? 'USB 候选已列在下方；查看其探测结果后再处理。' : '插上 USB 模组后会自动出现。'"></span>
         </p>
         <p class="empty" x-show="!loaded">加载中…</p>
+
+        <section class="discovery-summary" x-show="loaded" aria-label="USB 发现状态">
+          <span class="discovery-summary-head">
+            <span class="discovery-summary-title">USB 发现</span>
+            <span class="pane-note push" x-text="discoveries.length + ' 个候选'"></span>
+          </span>
+          <p class="discovery-summary-note" aria-live="polite" x-text="rescanText()"></p>
+        </section>
+
+        <section class="candidate-list" x-show="loaded && discoveries.length" aria-labelledby="candidate-title">
+          <div class="candidate-head">
+            <h3 id="candidate-title">USB 候选</h3>
+            <span class="pane-note">包含已识别、仅 AT 与探测失败设备</span>
+          </div>
+          <template x-for="d in discoveries" :key="candidateKey(d)">
+            <article class="candidate" :class="{ 'is-issue': candidateNeedsAttention(d) }">
+              <span class="candidate-top">
+                <span class="candidate-key" :title="candidateKey(d)" x-text="d.usb_device || candidateKey(d)"></span>
+                <span class="badge" :class="candidateStateTone(d)" x-text="candidateStateLabel(d)"></span>
+              </span>
+              <span class="candidate-line" x-text="candidateIdentity(d)"></span>
+              <span class="candidate-line faint" x-text="candidateControl(d)"></span>
+              <span class="candidate-line faint" x-show="candidateHardware(d)" x-text="candidateHardware(d)"></span>
+              <span class="candidate-detail" :class="{ 'is-bad': candidateStateTone(d) === 'bad' }"
+                    x-text="candidateDetail(d)"></span>
+              <button type="button" class="btn candidate-action" x-show="candidateCanClaim(d)"
+                      @click="claimDiscovery(d)" :disabled="claimBusyFor(d)"
+                      :aria-busy="claimBusyFor(d)"
+                      x-text="claimBusyFor(d) ? '确认中…' : '确认纳入探测'"></button>
+            </article>
+          </template>
+        </section>
       </div>
 
       <!-- Anything that can take the selected stick off the network lives in
            one place and is amber before it is clicked, rather than sitting in
            a row of identical grey buttons next to "read chip". -->
       <div class="pane-foot danger" x-show="activeImei">
-        <span class="danger-title">危险区 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
-        <span class="danger-row">
-          <button type="button" class="btn risk" @click="toggleRadio($event.currentTarget)"
-                  x-text="radioOnline ? '关射频' : '开射频'"></button>
-          <button type="button" class="btn risk" @click="usbReset($event.currentTarget)">USB 复位</button>
-        </span>
-        <p class="danger-note">两个操作都会让这根模组暂时从机队消失。</p>
+        <template x-if="activeManageable()">
+          <div>
+            <span class="danger-title">危险区 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
+            <span class="danger-row">
+              <button type="button" class="btn risk" @click="toggleRadio($event.currentTarget)"
+                      x-text="radioOnline ? '关射频' : '开射频'"></button>
+              <button type="button" class="btn risk" @click="usbReset($event.currentTarget)">USB 复位</button>
+            </span>
+            <p class="danger-note">两个操作都会让这根模组暂时从机队消失。</p>
+          </div>
+        </template>
+        <template x-if="!activeManageable()">
+          <div>
+            <span class="danger-title">仅识别 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
+            <p class="danger-note">该设备由 AT 识别，基础查询仍可用；需要 QMI 的射频、eSIM 与 USB 恢复操作不可用。</p>
+          </div>
+        </template>
       </div>
     </section>
 
@@ -1130,7 +1218,8 @@
                    and this is a card that changes underneath the panel. -->
               <span class="esim-read" x-show="esimReadAt" x-text="'回读于 ' + clock(esimReadAt)"></span>
               <button type="button" class="btn go push" @click="runEsim($event.currentTarget)"
-                      :disabled="!activeImei" x-text="esimLoaded ? '重新回读' : '读取'"></button>
+                      :disabled="!activeImei || !activeManageable()"
+                      x-text="esimLoaded ? '重新回读' : '读取'"></button>
             </div>
             <div class="block-body">
               <!-- Which profile is live is what anybody opens this tab to
@@ -1159,6 +1248,7 @@
                         <td><span class="badge" :class="p.enabled ? 'ok' : 'idle'" x-text="p.enabled ? '已启用' : '未启用'"></span></td>
                         <td class="esim-act"><button type="button" class="btn risk"
                                     @click="switchProfile(p.iccid, !p.enabled, $event.currentTarget)"
+                                    :disabled="!activeManageable()"
                                     x-text="p.enabled ? '停用' : '启用'"></button></td>
                       </tr>
                     </template>
@@ -1188,7 +1278,7 @@
                 <span x-text="'切换回执 · ' + clock(esimSwitch.at)"></span>
                 <span class="esim-step" x-show="esimSwitch.step" x-text="esimSwitch.step"></span>
                 <button type="button" class="btn push" @click="runEsim($event.currentTarget)"
-                        :disabled="!activeImei || esimSwitch.busy">再回读一次</button>
+                        :disabled="!activeImei || !activeManageable() || esimSwitch.busy">再回读一次</button>
                 <button type="button" class="btn" @click="esimSwitch = null">收起</button>
               </div>
               <div class="block-body">
@@ -2308,12 +2398,18 @@
         /* ---- fleet ---- */
         mode: "local",
         modems: [],
+        discoveries: [],
         activeImei: null,
         probes: {},
         loaded: false,
         loading: false,
         lastLoadAt: 0,
         loadFailed: false,
+        rescanBusy: false,
+        rescanAt: 0,
+        rescanNote: "",
+        claimBusy: {},
+        claimNotes: {},
         now: Date.now(),
 
         /* ---- work area ----
@@ -2428,6 +2524,107 @@
         stateTone(state) { return STATE_TONE[this.stateKey(state)] || "idle"; },
         stateLabel(state) { return STATE_LABEL[this.stateKey(state)] || state || "未知"; },
         probeFor(imei) { return this.probes[imei] || EMPTY_PROBE; },
+        discoveryKey(discovery) { return String(discovery || "").toLowerCase().replace(/[^a-z]/g, ""); },
+        discoveryLabel(discovery) {
+          return { qmi: "QMI", at: "AT", mbim: "MBIM" }[this.discoveryKey(discovery)]
+            || (discovery ? String(discovery).toUpperCase() : "发现方式未知");
+        },
+        discoveryTone(discovery) {
+          return { qmi: "ok", at: "warn", mbim: "info" }[this.discoveryKey(discovery)] || "idle";
+        },
+        manageableLabel(modem) { return modem && modem.manageable === false ? "仅识别" : "可管理"; },
+        manageableTone(modem) { return modem && modem.manageable === false ? "warn" : "ok"; },
+        modemDetail(modem) {
+          if (!modem) return "";
+          return modem.diagnostic || modem.detail || modem.error || modem.reason
+            || (modem.control_port ? "控制口 " + modem.control_port : "");
+        },
+        activeModem() { return this.modems.find((modem) => modem.imei === this.activeImei) || null; },
+        activeManageable() {
+          const modem = this.activeModem();
+          return !modem || modem.manageable !== false;
+        },
+        candidateKey(candidate) {
+          const value = candidate || {};
+          return value.candidate_key || value.key || value.usb_device || value.control_port || value.imei
+            || [value.vendor_id, value.product_id, value.transport, this.discoveries.indexOf(candidate)]
+              .filter((part) => part !== undefined && part !== null && part !== "")
+              .join(":") || "usb-candidate";
+        },
+        candidateStateKey(candidate) {
+          return this.discoveryKey(candidate && candidate.state);
+        },
+        candidateHasClaim(candidate) {
+          const state = this.candidateStateKey(candidate);
+          if (state === "claimed") return true;
+          const note = this.claimNotes[this.candidateKey(candidate)];
+          return state === "found" && note && note.status === "claimed";
+        },
+        candidateCanClaim(candidate) {
+          return !!candidate
+            && candidate.transport === "serial"
+            && candidate.state === "found"
+            && typeof candidate.candidate_key === "string"
+            && candidate.candidate_key.length > 0;
+        },
+        claimBusyFor(candidate) {
+          return !!this.claimBusy[this.candidateKey(candidate)];
+        },
+        candidateClaimNote(candidate) {
+          const state = this.candidateStateKey(candidate);
+          const note = this.claimNotes[this.candidateKey(candidate)];
+          if (this.candidateHasClaim(candidate)) {
+            return "已确认纳入探测；等待下一轮轮询尝试 AT+CGSN。";
+          }
+          if (state === "found" && note && note.error) {
+            return "确认纳入探测失败 · " + note.error;
+          }
+          return "";
+        },
+        candidateStateLabel(candidate) {
+          if (this.candidateHasClaim(candidate)) return "已纳入探测/等待识别";
+          const key = this.candidateStateKey(candidate);
+          const labels = {
+            qmi: "QMI 已识别", managed: "可管理", manageable: "可管理",
+            at: "AT 已识别", atonly: "仅 AT 识别",
+            failed: "探测失败", probefailed: "探测失败", error: "探测失败", unavailable: "无响应",
+            silent: "无响应", unidentified: "未识别", unsupported: "不支持",
+            found: "已发现", pending: "探测中",
+          };
+          return labels[key] || (candidate && candidate.state) || "已发现";
+        },
+        candidateStateTone(candidate) {
+          if (this.candidateHasClaim(candidate)) return "info";
+          const key = this.candidateStateKey(candidate);
+          if (["qmi", "managed", "manageable"].includes(key)) return "ok";
+          if (["at", "atonly", "pending", "found"].includes(key)) return "warn";
+          if (["failed", "probefailed", "error", "unavailable", "silent", "unidentified", "unsupported"].includes(key)) return "bad";
+          return "info";
+        },
+        candidateNeedsAttention(candidate) {
+          return !this.candidateHasClaim(candidate) && this.candidateStateTone(candidate) !== "ok";
+        },
+        candidateIdentity(candidate) {
+          const value = candidate || {};
+          const transport = this.discoveryLabel(value.transport || value.discovery);
+          return transport + " · " + (value.imei ? "IMEI " + value.imei : "未读到 IMEI");
+        },
+        candidateControl(candidate) {
+          const value = candidate || {};
+          const ports = Array.isArray(value.control_ports) ? value.control_ports : [];
+          const port = value.control_port || ports.filter(Boolean).join(" · ");
+          return port ? "控制口 " + port : "没有可用控制口";
+        },
+        candidateHardware(candidate) {
+          const value = candidate || {};
+          if (!value.vendor_id && !value.product_id) return "";
+          return "USB " + (value.vendor_id || "????") + ":" + (value.product_id || "????");
+        },
+        candidateDetail(candidate) {
+          const value = candidate || {};
+          return this.candidateClaimNote(candidate)
+            || value.detail || value.diagnostic || value.error || value.reason || "未返回诊断详情";
+        },
 
         freshText() {
           if (!this.lastLoadAt) return "还没有拿到数据";
@@ -2438,6 +2635,18 @@
           if (this.loadFailed) return "is-lost";
           if (!this.lastLoadAt) return "is-stale";
           return this.now - this.lastLoadAt > STATUS_EVERY * 2.5 ? "is-stale" : "";
+        },
+        rescanText() {
+          if (this.rescanBusy) return "正在读取 USB 设备与控制口…";
+          if (this.rescanAt && this.now - this.rescanAt > STATUS_EVERY) {
+            return "上次重扫 " + ago(this.rescanAt, this.now)
+              + " · 当前列出 " + this.discoveries.length + " 个 USB 候选";
+          }
+          if (this.rescanNote) return this.rescanNote;
+          if (!this.loaded) return "等待状态数据…";
+          return this.discoveries.length
+            ? "当前缓存有 " + this.discoveries.length + " 个 USB 候选；重扫会重新探测控制口。"
+            : "尚未主动重扫 USB；设备会随轮询自动发现。";
         },
 
         /** Open a new transcript entry and hand back the reactive view of it. */
@@ -2618,6 +2827,12 @@
           this.out("先选择一个模组", "out-warn");
           return false;
         },
+        requireManageable() {
+          if (!this.requireActive()) return false;
+          if (this.activeManageable()) return true;
+          this.out("这根设备只由 AT 识别，QMI 管理操作不可用", "out-warn");
+          return false;
+        },
 
         /* ══ fleet ════════════════════════════════════════════════════════ */
 
@@ -2651,6 +2866,69 @@
           try { await this.load(); } finally { this.loading = false; }
         },
 
+        /* Refresh only re-reads cache. Hardware discovery has its own action,
+           so an operator who just inserted a module is not told a successful
+           HTTP read was a successful USB scan. */
+        async rescan() {
+          if (this.rescanBusy) return;
+          this.rescanBusy = true;
+          this.rescanNote = "正在读取 USB 设备与控制口…";
+          try {
+            const result = await this.post("/api/rescan", {});
+            const found = Number(result.found);
+            const ports = Array.isArray(result.control_ports)
+              ? result.control_ports.filter(Boolean)
+              : [];
+            this.rescanAt = Date.now();
+            this.rescanNote = (result.status === "requested" ? "已请求重扫" : "重扫完成")
+              + (Number.isFinite(found) ? " · " + found + " 个控制口" : "")
+              + (ports.length ? " · " + ports.join("、") : "")
+              + " · 等待下一轮探测结果";
+            this.out("USB 重扫：" + this.rescanNote, "out-meta");
+            // The endpoint wakes the poll loop; it does not probe inside this
+            // HTTP request. A read now would usually return the old cache, so
+            // leave the result honestly pending and let the normal status
+            // refresh pick up the new discovery record.
+            setTimeout(() => this.load().catch(() => {}), 1000);
+          } catch (error) {
+            this.rescanAt = Date.now();
+            this.rescanNote = "重扫失败 · " + reason(error);
+            this.out("USB 重扫失败：" + reason(error), "out-fail");
+          } finally {
+            this.rescanBusy = false;
+          }
+        },
+
+        /* Claiming does not accept a port or an IMEI. The server rechecks the
+           candidate key, then the next hardware poll is the first time an AT
+           identity read is attempted. */
+        async claimDiscovery(candidate) {
+          if (!this.candidateCanClaim(candidate) || this.claimBusyFor(candidate)) return;
+          const candidateKey = candidate.candidate_key;
+          if (!confirm("确认将这个已发现的串口候选纳入探测？\n不会手动录入端口或 IMEI；下一轮轮询才会向现有候选尝试 AT+CGSN。")) {
+            this.out("已取消纳入探测 " + candidateKey + "；没有发出请求", "out-warn");
+            return;
+          }
+          this.claimBusy[candidateKey] = true;
+          this.claimNotes[candidateKey] = { pending: true };
+          try {
+            const result = await this.post("/api/discoveries/claim", { candidate_key: candidateKey });
+            if (result.status !== "claimed" || result.candidate_key !== candidateKey) {
+              throw new Error("认领回执与候选不一致");
+            }
+            this.claimNotes[candidateKey] = { status: "claimed" };
+            this.out("已纳入探测 " + candidateKey + "；等待下一轮轮询尝试 AT+CGSN", "out-meta");
+            // The claim only arms a subsequent poll. Refresh after that window
+            // instead of presenting this HTTP receipt as a modem identity.
+            setTimeout(() => this.load().catch(() => {}), STATUS_EVERY);
+          } catch (error) {
+            this.claimNotes[candidateKey] = { error: reason(error) };
+            this.out("纳入探测失败 " + candidateKey + "：" + reason(error), "out-fail");
+          } finally {
+            this.claimBusy[candidateKey] = false;
+          }
+        },
+
         async load() {
           try {
             const [status, inbox] = await Promise.all([
@@ -2659,6 +2937,7 @@
             ]);
             this.mode = status.mode || "local";
             this.modems = status.modems || [];
+            this.discoveries = Array.isArray(status.discoveries) ? status.discoveries : [];
             for (const modem of this.modems) {
               if (!this.probes[modem.imei]) {
                 this.probes[modem.imei] = { cfun: "", cpin: "", pending: false, at: 0 };
@@ -2825,7 +3104,7 @@
         },
 
         async runEsim(button) {
-          if (!this.requireActive()) return;
+          if (!this.requireManageable()) return;
           await this.busy(button, "读取中…", async () => {
             const list = await this.readProfiles();
             // A verdict on screen is a statement about the card, so a fresh
@@ -2838,6 +3117,7 @@
         /* Ask, send, wait for the card, then ask the card. The endpoint's own
            answer is recorded but never rendered as the outcome. */
         async switchProfile(iccid, enable, button) {
+          if (!this.requireManageable()) return;
           const profile = this.profiles.find((p) => p.iccid === iccid) || { iccid };
           const label = this.profileName(profile);
           if (!confirm(esimAsk(profile, enable, this.profiles, this.activeImei))) {
@@ -3062,7 +3342,18 @@
         /* ══ SMS ══════════════════════════════════════════════════════════ */
 
         /** The record saying why this stick must not send, or null. */
-        smsBlock(imei) { return (imei && SMS_BLOCKED[imei]) || null; },
+        smsBlock(imei) {
+          if (!imei) return null;
+          const modem = this.modems.find((candidate) => candidate.imei === imei);
+          if (modem && modem.manageable === false) {
+            return {
+              why: "该设备仅通过 AT 识别，短信发送需要 QMI 管理通道。",
+              also: "可在控制台运行只读 AT 查询；恢复 QMI 后再发送。",
+              source: "发现状态：AT-only",
+            };
+          }
+          return SMS_BLOCKED[imei] || null;
+        },
 
         /** What the encoder will make of the current draft. */
         get draft() { return draftShape(this.sendBody); },

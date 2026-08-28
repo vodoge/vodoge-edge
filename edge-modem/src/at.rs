@@ -9,8 +9,12 @@
 //! An EC20-class module exposes four serial interfaces. Interface `1.2` is the
 //! AT control port and `1.3` is the modem/PPP port. Both answer `AT`, but the
 //! modem port is where a data session lives, so control traffic belongs on
-//! `1.2` and this module never picks `1.3` on its own.
+//! `1.2` and this module never picks `1.3` on its own. Other modules use CDC
+//! ACM, Qualcomm high-speed serial, a different configuration number, or a
+//! vendor-labelled AT port; discovery therefore treats `1.2` as a preference,
+//! not as a universal truth.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
@@ -18,11 +22,64 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Serial interface number carrying the AT control port on Quectel modules.
+/// Legacy Quectel USB interface preferred for an AT control port.
+///
+/// This remains a preference for the EC20-style layout. Newer USB
+/// compositions are selected from their sysfs interface metadata instead of
+/// being rejected because they are not exactly `1.2`.
 pub const AT_CONTROL_INTERFACE: &str = "1.2";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_CHUNK: usize = 512;
+
+/// Serial transport exposed by a possible modem control channel.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AtPortKind {
+    /// A vendor USB serial port such as Quectel `option` or Qualcomm
+    /// `qcserial`.
+    Usb,
+    /// USB CDC ACM.
+    Acm,
+    /// Qualcomm high-speed serial. These can be platform-attached instead of
+    /// hanging directly below a USB interface.
+    HighSpeed,
+}
+
+/// Whether the agent may send its identifying AT probe to a serial candidate.
+///
+/// `Manual` candidates are deliberately returned to callers so an operator can
+/// see a newly attached module and choose a profile for it. They are not sent
+/// `AT+CGSN` by the background poller: a generic USB serial adapter can expose
+/// the same kernel node names and its traffic must not be treated as modem AT
+/// traffic merely because it is a tty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtProbePolicy {
+    Automatic,
+    Manual,
+}
+
+/// A serial port that could belong to a modem.
+///
+/// `usb_device` is the stable sysfs topology key when the port is USB-backed.
+/// It is absent for platform-attached high-speed serial, where no USB reset or
+/// QMI pairing can be inferred from the tty alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtPortCandidate {
+    pub path: PathBuf,
+    pub kind: AtPortKind,
+    pub usb_device: Option<String>,
+    /// USB configuration and interface number, for example `1.2`.
+    pub interface: Option<String>,
+    /// USB interface string, when the firmware provides one.
+    pub interface_label: Option<String>,
+    /// Kernel driver bound to the USB interface or high-speed tty.
+    pub driver: Option<String>,
+    /// USB vendor ID from the parent device, normalized as lowercase hex.
+    pub vendor_id: Option<String>,
+    /// USB product ID from the parent device, normalized as lowercase hex.
+    pub product_id: Option<String>,
+    pub policy: AtProbePolicy,
+}
 
 /// Failures from opening or talking to an AT port.
 #[derive(Debug)]
@@ -292,61 +349,282 @@ impl AtPort {
 /// The pairing goes through sysfs rather than an index guess: `/dev/ttyUSB2`
 /// only belongs to the same module as `/dev/cdc-wdm0` because they hang off the
 /// same USB device, and that stops being true the moment a stick is unplugged.
+/// It accepts USB serial and CDC ACM candidates; a QMI path cannot be paired to
+/// a platform-only `ttyHS` node because there is no shared USB topology key.
 pub fn at_port_for_qmi(qmi_path: &Path) -> Option<PathBuf> {
     let name = qmi_path.file_name()?.to_str()?;
     let usb = usb_device_of(&PathBuf::from(format!("/sys/class/usbmisc/{name}/device")))?;
-    for entry in std::fs::read_dir("/sys/class/tty").ok()? {
-        let entry = entry.ok()?;
-        let tty = entry.file_name();
-        let tty = tty.to_str()?;
-        if !tty.starts_with("ttyUSB") {
-            continue;
-        }
-        let link = PathBuf::from(format!("/sys/class/tty/{tty}/device"));
-        let Some(candidate) = usb_device_of(&link) else {
-            continue;
-        };
-        if candidate != usb {
-            continue;
-        }
-        if interface_of(&link).as_deref() == Some(AT_CONTROL_INTERFACE) {
-            return Some(PathBuf::from(format!("/dev/{tty}")));
-        }
-    }
-    None
+    select_control_ports(
+        at_port_candidates()
+            .into_iter()
+            .filter(|candidate| candidate.usb_device.as_deref() == Some(usb.as_str()))
+            .collect(),
+    )
+    .into_iter()
+    .next()
 }
 
-/// Every serial port that is a module's AT control port, sorted.
+/// Every modem-shaped serial candidate visible in sysfs, sorted by device path.
 ///
-/// One per module, found the same way as `at_port_for_qmi` but without
-/// starting from a QMI port — because sometimes there is no QMI port to start
-/// from. A module in a usbnet mode other than rmnet exposes no `cdc-wdm` at
-/// all, and the agent indexes modules by exactly that, so switching one out
-/// of rmnet would otherwise put it beyond reach of the thing that switched
-/// it. The same gap swallows every command issued in the seconds after a
-/// restart, before the first poll has built the index.
+/// This deliberately has a wider surface than [`at_control_ports`]. A modem
+/// may use `ttyUSB`, `ttyACM`, or `ttyHS`, and a new USB composition does not
+/// deserve to disappear merely because it is not the EC20 `1.2` layout. The
+/// [`AtProbePolicy`] tells a caller whether discovery has enough evidence to
+/// issue an automatic identifying AT command. `Manual` candidates are for a
+/// panel or operator to inspect and explicitly claim.
+pub fn at_port_candidates() -> Vec<AtPortCandidate> {
+    at_port_candidates_in(Path::new("/sys/class/tty"), Path::new("/dev"))
+}
+
+/// Every serial port safe for the background poller to identify, sorted.
 ///
-/// Only the control interface is listed. The DM, NMEA and PPP interfaces
-/// belong to the same module and would answer to nothing useful, and the PPP
-/// one may be carrying a session that an `AT` written into it would corrupt.
+/// One control candidate is chosen for each physical USB device. A module in a
+/// usbnet mode without `cdc-wdm` therefore remains discoverable, while its DM,
+/// NMEA and PPP siblings are not all probed. A generic USB serial adapter is
+/// preserved as a `Manual` candidate by [`at_port_candidates`] and never lands
+/// here.
 pub fn at_control_ports() -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/tty") else {
+    select_control_ports(at_port_candidates())
+}
+
+fn at_port_candidates_in(tty_root: &Path, dev_root: &Path) -> Vec<AtPortCandidate> {
+    let Ok(entries) = std::fs::read_dir(tty_root) else {
         return Vec::new();
     };
-    let mut ports = Vec::new();
+    let mut candidates = Vec::new();
     for entry in entries.flatten() {
-        let tty = entry.file_name();
-        let Some(tty) = tty.to_str() else { continue };
-        if !tty.starts_with("ttyUSB") {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(kind) = AtPortKind::from_tty_name(name) else {
             continue;
-        }
-        let link = PathBuf::from(format!("/sys/class/tty/{tty}/device"));
-        if interface_of(&link).as_deref() == Some(AT_CONTROL_INTERFACE) {
-            ports.push(PathBuf::from(format!("/dev/{tty}")));
+        };
+        let link = entry.path().join("device");
+        let Ok(resolved) = std::fs::canonicalize(&link) else {
+            continue;
+        };
+        let interface_path = usb_interface_path(&resolved);
+        let interface = interface_path
+            .as_deref()
+            .and_then(interface_name_of_path)
+            .map(str::to_string);
+        let usb_device = interface_path
+            .as_deref()
+            .and_then(usb_device_name_of_path)
+            .map(str::to_string);
+        let usb_parent = interface_path.as_deref().and_then(Path::parent);
+        let vendor_id = usb_parent
+            .and_then(|path| read_trimmed(&path.join("idVendor")))
+            .map(|value| value.to_ascii_lowercase());
+        let product_id = usb_parent
+            .and_then(|path| read_trimmed(&path.join("idProduct")))
+            .map(|value| value.to_ascii_lowercase());
+        let interface_label = interface_path
+            .as_deref()
+            .and_then(|path| read_trimmed(&path.join("interface")));
+        let driver = interface_path
+            .as_deref()
+            .and_then(driver_name_at)
+            .or_else(|| driver_name_at_or_above(&resolved));
+        candidates.push(candidate_from_parts(
+            dev_root.join(name),
+            kind,
+            usb_device,
+            interface,
+            interface_label,
+            driver,
+            vendor_id,
+            product_id,
+        ));
+    }
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    candidates
+}
+
+impl AtPortKind {
+    fn from_tty_name(name: &str) -> Option<Self> {
+        if numbered_tty(name, "ttyUSB") {
+            Some(Self::Usb)
+        } else if numbered_tty(name, "ttyACM") {
+            Some(Self::Acm)
+        } else if numbered_tty(name, "ttyHS") {
+            Some(Self::HighSpeed)
+        } else {
+            None
         }
     }
+}
+
+fn numbered_tty(name: &str, prefix: &str) -> bool {
+    let Some(number) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+}
+
+fn candidate_from_parts(
+    path: PathBuf,
+    kind: AtPortKind,
+    usb_device: Option<String>,
+    interface: Option<String>,
+    interface_label: Option<String>,
+    driver: Option<String>,
+    vendor_id: Option<String>,
+    product_id: Option<String>,
+) -> AtPortCandidate {
+    let policy = automatic_probe_policy(
+        kind,
+        interface.as_deref(),
+        interface_label.as_deref(),
+        driver.as_deref(),
+    );
+    AtPortCandidate {
+        path,
+        kind,
+        usb_device,
+        interface,
+        interface_label,
+        driver,
+        vendor_id,
+        product_id,
+        policy,
+    }
+}
+
+/// Select exactly one automatic control port per USB device. The rank is
+/// deliberately based on sysfs meaning rather than tty number: tty numbers are
+/// recycled every time a USB serial driver rebinds.
+fn select_control_ports(candidates: Vec<AtPortCandidate>) -> Vec<PathBuf> {
+    let mut usb_ports = BTreeMap::<String, AtPortCandidate>::new();
+    let mut non_usb_ports = Vec::new();
+    for candidate in candidates
+        .into_iter()
+        .filter(|candidate| candidate.policy == AtProbePolicy::Automatic)
+    {
+        match candidate.usb_device.clone() {
+            Some(usb) => match usb_ports.get(&usb) {
+                Some(previous) if control_rank(previous) <= control_rank(&candidate) => {}
+                _ => {
+                    usb_ports.insert(usb, candidate);
+                }
+            },
+            None => non_usb_ports.push(candidate),
+        }
+    }
+    let mut ports: Vec<_> = usb_ports
+        .into_values()
+        .chain(non_usb_ports)
+        .map(|candidate| candidate.path)
+        .collect();
     ports.sort();
+    ports.dedup();
     ports
+}
+
+fn control_rank(candidate: &AtPortCandidate) -> u8 {
+    if is_explicit_at_label(candidate.interface_label.as_deref()) {
+        0
+    } else if candidate.interface.as_deref() == Some(AT_CONTROL_INTERFACE) {
+        1
+    } else if is_control_interface(candidate.interface.as_deref()) {
+        2
+    } else {
+        match candidate.kind {
+            AtPortKind::HighSpeed => 3,
+            AtPortKind::Acm => 4,
+            AtPortKind::Usb => 5,
+        }
+    }
+}
+
+fn automatic_probe_policy(
+    kind: AtPortKind,
+    interface: Option<&str>,
+    interface_label: Option<&str>,
+    driver: Option<&str>,
+) -> AtProbePolicy {
+    let explicit_control = is_explicit_at_label(interface_label);
+    let conventional_control = is_control_interface(interface);
+    let modem_driver = is_modem_serial_driver(driver);
+    let high_speed_driver = is_high_speed_modem_driver(driver);
+    let policy = match kind {
+        // A vendor serial driver plus interface ordinal 2 is the portable
+        // version of the old `1.2` rule: it survives a configuration number
+        // change but still avoids probing every sibling serial endpoint.
+        AtPortKind::Usb => explicit_control || (conventional_control && modem_driver),
+        // CDC ACM is also used by development boards and instruments. Its
+        // firmware must call the interface an AT/modem port before polling it.
+        AtPortKind::Acm => explicit_control,
+        // `ttyHS` is a Qualcomm modem-specific kernel naming convention only
+        // when the backing high-speed driver confirms it. A stray similarly
+        // named tty remains visible for manual confirmation.
+        AtPortKind::HighSpeed => explicit_control || high_speed_driver,
+    };
+    if policy {
+        AtProbePolicy::Automatic
+    } else {
+        AtProbePolicy::Manual
+    }
+}
+
+fn is_control_interface(interface: Option<&str>) -> bool {
+    interface
+        .and_then(|interface| interface.rsplit_once('.').map(|(_, number)| number))
+        == Some("2")
+}
+
+fn is_explicit_at_label(label: Option<&str>) -> bool {
+    let Some(label) = label else { return false };
+    let label = label.trim().to_ascii_uppercase();
+    label == "AT"
+        || label.contains("AT PORT")
+        || label.contains("AT COMMAND")
+        || label.contains("MODEM")
+}
+
+fn is_modem_serial_driver(driver: Option<&str>) -> bool {
+    matches!(
+        driver.map(|driver| driver.to_ascii_lowercase()),
+        Some(driver)
+            if matches!(
+                driver.as_str(),
+                "option"
+                    | "option1"
+                    | "qcserial"
+                    | "qcaux"
+                    | "sierra"
+                    | "hso"
+                    | "usb_wwan"
+            )
+    )
+}
+
+fn is_high_speed_modem_driver(driver: Option<&str>) -> bool {
+    matches!(
+        driver.map(|driver| driver.to_ascii_lowercase()),
+        Some(driver)
+            if matches!(
+                driver.as_str(),
+                "msm_serial_hs" | "msm_serial_hsl" | "hsuart"
+            )
+    )
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    let value = std::fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn driver_name_at(path: &Path) -> Option<String> {
+    std::fs::read_link(path.join("driver"))
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+fn driver_name_at_or_above(path: &Path) -> Option<String> {
+    path.ancestors().find_map(driver_name_at)
 }
 
 /// USB device identifier, e.g. `2-4.1`, backing an AT control port.
@@ -378,19 +656,53 @@ pub fn first_bare_digits(lines: &[String]) -> Option<String> {
 /// USB device identifier, e.g. `2-4.1`, from a sysfs device link.
 fn usb_device_of(link: &Path) -> Option<String> {
     let resolved = std::fs::canonicalize(link).ok()?;
-    let text = resolved.to_str()?;
-    // The interface directory is `<usb-device>:<config>.<interface>`; the part
-    // before the colon names the device the interface belongs to.
-    text.rsplit('/')
-        .find_map(|segment| segment.split_once(':').map(|(device, _)| device.to_string()))
+    usb_interface_path(&resolved)
+        .as_deref()
+        .and_then(usb_device_name_of_path)
+        .map(str::to_string)
 }
 
-/// Interface number, e.g. `1.2`, from a sysfs device link.
-fn interface_of(link: &Path) -> Option<String> {
-    let resolved = std::fs::canonicalize(link).ok()?;
-    let text = resolved.to_str()?;
-    text.rsplit('/')
-        .find_map(|segment| segment.split_once(':').map(|(_, interface)| interface.to_string()))
+/// Find the USB interface ancestor of a tty sysfs target.
+///
+/// A broad `split_once(':')` is not enough here: PCI and platform path
+/// components contain colons too. A USB interface has the exact
+/// `<usb-device>:<configuration>.<interface>` suffix, both numeric.
+fn usb_interface_path(resolved: &Path) -> Option<PathBuf> {
+    resolved
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(usb_interface_parts)
+                .is_some()
+        })
+        .map(Path::to_path_buf)
+}
+
+fn usb_device_name_of_path(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let (device, _) = usb_interface_parts(name)?;
+    Some(device)
+}
+
+fn interface_name_of_path(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let (_, interface) = usb_interface_parts(name)?;
+    Some(interface)
+}
+
+fn usb_interface_parts(name: &str) -> Option<(&str, &str)> {
+    let (device, interface) = name.split_once(':')?;
+    let (configuration, number) = interface.split_once('.')?;
+    if device.is_empty()
+        || configuration.is_empty()
+        || number.is_empty()
+        || !configuration.chars().all(|character| character.is_ascii_digit())
+        || !number.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((device, interface))
 }
 
 /// Put the tty in raw mode at 115200 8N1 with no flow control.
@@ -522,6 +834,145 @@ fn response_lines(buffer: &str, command: &str, terminator: &str) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serial_candidate(
+        name: &str,
+        kind: AtPortKind,
+        usb_device: Option<&str>,
+        interface: Option<&str>,
+        label: Option<&str>,
+        driver: Option<&str>,
+    ) -> AtPortCandidate {
+        candidate_from_parts(
+            PathBuf::from(format!("/dev/{name}")),
+            kind,
+            usb_device.map(str::to_string),
+            interface.map(str::to_string),
+            label.map(str::to_string),
+            driver.map(str::to_string),
+            Some("2c7c".into()),
+            Some("0125".into()),
+        )
+    }
+
+    #[test]
+    fn usb_interface_parser_ignores_pci_colons() {
+        assert_eq!(usb_interface_parts("2-4.2:1.2"), Some(("2-4.2", "1.2")));
+        assert_eq!(usb_interface_parts("4-1:2.2"), Some(("4-1", "2.2")));
+        assert_eq!(usb_interface_parts("0000:00:16.0"), None);
+        assert_eq!(usb_interface_parts("platform:serial"), None);
+    }
+
+    #[test]
+    fn a_different_usb_configuration_keeps_the_control_port_automatic() {
+        let candidate = serial_candidate(
+            "ttyUSB8",
+            AtPortKind::Usb,
+            Some("2-4.2"),
+            Some("2.2"),
+            None,
+            Some("option"),
+        );
+        assert_eq!(candidate.policy, AtProbePolicy::Automatic);
+        assert_eq!(candidate.vendor_id.as_deref(), Some("2c7c"));
+        assert_eq!(candidate.product_id.as_deref(), Some("0125"));
+        assert_eq!(select_control_ports(vec![candidate]), vec![PathBuf::from("/dev/ttyUSB8")]);
+    }
+
+    #[test]
+    fn cdc_acm_needs_an_explicit_modem_label_before_polling() {
+        let at_port = serial_candidate(
+            "ttyACM0",
+            AtPortKind::Acm,
+            Some("1-3"),
+            Some("1.0"),
+            Some("USB AT Port"),
+            Some("cdc_acm"),
+        );
+        let generic_serial = serial_candidate(
+            "ttyACM1",
+            AtPortKind::Acm,
+            Some("1-4"),
+            Some("1.0"),
+            Some("Debug Console"),
+            Some("cdc_acm"),
+        );
+        assert_eq!(at_port.policy, AtProbePolicy::Automatic);
+        assert_eq!(generic_serial.policy, AtProbePolicy::Manual);
+        assert_eq!(
+            select_control_ports(vec![at_port, generic_serial]),
+            vec![PathBuf::from("/dev/ttyACM0")]
+        );
+    }
+
+    #[test]
+    fn high_speed_serial_requires_a_modem_driver_or_explicit_label() {
+        let modem = serial_candidate(
+            "ttyHS0",
+            AtPortKind::HighSpeed,
+            None,
+            None,
+            None,
+            Some("msm_serial_hs"),
+        );
+        let unknown = serial_candidate(
+            "ttyHS1",
+            AtPortKind::HighSpeed,
+            None,
+            None,
+            None,
+            Some("serial"),
+        );
+        assert_eq!(modem.policy, AtProbePolicy::Automatic);
+        assert_eq!(unknown.policy, AtProbePolicy::Manual);
+        assert_eq!(
+            select_control_ports(vec![modem, unknown]),
+            vec![PathBuf::from("/dev/ttyHS0")]
+        );
+    }
+
+    #[test]
+    fn one_physical_modem_gets_one_preferred_control_port() {
+        let declared_control = serial_candidate(
+            "ttyUSB10",
+            AtPortKind::Usb,
+            Some("2-4.2"),
+            Some("1.1"),
+            Some("USB AT Port"),
+            Some("option"),
+        );
+        let standard = serial_candidate(
+            "ttyUSB8",
+            AtPortKind::Usb,
+            Some("2-4.2"),
+            Some("1.2"),
+            None,
+            Some("option"),
+        );
+        let ppp = serial_candidate(
+            "ttyUSB9",
+            AtPortKind::Usb,
+            Some("2-4.2"),
+            Some("1.3"),
+            None,
+            Some("option"),
+        );
+        assert_eq!(standard.policy, AtProbePolicy::Automatic);
+        assert_eq!(ppp.policy, AtProbePolicy::Manual);
+        assert_eq!(
+            select_control_ports(vec![ppp, declared_control, standard]),
+            vec![PathBuf::from("/dev/ttyUSB10")]
+        );
+    }
+
+    #[test]
+    fn only_known_serial_naming_conventions_become_candidates() {
+        assert_eq!(AtPortKind::from_tty_name("ttyUSB12"), Some(AtPortKind::Usb));
+        assert_eq!(AtPortKind::from_tty_name("ttyACM0"), Some(AtPortKind::Acm));
+        assert_eq!(AtPortKind::from_tty_name("ttyHS1"), Some(AtPortKind::HighSpeed));
+        assert_eq!(AtPortKind::from_tty_name("ttyS0"), None);
+        assert_eq!(AtPortKind::from_tty_name("ttyUSBdebug"), None);
+    }
 
     #[test]
     fn ok_terminates_a_response() {

@@ -1,4 +1,4 @@
-use edge_store::Store;
+use edge_store::{ManualModemProfile, Store};
 
 /// The invariant is that migrations replay to the same schema, not that there
 /// happen to be N of them. Asserting the count made every added migration look
@@ -48,6 +48,9 @@ fn a_rebuilt_store_still_holds_every_column() {
         home_mcc: None,
         home_mnc: None,
         imsi: None,
+        discovery: "qmi".into(),
+        manageable: true,
+        control_port: Some("/dev/cdc-wdm0".into()),
         })
         .expect("upsert after rebuild");
 
@@ -55,4 +58,30 @@ fn a_rebuilt_store_still_holds_every_column() {
     assert_eq!(modems.len(), 1);
     assert_eq!(modems[0].mcc, Some(460));
     assert_eq!(modems[0].mnc, Some(1));
+}
+
+#[test]
+fn a_rebuilt_store_still_holds_manual_profiles() {
+    let mut store = Store::open_in_memory().expect("open");
+    store.rollback_to(0).expect("rollback");
+    store.migrate().expect("re-upgrade");
+
+    store
+        .upsert_manual_modem_profile(&ManualModemProfile {
+            candidate_key: "qmi:usb:2-4.1".into(),
+            usb_device: Some("2-4.1".into()),
+            vendor_id: Some("2c7c".into()),
+            product_id: Some("0125".into()),
+            control_port: "/dev/cdc-wdm1".into(),
+            approved_at: 100,
+        })
+        .expect("approve after rebuild");
+
+    assert_eq!(
+        store
+            .list_manual_modem_profiles()
+            .expect("list approvals")
+            .len(),
+        1
+    );
 }

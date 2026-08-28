@@ -36,9 +36,12 @@ mod linux {
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
-        ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
+        CandidateClaimResult, RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
     };
-    use edge_store::{DurableOutbox, LocalMessage, LocalModem, QueueError, Store};
+    use edge_store::{
+        DurableOutbox, LocalMessage, LocalModem, LocalModemDiscovery, ManualModemProfile,
+        QueueError, Store,
+    };
     use serde_json::Value as JsonValue;
     use edge_uplink::dial::{DialError, Socket};
     use edge_uplink::session::{Inbound, LinkConfig, Phase, ResumeSnapshot};
@@ -146,6 +149,13 @@ mod linux {
                 .lock()
                 .expect("store")
                 .list_local_modems()
+                .map_err(PanelError::Store)
+        }
+        fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
+            self.0
+                .lock()
+                .expect("store")
+                .list_local_modem_discoveries()
                 .map_err(PanelError::Store)
         }
     }
@@ -1364,7 +1374,8 @@ mod linux {
             // inventory entries is the poll loop's job and needs the radio
             // lock, so waiting for it here would park the command thread
             // behind whatever the loop is already doing to another modem.
-            let ports = cdc_wdm_paths().map_err(|error| SendError::new("dev_scan_failed", error))?;
+            let ports = visible_control_ports()
+                .map_err(|error| SendError::new("dev_scan_failed", error))?;
             self.radio.request_rescan();
             json_details(&serde_json::json!({
                 "found": ports.len(),
@@ -2670,6 +2681,69 @@ mod linux {
     }
 
     impl Actions for RadioPort {
+        fn rescan_modems(&self) -> Result<RescanResult, PanelError> {
+            let ports = visible_control_ports().map_err(PanelError::Action)?;
+            self.radio.request_rescan();
+            Ok(RescanResult {
+                found: ports.len(),
+                control_ports: ports
+                    .into_iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            })
+        }
+
+        fn claim_modem_candidate(
+            &self,
+            candidate_key: String,
+        ) -> Result<CandidateClaimResult, PanelError> {
+            let candidate_key = candidate_key.trim().to_string();
+            let candidate = edge_modem::at_port_candidates()
+                .into_iter()
+                .find(|candidate| {
+                    candidate.policy == edge_modem::AtProbePolicy::Manual
+                        && manual_candidate_key(candidate) == candidate_key
+                })
+                .ok_or_else(|| {
+                    PanelError::Action(
+                        "the serial candidate is no longer present; rescan before approving it".into(),
+                    )
+                })?;
+
+            let observed = self
+                .store
+                .0
+                .lock()
+                .expect("store")
+                .list_local_modem_discoveries()
+                .map_err(PanelError::Store)?
+                .into_iter()
+                .any(|discovery| manual_discovery_matches(&discovery, &candidate));
+            if !observed {
+                return Err(PanelError::Action(
+                    "the serial candidate has not been observed by the poller; rescan before approving it"
+                        .into(),
+                ));
+            }
+
+            let profile = ManualModemProfile {
+                candidate_key: candidate_key.clone(),
+                usb_device: candidate.usb_device.clone(),
+                vendor_id: candidate.vendor_id.clone(),
+                product_id: candidate.product_id.clone(),
+                control_port: candidate.path.display().to_string(),
+                approved_at: unix_ms(),
+            };
+            self.store
+                .0
+                .lock()
+                .expect("store")
+                .upsert_manual_modem_profile(&profile)
+                .map_err(PanelError::Store)?;
+            self.radio.request_rescan();
+            Ok(CandidateClaimResult { candidate_key })
+        }
+
         fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
             let mut port = RadioPort {
                 radio: self.radio.clone(),
@@ -3091,6 +3165,25 @@ mod linux {
         Ok(paths)
     }
 
+    /// Every endpoint the agent can currently use to identify a modem. QMI
+    /// and serial ports are both returned: a new module without `cdc-wdm`
+    /// should still be observable by a rescan receipt before it is fully
+    /// manageable.
+    fn visible_control_ports() -> Result<Vec<PathBuf>, String> {
+        let mut ports = cdc_wdm_paths()?;
+        // Include manual-only serial candidates in the acknowledgement too.
+        // The receipt is an inventory of what the kernel exposed, not a claim
+        // that it was safe to send an AT command to every listed port.
+        ports.extend(
+            edge_modem::at_port_candidates()
+                .into_iter()
+                .map(|candidate| candidate.path),
+        );
+        ports.sort();
+        ports.dedup();
+        Ok(ports)
+    }
+
     /// What the poll loop has to remember between passes.
     ///
     /// A pass on its own can only report what it can currently see, and the
@@ -3152,6 +3245,40 @@ mod linux {
         let now = unix_ms();
         let qmi_paths = cdc_wdm_paths()?;
         let mut snapshots: Vec<ModemSnapshot> = Vec::new();
+        let qmi_usb: std::collections::BTreeSet<String> = qmi_paths
+            .iter()
+            .filter_map(|path| edge_modem::usb_device_of_qmi(path))
+            .collect();
+        let serial_candidates = edge_modem::at_port_candidates();
+        let automatic_serial_usb: std::collections::BTreeSet<String> = serial_candidates
+            .iter()
+            .filter(|candidate| candidate.policy == edge_modem::AtProbePolicy::Automatic)
+            .filter_map(|candidate| candidate.usb_device.clone())
+            .collect();
+        let (approved_manual_ports, approved_manual_keys) =
+            approved_manual_serial_candidates(shared, &serial_candidates);
+
+        // Preserve a newly visible serial endpoint even when the background
+        // worker has insufficient evidence to write AT to it. Do not list the
+        // PPP/diagnostic siblings of a modem that already has a QMI or safe AT
+        // control endpoint: those are not independent devices.
+        for candidate in serial_candidates
+            .iter()
+            .filter(|candidate| candidate.policy == edge_modem::AtProbePolicy::Manual)
+        {
+            let has_known_sibling = candidate.usb_device.as_ref().is_some_and(|usb| {
+                qmi_usb.contains(usb) || automatic_serial_usb.contains(usb)
+            });
+            if !has_known_sibling {
+                let candidate_key = manual_candidate_key(candidate);
+                record_manual_serial_candidate(
+                    shared,
+                    candidate,
+                    approved_manual_keys.contains(&candidate_key),
+                    now,
+                );
+            }
+        }
         // USB devices already accounted for over QMI. A module that answers
         // there is also listed by `at_control_ports`, and without this it
         // would be reported twice under one IMEI -- once managed, once not.
@@ -3164,13 +3291,33 @@ mod linux {
                     if let Some(usb) = edge_modem::usb_device_of_qmi(path) {
                         claimed.insert(usb);
                     }
+                    record_discovery(
+                        shared,
+                        "qmi",
+                        path,
+                        "manageable",
+                        Some(&snapshot.imei),
+                        "QMI identity probe succeeded",
+                        now,
+                    );
                     snapshots.push(snapshot);
                 }
                 // Deliberately not claiming the USB device here. A module
                 // whose QMI node is present but unusable is exactly what the
                 // AT pass below is for, and skipping it would keep the
                 // failure to the one log line it has always been.
-                Err(error) => log_error(format!("poll {} FAIL {error}", path.display())),
+                Err(error) => {
+                    log_error(format!("poll {} FAIL {error}", path.display()));
+                    record_discovery(
+                        shared,
+                        "qmi",
+                        path,
+                        "probe_failed",
+                        None,
+                        error,
+                        now,
+                    );
+                }
             }
         }
 
@@ -3181,7 +3328,11 @@ mod linux {
         // one `poll FAIL` line behind if it left anything at all. That is the
         // shape of the usbnet incident on this bench, and it is also what a
         // brand new module looks like before anybody has set it up.
-        for at_path in edge_modem::at_control_ports() {
+        let mut at_paths = edge_modem::at_control_ports();
+        at_paths.extend(approved_manual_ports);
+        at_paths.sort();
+        at_paths.dedup();
+        for at_path in at_paths {
             let usb = edge_modem::usb_device_of_at(&at_path);
             if let Some(usb) = usb.as_ref() {
                 if claimed.contains(usb) {
@@ -3198,6 +3349,16 @@ mod linux {
                     if let Some(usb) = usb.clone() {
                         claimed.insert(usb);
                     }
+                    upsert_at_only_local_modem(shared, &snapshot, &at_path, now)?;
+                    record_discovery(
+                        shared,
+                        "at",
+                        &at_path,
+                        "at_only",
+                        Some(&snapshot.imei),
+                        "AT identified the modem; QMI-managed actions are unavailable",
+                        now,
+                    );
                     snapshots.push(snapshot);
                 }
                 None => {
@@ -3222,7 +3383,18 @@ mod linux {
                             snapshots.push(absent_snapshot(&imei, &seen, "unknown"));
                             claimed.extend(usb.clone());
                         }
-                        None => log_error(format!("poll {} silent, unidentified", at_path.display())),
+                        None => {
+                            log_error(format!("poll {} silent, unidentified", at_path.display()));
+                            record_discovery(
+                                shared,
+                                "at",
+                                &at_path,
+                                "probe_failed",
+                                None,
+                                "AT+CGSN did not return a usable IMEI",
+                                now,
+                            );
+                        }
                     }
                 }
             }
@@ -3270,6 +3442,274 @@ mod linux {
             return Err("no /dev/cdc-wdm* and no AT control port answered".into());
         }
         Ok(())
+    }
+
+    /// Persist the inventory row for a module that only answered over AT.
+    /// It is deliberately kept separate from `probe_one`: AT-only is useful
+    /// evidence but it must not claim that QMI-only actions are safe.
+    fn upsert_at_only_local_modem(
+        shared: &Arc<SharedStore>,
+        snapshot: &ModemSnapshot,
+        at_path: &Path,
+        now: i64,
+    ) -> Result<(), String> {
+        let store = shared.0.lock().expect("store");
+        store
+            .upsert_local_modem(&LocalModem {
+                imei: snapshot.imei.clone(),
+                family: snapshot.family.clone(),
+                iccid: snapshot.iccid.clone(),
+                state: snapshot.state.to_string(),
+                last_seen: Some(now),
+                mcc: snapshot.serving.as_ref().map(|network| network.mcc),
+                mnc: snapshot.serving.as_ref().map(|network| network.mnc),
+                home_mcc: snapshot.home.as_ref().map(|network| network.mcc),
+                home_mnc: snapshot.home.as_ref().map(|network| network.mnc),
+                imsi: snapshot.imsi.clone(),
+                discovery: snapshot.discovery.wire().to_string(),
+                manageable: snapshot.manageable,
+                control_port: Some(at_path.display().to_string()),
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// Retain an endpoint-level discovery result so the panel can show a
+    /// real hardware problem before the module has supplied an IMEI.
+    fn record_discovery(
+        shared: &Arc<SharedStore>,
+        transport: &str,
+        control_port: &Path,
+        state: &str,
+        imei: Option<&str>,
+        detail: impl Into<String>,
+        now: i64,
+    ) {
+        let usb_device = match transport {
+            "qmi" => edge_modem::usb_device_of_qmi(control_port),
+            "at" => edge_modem::usb_device_of_at(control_port),
+            _ => None,
+        };
+        let identity = usb_device
+            .as_deref()
+            .and_then(edge_modem::usb_identity);
+        let path = control_port.display().to_string();
+        let candidate_key = match usb_device.as_deref() {
+            Some(usb) => format!("{transport}:usb:{usb}"),
+            None => format!("{transport}:port:{path}"),
+        };
+        let result = shared
+            .0
+            .lock()
+            .expect("store")
+            .upsert_local_modem_discovery(&LocalModemDiscovery {
+                candidate_key,
+                usb_device,
+                transport: transport.to_string(),
+                control_port: path,
+                vendor_id: identity.as_ref().map(|identity| identity.vendor.clone()),
+                product_id: identity.as_ref().map(|identity| identity.product.clone()),
+                state: state.to_string(),
+                imei: imei.map(str::to_string),
+                detail: detail.into(),
+                last_seen: now,
+            });
+        if let Err(error) = result {
+            log_error(format!("discovery result not recorded: {error}"));
+        }
+    }
+
+    /// Show a modem-shaped serial endpoint that did not meet the conservative
+    /// automatic-probe policy. Until an operator approves it, it remains
+    /// deliberately unprobed: a USB serial adapter can use the same tty
+    /// naming convention, and the panel should make that uncertainty visible
+    /// rather than turning it into AT traffic.
+    fn record_manual_serial_candidate(
+        shared: &Arc<SharedStore>,
+        candidate: &edge_modem::AtPortCandidate,
+        approved: bool,
+        now: i64,
+    ) {
+        let path = candidate.path.display().to_string();
+        let candidate_key = manual_candidate_key(candidate);
+        let mut facts = vec![format!("{:?} serial endpoint was not automatically probed", candidate.kind)];
+        if let Some(interface) = candidate.interface.as_deref() {
+            facts.push(format!("interface {interface}"));
+        }
+        if let Some(label) = candidate.interface_label.as_deref() {
+            facts.push(format!("label {label}"));
+        }
+        if let Some(driver) = candidate.driver.as_deref() {
+            facts.push(format!("driver {driver}"));
+        }
+        if approved {
+            facts.push("explicitly approved; the next poll will attempt an AT identity probe".into());
+        } else {
+            facts.push("needs an explicit modem profile before an AT identity probe".into());
+        }
+        let result = shared
+            .0
+            .lock()
+            .expect("store")
+            .upsert_local_modem_discovery(&LocalModemDiscovery {
+                candidate_key,
+                usb_device: candidate.usb_device.clone(),
+                transport: "serial".into(),
+                control_port: path,
+                vendor_id: candidate.vendor_id.clone(),
+                product_id: candidate.product_id.clone(),
+                state: if approved { "claimed" } else { "found" }.into(),
+                imei: None,
+                detail: facts.join("; "),
+                last_seen: now,
+            });
+        if let Err(error) = result {
+            log_error(format!("manual serial candidate not recorded: {error}"));
+        }
+    }
+
+    /// The key is a current, physical observation rather than a user-entered
+    /// path. A USB device can expose several serial functions, so the port is
+    /// part of the key as well as the topology: one candidate must never
+    /// overwrite an unrelated sibling merely because they share a stick.
+    fn manual_candidate_key(candidate: &edge_modem::AtPortCandidate) -> String {
+        let path = candidate.path.display();
+        match candidate.usb_device.as_deref() {
+            Some(usb) => format!("serial:usb:{usb}:port:{path}"),
+            None => format!("serial:port:{path}"),
+        }
+    }
+
+    /// Return only manual candidates that are still exactly the endpoints an
+    /// operator approved. The stored approval is evidence, not a substitute
+    /// for live topology: a re-enumerated USB device needs fresh approval.
+    fn approved_manual_serial_candidates(
+        shared: &Arc<SharedStore>,
+        candidates: &[edge_modem::AtPortCandidate],
+    ) -> (Vec<PathBuf>, std::collections::BTreeSet<String>) {
+        let profiles = match shared
+            .0
+            .lock()
+            .expect("store")
+            .list_manual_modem_profiles()
+        {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                log_error(format!("manual modem approvals not read: {error}"));
+                return (Vec::new(), std::collections::BTreeSet::new());
+            }
+        };
+        let mut paths = Vec::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for candidate in candidates.iter().filter(|candidate| {
+            candidate.policy == edge_modem::AtProbePolicy::Manual
+        }) {
+            if profiles
+                .iter()
+                .any(|profile| manual_profile_matches(profile, candidate))
+            {
+                paths.push(candidate.path.clone());
+                keys.insert(manual_candidate_key(candidate));
+            }
+        }
+        (paths, keys)
+    }
+
+    fn manual_profile_matches(
+        profile: &ManualModemProfile,
+        candidate: &edge_modem::AtPortCandidate,
+    ) -> bool {
+        profile.candidate_key == manual_candidate_key(candidate)
+            && profile.usb_device == candidate.usb_device
+            && profile.vendor_id == candidate.vendor_id
+            && profile.product_id == candidate.product_id
+            && profile.control_port == candidate.path.display().to_string()
+    }
+
+    fn manual_discovery_matches(
+        discovery: &LocalModemDiscovery,
+        candidate: &edge_modem::AtPortCandidate,
+    ) -> bool {
+        discovery.transport == "serial"
+            && discovery.state == "found"
+            && discovery.candidate_key == manual_candidate_key(candidate)
+            && discovery.usb_device == candidate.usb_device
+            && discovery.vendor_id == candidate.vendor_id
+            && discovery.product_id == candidate.product_id
+            && discovery.control_port == candidate.path.display().to_string()
+    }
+
+    #[cfg(test)]
+    mod manual_claim_tests {
+        use super::*;
+
+        fn candidate() -> edge_modem::AtPortCandidate {
+            edge_modem::AtPortCandidate {
+                path: PathBuf::from("/dev/ttyUSB8"),
+                kind: edge_modem::AtPortKind::Usb,
+                usb_device: Some("2-4.2".into()),
+                interface: Some("1.3".into()),
+                interface_label: None,
+                driver: Some("option".into()),
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0901".into()),
+                policy: edge_modem::AtProbePolicy::Manual,
+            }
+        }
+
+        fn profile(candidate: &edge_modem::AtPortCandidate) -> ManualModemProfile {
+            ManualModemProfile {
+                candidate_key: manual_candidate_key(candidate),
+                usb_device: candidate.usb_device.clone(),
+                vendor_id: candidate.vendor_id.clone(),
+                product_id: candidate.product_id.clone(),
+                control_port: candidate.path.display().to_string(),
+                approved_at: 1,
+            }
+        }
+
+        #[test]
+        fn approval_requires_the_same_live_topology_and_port() {
+            let candidate = candidate();
+            let profile = profile(&candidate);
+            assert!(manual_profile_matches(&profile, &candidate));
+
+            let moved = edge_modem::AtPortCandidate {
+                path: PathBuf::from("/dev/ttyUSB9"),
+                ..candidate
+            };
+            assert!(
+                !manual_profile_matches(&profile, &moved),
+                "a recycled tty node must need fresh approval"
+            );
+        }
+
+        #[test]
+        fn only_a_raw_found_discovery_can_be_claimed() {
+            let candidate = candidate();
+            let found = LocalModemDiscovery {
+                candidate_key: manual_candidate_key(&candidate),
+                usb_device: candidate.usb_device.clone(),
+                transport: "serial".into(),
+                control_port: candidate.path.display().to_string(),
+                vendor_id: candidate.vendor_id.clone(),
+                product_id: candidate.product_id.clone(),
+                state: "found".into(),
+                imei: None,
+                detail: String::new(),
+                last_seen: 1,
+            };
+            assert!(manual_discovery_matches(&found, &candidate));
+            assert!(
+                !manual_discovery_matches(
+                    &LocalModemDiscovery {
+                        state: "claimed".into(),
+                        ..found
+                    },
+                    &candidate,
+                ),
+                "a repeated request cannot re-claim an already approved endpoint"
+            );
+        }
     }
 
     /// Write down where a module was just proven to be.
@@ -3911,6 +4351,9 @@ mod linux {
                     home_mcc: home.map(|network| network.mcc),
                     home_mnc: home.map(|network| network.mnc),
                     imsi: imsi.clone(),
+                    discovery: Discovery::Qmi.wire().to_string(),
+                    manageable: true,
+                    control_port: Some(path.display().to_string()),
                 })
                 .map_err(|e| e.to_string())?;
         }

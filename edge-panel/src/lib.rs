@@ -10,7 +10,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::Network;
-use edge_store::{LocalMessage, LocalModem, Store, StoreError};
+use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
 mod logs;
@@ -36,6 +36,11 @@ fn now_ms() -> i64 {
 pub trait Inbox: Send + Sync {
     fn list_messages(&self) -> Result<Vec<LocalMessage>, PanelError>;
     fn list_modems(&self) -> Result<Vec<LocalModem>, PanelError>;
+    /// Hardware endpoints observed by the poller, including ones that could
+    /// not provide an IMEI and therefore are not modem inventory records.
+    fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Local send/restart actions. Optional so a read-only panel still works.
@@ -77,6 +82,24 @@ pub trait Actions: Send + Sync {
     /// This goes through QMI rather than `AT+CFUN`, whose reset form wedges a
     /// module often enough that it is not worth exposing on a button.
     fn set_radio(&self, imei: Option<String>, online: bool) -> Result<(), PanelError>;
+    /// Ask the hardware poll loop to enumerate again immediately. The result
+    /// describes the kernel endpoints visible before probing; the updated
+    /// status appears on the next poll rather than claiming a synchronous
+    /// hardware operation completed.
+    fn rescan_modems(&self) -> Result<RescanResult, PanelError> {
+        Err(PanelError::Action("local modem rescan is not configured".into()))
+    }
+    /// Persist an operator approval for one already discovered serial
+    /// endpoint. Implementations must re-check the live endpoint rather than
+    /// accepting a free-form port name from the panel.
+    fn claim_modem_candidate(
+        &self,
+        _candidate_key: String,
+    ) -> Result<CandidateClaimResult, PanelError> {
+        Err(PanelError::Action(
+            "local modem candidate claim is not configured".into(),
+        ))
+    }
     /// Modems currently executing an operator-initiated command.
     ///
     /// Such a modem stops answering the poll loop, and a long command outlasts
@@ -113,6 +136,20 @@ pub struct ScanResult {
     pub imei: Option<String>,
     pub elapsed_ms: u64,
     pub operators: Vec<ScannedOperatorBody>,
+}
+
+/// Immediate acknowledgement for a requested hardware rescan.
+#[derive(Clone, Debug, Serialize)]
+pub struct RescanResult {
+    pub found: usize,
+    pub control_ports: Vec<String>,
+}
+
+/// Acknowledgement that one observed serial endpoint was approved for a
+/// later AT identity probe. It intentionally has no port or IMEI input.
+#[derive(Clone, Debug, Serialize)]
+pub struct CandidateClaimResult {
+    pub candidate_key: String,
 }
 
 /// One eUICC profile as the panel reports it.
@@ -202,6 +239,7 @@ impl From<StoreError> for PanelError {
 pub struct MemoryInbox {
     pub messages: Vec<LocalMessage>,
     pub modems: Vec<LocalModem>,
+    pub discoveries: Vec<LocalModemDiscovery>,
 }
 
 impl Inbox for MemoryInbox {
@@ -211,6 +249,10 @@ impl Inbox for MemoryInbox {
 
     fn list_modems(&self) -> Result<Vec<LocalModem>, PanelError> {
         Ok(self.modems.clone())
+    }
+
+    fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
+        Ok(self.discoveries.clone())
     }
 }
 
@@ -236,6 +278,11 @@ impl Inbox for StoreInbox {
     fn list_modems(&self) -> Result<Vec<LocalModem>, PanelError> {
         let store = self.store.lock().expect("panel store lock");
         Ok(store.list_local_modems()?)
+    }
+
+    fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
+        let store = self.store.lock().expect("panel store lock");
+        Ok(store.list_local_modem_discoveries()?)
     }
 }
 
@@ -280,6 +327,8 @@ pub fn router_with_uplink(
         .route("/api/ussd", post(ussd))
         .route("/api/ussd/cancel", post(ussd_cancel))
         .route("/api/radio", post(set_radio))
+        .route("/api/rescan", post(rescan_modems))
+        .route("/api/discoveries/claim", post(claim_modem_candidate))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -314,8 +363,8 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
         .as_ref()
         .map(|actions| actions.busy_modems())
         .unwrap_or_default();
-    match state.inbox.list_modems() {
-        Ok(modems) => Json(StatusBody {
+    match (state.inbox.list_modems(), state.inbox.list_modem_discoveries()) {
+        (Ok(modems), Ok(discoveries)) => Json(StatusBody {
             mode,
             modems: modems
                 .into_iter()
@@ -324,9 +373,56 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                     ModemBody::observed(modem, now, is_busy)
                 })
                 .collect(),
+            discoveries: discoveries.into_iter().map(DiscoveryBody::from).collect(),
         })
         .into_response(),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
+    }
+}
+
+/// The panel does not wait for a full probe here: one candidate can take a
+/// few seconds, while the poll loop owns the radio lock and is the only place
+/// allowed to build the durable observation. This endpoint only requests that
+/// its ordinary wait is cut short.
+async fn rescan_modems(State(state): State<Arc<PanelState>>) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "local modem rescan is not configured");
+    };
+    match actions.rescan_modems() {
+        Ok(result) => Json(serde_json::json!({
+            "status": "requested",
+            "found": result.found,
+            "control_ports": result.control_ports,
+        }))
+        .into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+/// Save an explicit approval for an endpoint the ordinary discovery pass has
+/// already shown. The poller, not this HTTP request, owns the eventual AT
+/// probe so the radio lock and durable observation stay in one place.
+async fn claim_modem_candidate(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ClaimCandidateBody>,
+) -> Response {
+    let candidate_key = body.candidate_key.trim().to_string();
+    if candidate_key.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "candidate_key is required");
+    }
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local modem candidate claim is not configured",
+        );
+    };
+    match actions.claim_modem_candidate(candidate_key) {
+        Ok(result) => Json(serde_json::json!({
+            "status": "claimed",
+            "candidate_key": result.candidate_key,
+        }))
+        .into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
 
@@ -581,6 +677,11 @@ struct RestartBody {
     imei: String,
 }
 
+#[derive(Deserialize)]
+struct ClaimCandidateBody {
+    candidate_key: String,
+}
+
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     let message = message.into();
     let mut response = (status, Json(serde_json::json!({ "error": message }))).into_response();
@@ -595,6 +696,7 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 struct StatusBody {
     mode: &'static str,
     modems: Vec<ModemBody>,
+    discoveries: Vec<DiscoveryBody>,
 }
 
 #[derive(Serialize)]
@@ -613,6 +715,9 @@ struct ModemBody {
     /// different operator, so it is shown separately rather than instead.
     network: Option<String>,
     network_numeric: Option<String>,
+    discovery: String,
+    manageable: bool,
+    control_port: Option<String>,
 }
 
 impl ModemBody {
@@ -652,6 +757,40 @@ impl ModemBody {
             imsi: value.imsi,
             network: network.map(|n| n.label()),
             network_numeric: network.map(|n| n.numeric()),
+            discovery: value.discovery,
+            manageable: value.manageable,
+            control_port: value.control_port,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DiscoveryBody {
+    candidate_key: String,
+    usb_device: Option<String>,
+    transport: String,
+    control_port: String,
+    vendor_id: Option<String>,
+    product_id: Option<String>,
+    state: String,
+    imei: Option<String>,
+    detail: String,
+    last_seen: i64,
+}
+
+impl From<LocalModemDiscovery> for DiscoveryBody {
+    fn from(value: LocalModemDiscovery) -> Self {
+        Self {
+            candidate_key: value.candidate_key,
+            usb_device: value.usb_device,
+            transport: value.transport,
+            control_port: value.control_port,
+            vendor_id: value.vendor_id,
+            product_id: value.product_id,
+            state: value.state,
+            imei: value.imei,
+            detail: value.detail,
+            last_seen: value.last_seen,
         }
     }
 }
