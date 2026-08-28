@@ -14,6 +14,8 @@ jobs:
         run: cargo test --workspace
       - name: edge-core has no I/O runtime
         run: sh scripts/check-core-deps.sh
+      - name: edge-core writes no direct std I/O
+        run: sh scripts/check-core-source.sh
       - name: Contract types match schema
         run: python3 contract/codegen/generate.py --check --schema contract/schema/edge-cloud.v1.schema.json --rust contract/src/lib.rs
 
