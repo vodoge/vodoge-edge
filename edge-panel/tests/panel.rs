@@ -407,6 +407,46 @@ async fn the_regions_this_file_asserts_in_are_actually_cut_apart() {
     assert!(panel.styles.contains("--pico-background-color"), "Pico's sheet is missing");
 }
 
+/// Command controls acknowledge a press before their request returns. Selection
+/// controls deliberately do not move: their pressed state already has a stable
+/// selected treatment.
+#[tokio::test]
+async fn command_buttons_have_press_feedback_while_selection_controls_stay_stable() {
+    let panel = Panel::load().await;
+    let motion = body_of(
+        &panel.styles,
+        ".btn, .chip-probe, .con-act, .log-copy, .jump {",
+        "}",
+    );
+    assert!(
+        motion.contains("transform var(--pico-transition)"),
+        "command feedback no longer eases with the panel's shared transition"
+    );
+    let press = body_of(
+        &panel.styles,
+        ".btn:not(:disabled):not([aria-busy=\"true\"]):active,",
+        "}",
+    );
+    assert!(
+        press.contains("transform:translateY(1px)"),
+        "a command button no longer moves by one pixel"
+    );
+    for control in [".btn", ".chip-probe", ".con-act", ".log-copy", ".jump"] {
+        assert!(
+            press.contains(&format!(
+                "{control}:not(:disabled):not([aria-busy=\"true\"]):active"
+            )),
+            "{control} no longer has a busy-safe press state"
+        );
+    }
+    for control in [".modem", ".chip-pick", ".tab", ".lvl-chip"] {
+        assert!(
+            !press.contains(control),
+            "{control} is a selection control and must not shift while pressed"
+        );
+    }
+}
+
 /// Nothing on this page may make the browser reach off the page.
 ///
 /// `the_panel_loads_nothing_from_outside_itself` below covers the shapes a

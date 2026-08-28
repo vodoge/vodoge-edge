@@ -391,6 +391,17 @@
     .btn.risk { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 45%, transparent); }
     .btn.risk:hover:not(:disabled) { background:var(--warn-wash); color:var(--warn); border-color:var(--warn); }
     .btn.on { background:var(--accent-wash); border-color:var(--accent); color:var(--accent); }
+    /* Commands move while held; selectors and tabs stay geometrically stable
+       because their selected state is the feedback. */
+    .btn, .chip-probe, .con-act, .log-copy, .jump {
+      transition:background-color var(--pico-transition), border-color var(--pico-transition),
+        color var(--pico-transition), box-shadow var(--pico-transition), transform var(--pico-transition);
+    }
+    .btn:not(:disabled):not([aria-busy="true"]):active,
+    .chip-probe:not(:disabled):not([aria-busy="true"]):active,
+    .con-act:not(:disabled):not([aria-busy="true"]):active,
+    .log-copy:not(:disabled):not([aria-busy="true"]):active,
+    .jump:not(:disabled):not([aria-busy="true"]):active { transform:translateY(1px); }
 
     /* Pico sizes form controls for a document: full width, block level, a line
        of margin under each. In a control panel they are toolbar parts, so the
