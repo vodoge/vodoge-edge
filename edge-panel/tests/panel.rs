@@ -422,11 +422,14 @@ async fn command_buttons_have_press_feedback_while_selection_controls_stay_stabl
         motion.contains("transform var(--pico-transition)"),
         "command feedback no longer eases with the panel's shared transition"
     );
-    let press = body_of(
-        &panel.styles,
-        ".btn:not(:disabled):not([aria-busy=\"true\"]):active,",
-        "}",
-    );
+    let press_start = panel
+        .styles
+        .find(".btn:not(:disabled):not([aria-busy=\"true\"]):active,")
+        .expect("the panel has no command press rule");
+    let press_rule = &panel.styles[press_start..];
+    let press = &press_rule[..press_rule
+        .find('}')
+        .expect("the panel command press rule has no closing brace")];
     assert!(
         press.contains("transform:translateY(1px)"),
         "a command button no longer moves by one pixel"
