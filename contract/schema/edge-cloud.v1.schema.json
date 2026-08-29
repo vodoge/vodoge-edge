@@ -580,6 +580,51 @@
             { "type": "integer", "minimum": 0 },
             { "type": "null" }
           ]
+        },
+        "disk_used_bytes": {
+          "description": "Used and total bytes of the filesystem holding the agent's own databases, not of every mount. That is the one whose exhaustion stops the outbox committing, which is the failure this number exists to see coming.",
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "disk_total_bytes": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "net_rx_bytes_per_sec": {
+          "description": "Throughput across the host's physical interfaces, averaged over the interval between two polls rather than since boot. Loopback and the modems' own wwan interfaces are excluded: this is the box's link to the world, not its traffic to its own hardware.",
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "net_tx_bytes_per_sec": {
+          "anyOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "cpu_model": {
+          "description": "Host hardware identity. Static for the life of a machine, so it is sent with every state rather than tracked for change: the payload is a snapshot, and a field that appears only on the first one after a restart is a field the cloud cannot rely on.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
+        },
+        "kernel": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
+        },
+        "hostname": {
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
         }
       }
     },
@@ -647,7 +692,65 @@
             { "type": "null" }
           ]
         },
+        "firmware": {
+          "description": "Firmware revision as the module reports it, e.g. EC20CEHCLGR06A08M1G_AUD. Both identity probes already read this to detect the family; it is carried so the cloud stops having to ask for a diagnostic report to answer 'which build is on that stick'.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 128 },
+            { "type": "null" }
+          ]
+        },
+        "msisdn": {
+          "description": "The card's own number, from AT+CNUM or EF_MSISDN. Frequently absent: many operators leave the field blank on the card, so null means 'the card did not say' and never 'this card has no number'.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 32 },
+            { "type": "null" }
+          ]
+        },
+        "control_port": {
+          "description": "The kernel node the agent drives this module through. Physical topology the cloud cannot otherwise see, and the first thing asked for when a stick stops answering.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 256 },
+            { "type": "null" }
+          ]
+        },
+        "usb_device": {
+          "description": "sysfs USB topology key, e.g. 2-4.2. Stable across tty renumbering, which the control port is not.",
+          "anyOf": [
+            { "type": "string", "minLength": 1, "maxLength": 64 },
+            { "type": "null" }
+          ]
+        },
+        "apn_contexts": {
+          "description": "The packet data profiles the module is carrying, as AT+CGDCONT? reports them. Which context carries data is a row in a table on the module rather than a property of the card or the network, and this is the only way the cloud can see that table. Absent from an agent that does not read them; an empty array means the module answered and held none.",
+          "anyOf": [
+            {
+              "type": "array",
+              "maxItems": 32,
+              "items": { "$ref": "#/$defs/ApnContext" }
+            },
+            { "type": "null" }
+          ]
+        },
         "capability": { "$ref": "#/$defs/CapabilitySummary" }
+      }
+    },
+    "ApnContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cid"],
+      "properties": {
+        "cid": {
+          "description": "Context identifier. What AT+CGACT and the QMI profile index both address, so it is the handle for everything else.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "pdp_type": { "type": "string", "maxLength": 16 },
+        "apn": {
+          "description": "Empty where the module holds a context with no name, which is a normal unconfigured slot rather than a failed read.",
+          "type": "string",
+          "maxLength": 128
+        }
       }
     },
     "CapabilitySummary": {
@@ -789,7 +892,11 @@
         "kind": { "const": "RunAtCommand" },
         "modem_imei": { "$ref": "#/$defs/Imei" },
         "command": { "type": "string", "minLength": 2, "maxLength": 1024 },
-        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 300000 }
+        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 300000 },
+        "force": {
+          "description": "Send a command the agent classifies as disruptive anyway. Absent or false means the agent refuses those and answers with the classification, so that reaching a modem's radio, call, message or card state through the raw AT console is a deliberate act rather than a typo. It is not a permission: the console's own roles decide who may ask.",
+          "type": "boolean"
+        }
       }
     },
     "SendUssdCommand": {
@@ -1038,6 +1145,18 @@
         }
       }
     },
+    "SubscriptionCapability": {
+      "description": "What an operator says this card's plan is sold as doing. Strictly subtractive: false withholds an operation the measured (modem, carrier) pair allowed, and true asserts nothing, because a subscription cannot grant a capability nobody measured. Absent means undeclared, which withholds nothing. Two cards on one carrier in one module differ here and nowhere else -- it is a billing fact, not a readable one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "sms_send": { "type": ["boolean", "null"] },
+        "sms_receive": { "type": ["boolean", "null"] },
+        "data": { "type": ["boolean", "null"] },
+        "voice": { "type": ["boolean", "null"] }
+      }
+    },
     "CardPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -1051,7 +1170,8 @@
             { "type": "string", "minLength": 1, "maxLength": 128 },
             { "type": "null" }
           ]
-        }
+        },
+        "capability": { "$ref": "#/$defs/SubscriptionCapability" }
       }
     },
     "UpdateCapabilityMatrixCommand": {

@@ -5,6 +5,10 @@
 //! stay deterministic and straightforward to test.
 
 mod network;
+mod apn;
+mod at_policy;
+mod strategy;
+mod strategies;
 mod capability;
 mod concat;
 mod gsm7;
@@ -13,6 +17,7 @@ mod factory;
 mod matrix;
 mod policy;
 mod registration;
+mod settle;
 mod signal;
 mod sms;
 mod verticals;
@@ -26,6 +31,19 @@ pub use concat::{assemble, AssembledSms, ConcatPart, FRAGMENT_GRACE_MS};
 pub use gsm7::decode as decode_gsm7;
 pub use pdu::{decode_deliver, decode_status_report, hex, Deliver, StatusReport};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
+pub use apn::{parse_cgdcont, ApnContext};
+pub use settle::{
+    settle_inbound, InboundFragment, InboundSettlement, SettledMessage,
+};
+pub use at_policy::{classify as classify_at_command, AtRisk, DisruptiveKind};
+pub use strategy::{
+    CarrierStrategy, ModemStrategy, OperatingContext, Operation, RefusedBy, Resolution, StrategyError,
+    StrategyRegistry, SubscriptionCapability, Support, SupportLedger,
+};
+pub use strategies::{
+    registry as builtin_strategy_registry, CnMobileStrategy, CnTelecomStrategy, CnUnicomStrategy,
+    Ec200uStrategy, InternationalStrategy, QuectelEcStrategy,
+};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{
     arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
