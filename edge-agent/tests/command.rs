@@ -290,8 +290,10 @@ impl edge_agent::SendPort for RecordingPort {
         imei: &str,
         command: &str,
         timeout_ms: Option<i64>,
+        force: bool,
     ) -> Result<serde_json::Value, edge_agent::SendError> {
-        self.calls.push(format!("run_at {imei} {command} {timeout_ms:?}"));
+        self.calls
+            .push(format!("run_at {imei} {command} {timeout_ms:?} force={force}"));
         Ok(serde_json::json!({"lines": ["+CSQ: 24,99"], "ok": true}))
     }
 
@@ -363,6 +365,22 @@ impl edge_agent::SendPort for RecordingPort {
 
     fn refresh_modems(&mut self) -> Result<serde_json::Value, edge_agent::SendError> {
         self.calls.push("refresh_modems".into());
+        Ok(serde_json::Value::Null)
+    }
+
+    fn update_card_policies(
+        &mut self,
+        policy_version: &str,
+        policies: &[vodoge_contract::CardPolicy],
+    ) -> Result<serde_json::Value, edge_agent::SendError> {
+        self.calls.push(format!(
+            "update_card_policies {policy_version} {}",
+            policies
+                .iter()
+                .map(|policy| format!("{}:{}", policy.iccid, policy.vertical))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
         Ok(serde_json::Value::Null)
     }
 
@@ -450,10 +468,13 @@ fn deliver(command: Command, port: RecordingPort) -> (CommandResultPayload, Vec<
 
 const IMEI: &str = "867018069514820";
 
-/// Every relayed command must reach its port method. Before the relay existed
-/// they all fell through to the catch-all and reported `unsupported_command`,
-/// which is exactly what this would catch if a variant were ever dropped from
-/// the match.
+/// Every relayed command must reach its port method.
+///
+/// Dropping a variant from the match is now a build error -- the catch-all
+/// that used to answer `unsupported_command` is gone, having existed at the
+/// end only for `update_card_policy`, which had no arm. What the compiler
+/// still cannot see is an arm wired to the wrong port method, or to none,
+/// which is what these assertions are for.
 #[test]
 fn every_relayed_command_reaches_the_port() {
     let cases: Vec<(Command, &str)> = vec![
@@ -462,8 +483,20 @@ fn every_relayed_command_reaches_the_port() {
                 modem_imei: IMEI.into(),
                 command: "AT+CSQ".into(),
                 timeout_ms: None,
+                force: false,
             },
-            "run_at 867018069514820 AT+CSQ None",
+            "run_at 867018069514820 AT+CSQ None force=false",
+        ),
+        (
+            // The flag has to reach the port: it is what the port consults
+            // before sending a command its classifier holds back.
+            Command::RunAtCommand {
+                modem_imei: IMEI.into(),
+                command: "AT+CFUN=0".into(),
+                timeout_ms: None,
+                force: true,
+            },
+            "run_at 867018069514820 AT+CFUN=0 None force=true",
         ),
         (
             Command::SendUssd {
@@ -579,6 +612,23 @@ fn every_relayed_command_reaches_the_port() {
             "download_esim_profile LPA:1$smdp.example.com$AAAA-BBBB cc=none",
         ),
         (
+            // The one kind that had no arm at all: the cloud's push came back
+            // `unsupported_command` while the console showed the policy as
+            // saved. It addresses cards rather than a modem, so it carries no
+            // IMEI and every device gets the tenant's whole set.
+            Command::UpdateCardPolicy {
+                policy_version: "2026-08-28T00:00:00Z".into(),
+                policies: vec![vodoge_contract::CardPolicy {
+                    iccid: "8985235122504221420".into(),
+                    cellular_enabled: true,
+                    vertical: "cn".into(),
+                    apn: Some("cmnet".into()),
+                    capability: None,
+                }],
+            },
+            "update_card_policies 2026-08-28T00:00:00Z 8985235122504221420:cn",
+        ),
+        (
             Command::DownloadEsimProfile {
                 modem_imei: IMEI.into(),
                 activation_code: "1$smdp.example.com$AAAA-BBBB".into(),
@@ -607,6 +657,7 @@ fn a_reading_travels_in_the_result_details() {
             modem_imei: IMEI.into(),
             command: "AT+CSQ".into(),
             timeout_ms: Some(5_000),
+            force: false,
         },
         RecordingPort::default(),
     );
@@ -1049,4 +1100,70 @@ fn an_inventory_stops_being_sendable_one_profile_past_the_limit() {
         );
         assert_eq!(outcome.inventory.is_some(), expected, "{count} profiles");
     }
+}
+
+/// The iron rule, at the point it actually matters: an untested pairing does
+/// not reach the modem at all.
+///
+/// The refusal has to happen before the port is touched, not after, or the
+/// message has already cost money by the time anyone reads the reason.
+#[test]
+fn a_send_on_an_untested_pairing_never_reaches_the_modem() {
+    let mut port = FakeSendPort::new();
+    port.unmeasured();
+    let mut executor = CommandExecutor::new(port);
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("the command still completes, with a refusal");
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("sms_mo_refused_by_untested"),
+        "the refusal names the layer, so the reader knows a test is the fix",
+    );
+    assert!(
+        executor.port().sent().is_empty(),
+        "nothing may be sent on a pairing nobody has measured",
+    );
+}
+
+/// The subscription layer, at the same point. This is the Club case: the
+/// module and the network were measured and work; the plan is what does not
+/// include sending.
+#[test]
+fn a_plan_recorded_as_receive_only_refuses_the_send_and_says_so() {
+    let mut port = FakeSendPort::new();
+    port.with_subscription(edge_core::SubscriptionCapability {
+        sms_send: Some(false),
+        sms_receive: Some(true),
+        ..edge_core::SubscriptionCapability::default()
+    });
+    let mut executor = CommandExecutor::new(port);
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("refused, not dropped");
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("sms_mo_refused_by_subscription"),
+        "a billing limit must not be reported as a hardware or coverage fault",
+    );
+    assert!(executor.port().sent().is_empty());
+}
+
+/// A measured pairing with nothing declared against the card still sends.
+///
+/// Guards the direction of the veto: an undeclared plan withholds nothing, or
+/// every card would stop working until somebody filled a form in.
+#[test]
+fn an_undeclared_plan_withholds_nothing() {
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("send");
+
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    assert_eq!(executor.port().sent().len(), 1);
 }

@@ -9,7 +9,7 @@ use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use edge_core::Network;
+use edge_core::{CapabilityMatrix, CapabilityOrigin, CarrierProfile, ModemFamily, Network};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -45,14 +45,27 @@ pub trait Inbox: Send + Sync {
 
 /// Local send/restart actions. Optional so a read-only panel still works.
 pub trait Actions: Send + Sync {
-    fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError>;
+    /// `commission` sends on a pairing the ledger has not measured, so that it
+    /// can be measured. See `SendBody`.
+    fn send_sms(
+        &self,
+        to: String,
+        body: String,
+        imei: Option<String>,
+        commission: bool,
+    ) -> Result<(), PanelError>;
     fn restart_modem(&self, imei: String) -> Result<(), PanelError>;
     /// Run one AT command against a modem's control port.
     ///
     /// A module that answers `+CME ERROR` has answered, so that comes back as
     /// `Ok` carrying the error terminator. Only losing the port is an `Err`:
     /// a console has to show what the module actually said.
-    fn at_command(&self, imei: Option<String>, command: String) -> Result<AtResult, PanelError>;
+    fn at_command(
+        &self,
+        imei: Option<String>,
+        command: String,
+        force: bool,
+    ) -> Result<AtResult, PanelError>;
     /// Re-enumerate a modem's USB device.
     ///
     /// `restart_modem` goes through QMI, so it cannot recover a module whose
@@ -290,6 +303,12 @@ struct PanelState {
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
+    /// The matrix the agent is currently routing by, shared with the poll loop
+    /// so a cloud-pushed replacement shows up here too. Queried rather than
+    /// stored per modem: what a module can do is a property of the matrix in
+    /// force, and a copy written into the row at probe time would go on
+    /// claiming a rule that a later push removed.
+    matrix: Arc<Mutex<CapabilityMatrix>>,
 }
 
 /// HTTP router for the offline panel. Bind it on the LAN; it does not call the cloud.
@@ -302,6 +321,19 @@ pub fn router_with_actions(inbox: Arc<dyn Inbox>, actions: Option<Arc<dyn Action
     router_with_uplink(inbox, actions, Arc::new(AtomicBool::new(false)))
 }
 
+/// HTTP router that reports capabilities against a caller-supplied matrix.
+///
+/// The layers above default to the compiled-in matrix. Only the agent passes
+/// the live one, because only the agent can receive a replacement.
+pub fn router_with_matrix(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
+    matrix: Arc<Mutex<CapabilityMatrix>>,
+) -> Router {
+    build_router(inbox, actions, uplink_online, matrix)
+}
+
 /// HTTP router whose reported mode follows a live uplink flag.
 ///
 /// The panel used to report `local` unconditionally, so it kept claiming the
@@ -310,6 +342,22 @@ pub fn router_with_uplink(
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
+) -> Router {
+    // The compiled-in matrix. A caller that can receive a pushed replacement
+    // goes through `router_with_matrix` instead.
+    let matrix = Arc::new(Mutex::new(
+        CapabilityMatrix::builtin().unwrap_or_else(|error| {
+            panic!("built-in capability matrix does not parse: {error}")
+        }),
+    ));
+    build_router(inbox, actions, uplink_online, matrix)
+}
+
+fn build_router(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
+    matrix: Arc<Mutex<CapabilityMatrix>>,
 ) -> Router {
     Router::new()
         .route("/", get(index))
@@ -333,6 +381,7 @@ pub fn router_with_uplink(
             inbox,
             actions,
             uplink_online,
+            matrix,
         }))
 }
 
@@ -342,9 +391,14 @@ pub async fn serve(
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
+    matrix: Arc<Mutex<CapabilityMatrix>>,
 ) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, router_with_uplink(inbox, actions, uplink_online)).await
+    axum::serve(
+        listener,
+        router_with_matrix(inbox, actions, uplink_online, matrix),
+    )
+    .await
 }
 
 async fn index() -> Html<&'static str> {
@@ -363,6 +417,9 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
         .as_ref()
         .map(|actions| actions.busy_modems())
         .unwrap_or_default();
+    // Cloned out under its own lock rather than held across the loop: the
+    // agent replaces this whole value when the cloud pushes a new matrix.
+    let matrix = state.matrix.lock().expect("capability matrix").clone();
     match (state.inbox.list_modems(), state.inbox.list_modem_discoveries()) {
         (Ok(modems), Ok(discoveries)) => Json(StatusBody {
             mode,
@@ -370,7 +427,7 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                 .into_iter()
                 .map(|modem| {
                     let is_busy = busy.iter().any(|imei| *imei == modem.imei);
-                    ModemBody::observed(modem, now, is_busy)
+                    ModemBody::observed(modem, now, is_busy, &matrix)
                 })
                 .collect(),
             discoveries: discoveries.into_iter().map(DiscoveryBody::from).collect(),
@@ -470,7 +527,7 @@ async fn send_sms(
     if body.to.trim().is_empty() || body.body.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "to and body are required");
     }
-    match actions.send_sms(body.to, body.body, body.imei) {
+    match actions.send_sms(body.to, body.body, body.imei, body.commission) {
         Ok(()) => Json(serde_json::json!({ "status": "sent" })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
@@ -491,7 +548,7 @@ async fn at_command(
     if command.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "command is required");
     }
-    match actions.at_command(body.imei, command) {
+    match actions.at_command(body.imei, command, body.force) {
         Ok(result) => Json(result).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
@@ -640,6 +697,14 @@ struct SendBody {
     to: String,
     body: String,
     imei: Option<String>,
+    /// Send on a pairing the ledger has not measured, in order to find out
+    /// what it does. This is the commissioning path: "untested is
+    /// unsupported" would otherwise make the first test of anything
+    /// impossible. Absent is false, so nothing reaches it by accident, and
+    /// the result of the exercise belongs in the ledger rather than in
+    /// somebody's memory of having tried it once.
+    #[serde(default)]
+    commission: bool,
 }
 
 #[derive(Deserialize)]
@@ -670,6 +735,11 @@ struct ResetBody {
 struct AtBody {
     command: String,
     imei: Option<String>,
+    /// Send a command the agent classifies as disruptive anyway. Absent is
+    /// false, so a page that predates the classifier can only ask for the
+    /// safe set rather than silently bypassing it.
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Deserialize)]
@@ -718,12 +788,33 @@ struct ModemBody {
     discovery: String,
     manageable: bool,
     control_port: Option<String>,
+    /// Firmware revision and the card's own number, both carried in the modem
+    /// row rather than fetched by a diagnostic so the panel can show them
+    /// without taking the radio away from the poll loop.
+    firmware: Option<String>,
+    msisdn: Option<String>,
+    /// The carrier half of the capability-matrix key, derived from the home
+    /// network. Shown because it is half of what a new rule must be written
+    /// against, and it is not readable off the operator name.
+    carrier_profile: String,
+    /// `rule` when the matrix has an entry for this (family, carrier) pair,
+    /// `fallback` when it has never heard of the combination.
+    ///
+    /// Deliberately not called "measured". A rule is free to say `probe`, and
+    /// several do -- that is a decision that this pair varies or was never
+    /// characterised, which is a different fact from nobody having considered
+    /// it. Only the second one is worth interrupting an operator about, and
+    /// only the second one is what a new rule would fix.
+    ///
+    /// Note that a recognised family is not enough on its own: `UFI103S` is a
+    /// known variant with no rules in the built-in matrix, so it lands here.
+    capability_origin: &'static str,
 }
 
 impl ModemBody {
     /// Report a modem that has gone quiet as offline rather than repeating the
     /// registration state it happened to have when it was last reachable.
-    fn observed(value: LocalModem, now: i64, busy: bool) -> Self {
+    fn observed(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix) -> Self {
         let stale = value
             .last_seen
             .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
@@ -746,6 +837,18 @@ impl ModemBody {
             (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
             _ => None,
         };
+        // Keyed on the home carrier rather than the serving one, matching the
+        // agent's own lookup: what a card can do belongs to the subscription,
+        // and a roaming card keeps its own operator's rules.
+        let carrier = CarrierProfile::from(
+            home.map(|network| network.carrier_profile())
+                .unwrap_or("Generic-International"),
+        );
+        let family = ModemFamily::from(value.family.as_str());
+        let capability_origin = match matrix.query(&family, &carrier).origin {
+            CapabilityOrigin::Rule => "rule",
+            CapabilityOrigin::Fallback => "fallback",
+        };
         Self {
             imei: value.imei,
             family: value.family,
@@ -760,6 +863,10 @@ impl ModemBody {
             discovery: value.discovery,
             manageable: value.manageable,
             control_port: value.control_port,
+            firmware: value.firmware,
+            msisdn: value.msisdn,
+            carrier_profile: carrier.as_str().to_string(),
+            capability_origin,
         }
     }
 }

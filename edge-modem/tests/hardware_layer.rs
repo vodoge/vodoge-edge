@@ -5,9 +5,8 @@ use edge_core::{
     arbitrate, Bearer, Plmn, RegistrationEvidence, RegistrationSourceKind, SendPlan,
 };
 use edge_modem::{
-    collect_inbound, delete_inbound, discover, send_with_plan, with_restore, DiscoveredModem,
-    FakeEnumerator, FakeModem, MessageTag, ModemPort, PortError, TransportKind, UnsupportedPort,
-    StorageType,
+    collect_inbound, delete_inbound, send_with_plan, with_restore, FakeModem, MessageTag,
+    ModemPort, PortError, TransportKind, UnsupportedPort, StorageType,
 };
 
 #[test]
@@ -112,43 +111,15 @@ fn restore_still_runs_when_disrupt_succeeds_and_body_ok() {
     assert!(radio_on.get());
 }
 
-#[test]
-fn discovery_stops_at_the_first_non_empty_step() {
-    let enumerator = FakeEnumerator {
-        qmi: vec![DiscoveredModem {
-            kind: TransportKind::Qmi,
-            path: "/dev/cdc-wdm0".into(),
-            net_iface: Some("wwan0".into()),
-        }],
-        mbim: vec![DiscoveredModem {
-            kind: TransportKind::Mbim,
-            path: "/dev/cdc-wdm-mbim".into(),
-            net_iface: None,
-        }],
-        at: vec![DiscoveredModem {
-            kind: TransportKind::At,
-            path: "/dev/ttyUSB2".into(),
-            net_iface: None,
-        }],
-    };
-    let found = discover(&enumerator);
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].kind, TransportKind::Qmi);
-}
-
-#[test]
-fn discovery_falls_back_to_vid_at() {
-    let enumerator = FakeEnumerator {
-        at: vec![DiscoveredModem {
-            kind: TransportKind::At,
-            path: "/dev/ttyUSB2".into(),
-            net_iface: None,
-        }],
-        ..FakeEnumerator::default()
-    };
-    let found = discover(&enumerator);
-    assert_eq!(found[0].kind, TransportKind::At);
-}
+// The two discovery tests that stood here asserted a rule production does not
+// have and must not adopt: "the first non-empty transport wins", which returns
+// the QMI list and never looks at serial. The agent enumerates QMI *and* then
+// makes a second serial pass over the USB devices QMI did not claim, because a
+// single stick whose QMI node is unusable has to stay visible while its
+// siblings are fine -- the shape of the usbnet incident on this bench. Their
+// subject, `edge_modem::discover`, was never wired into the poll loop; it and
+// its `DeviceEnumerator` trait are gone. The real enumeration lives in
+// `edge-bin`'s `poll_modems` and is covered there.
 
 #[test]
 fn send_plan_uses_fallback_when_primary_fails() {

@@ -116,19 +116,24 @@ impl UnsupportedPort {
     /// implemented.
     ///
     /// Two further gaps, both cheap and neither sufficient: no `pcsc` crate in
-    /// any manifest in this workspace, and no PC/SC step in
-    /// [`crate::DeviceEnumerator`], whose steps are QMI, then MBIM, then
-    /// VID/AT -- so a finished `PcscPort` would still have nothing routing to
-    /// it.
+    /// any manifest in this workspace, and nothing in the agent's enumeration
+    /// that would ever hand a reader to a `PcscPort`.
     ///
     /// If a reader is ever attached, the first move is not this file: it is
-    /// teaching `DeviceEnumerator` to enumerate readers, since that decides
-    /// what a `PcscPort` is handed at all. And `tests/hardware_layer.rs` goes
-    /// red the moment this stops being a stub -- that red is the correct
-    /// signal. Claim it and rewrite those assertions; do not route around it.
+    /// teaching enumeration to find readers at all, since that decides what a
+    /// `PcscPort` is handed. That enumeration is `poll_modems` in `edge-bin`,
+    /// which walks `/dev/cdc-wdm*` and then `edge_modem::at_port_candidates`;
+    /// a reader is a third kind of endpoint alongside those two.
     ///
-    /// Full account:
-    /// `docs/goals/vodoge-vowifi-call/notes/T052-pcsc-reader.md`.
+    /// This paragraph used to name a `DeviceEnumerator` trait as that entry
+    /// point. The trait was never wired into the poll loop, and its rule --
+    /// first non-empty transport wins -- is the opposite of what the agent
+    /// learned to do, which is to fall back to serial *per USB device* so one
+    /// stick with a dead QMI node stays visible while its siblings are fine.
+    /// It was deleted rather than left standing as the recommended path.
+    ///
+    /// The full account cited here, `T052-pcsc-reader.md`, is not in this
+    /// repository; the decision it recorded is summarised above.
     pub fn pcsc() -> Self {
         Self {
             kind: TransportKind::Pcsc,

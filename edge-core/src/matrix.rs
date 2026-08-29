@@ -40,6 +40,18 @@ pub struct CapabilityMatrix {
 }
 
 impl CapabilityMatrix {
+    /// Every explicitly stated rule, without the fallback.
+    ///
+    /// The fallback is deliberately not included. It answers "what do we do
+    /// about a pair nobody wrote down", which is a different question from
+    /// "what was this pair measured to do" -- and conflating them is how an
+    /// untested combination comes to look supported.
+    pub fn rules(&self) -> impl Iterator<Item = (&ModemFamily, &CarrierProfile, &Capability)> {
+        self.rules
+            .iter()
+            .map(|(key, capability)| (&key.modem_family, &key.carrier_profile, capability))
+    }
+
     /// Parses a declarative TOML matrix. Missing capability fields inherit from
     /// `[fallback]`, which defaults to `probe` for every operation.
     pub fn from_toml(source: &str) -> Result<Self, MatrixError> {

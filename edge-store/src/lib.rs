@@ -69,6 +69,10 @@ const MIGRATIONS: &[&str] = &[
     INGESTED_SMS,
     include_str!("../migrations/0008_modem_discovery.sql"),
     include_str!("../migrations/0009_manual_modem_profiles.sql"),
+    include_str!("../migrations/0010_card_policies.sql"),
+    include_str!("../migrations/0011_modem_identity.sql"),
+    include_str!("../migrations/0012_card_capability.sql"),
+    include_str!("../migrations/0013_apn_contexts.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -120,6 +124,7 @@ impl Store {
             });
         }
         if target < current {
+            self.conn.execute_batch("DROP TABLE IF EXISTS card_policies;")?;
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS manual_modem_profiles;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS ingested_sms;")?;
@@ -366,11 +371,20 @@ impl Store {
     pub fn upsert_local_modem(&self, modem: &LocalModem) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO local_modems
-                (imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
+                (imei, family, firmware, msisdn, msisdn_iccid, apn_contexts,
+                 iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
                  discovery, manageable, control_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(imei) DO UPDATE SET
                 family = excluded.family,
+                -- Same policy as the card identity below: a pass that could
+                -- not read one of these keeps the last that could. Firmware
+                -- is only re-read on a probe that got that far, and the
+                -- number is only re-read when the card underneath changes.
+                firmware = COALESCE(excluded.firmware, local_modems.firmware),
+                msisdn = COALESCE(excluded.msisdn, local_modems.msisdn),
+                msisdn_iccid = COALESCE(excluded.msisdn_iccid, local_modems.msisdn_iccid),
+                apn_contexts = COALESCE(excluded.apn_contexts, local_modems.apn_contexts),
                 iccid = excluded.iccid,
                 state = excluded.state,
                 last_seen = excluded.last_seen,
@@ -390,6 +404,10 @@ impl Store {
             params![
                 modem.imei,
                 modem.family,
+                modem.firmware,
+                modem.msisdn,
+                modem.msisdn_iccid,
+                modem.apn_contexts,
                 modem.iccid,
                 modem.state,
                 modem.last_seen,
@@ -510,7 +528,8 @@ impl Store {
 
     pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT imei, family, iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
+            "SELECT imei, family, firmware, msisdn, msisdn_iccid, apn_contexts,
+                    iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
                     discovery, manageable, control_port
                FROM local_modems
               ORDER BY imei",
@@ -520,17 +539,21 @@ impl Store {
                 Ok(LocalModem {
                     imei: row.get(0)?,
                     family: row.get(1)?,
-                    iccid: row.get(2)?,
-                    state: row.get(3)?,
-                    last_seen: row.get(4)?,
-                    mcc: row.get(5)?,
-                    mnc: row.get(6)?,
-                    home_mcc: row.get(7)?,
-                    home_mnc: row.get(8)?,
-                    imsi: row.get(9)?,
-                    discovery: row.get(10)?,
-                    manageable: row.get::<_, i64>(11)? != 0,
-                    control_port: row.get(12)?,
+                    firmware: row.get(2)?,
+                    msisdn: row.get(3)?,
+                    msisdn_iccid: row.get(4)?,
+                    apn_contexts: row.get(5)?,
+                    iccid: row.get(6)?,
+                    state: row.get(7)?,
+                    last_seen: row.get(8)?,
+                    mcc: row.get(9)?,
+                    mnc: row.get(10)?,
+                    home_mcc: row.get(11)?,
+                    home_mnc: row.get(12)?,
+                    imsi: row.get(13)?,
+                    discovery: row.get(14)?,
+                    manageable: row.get::<_, i64>(15)? != 0,
+                    control_port: row.get(16)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -615,6 +638,142 @@ impl Store {
         )?;
         Ok(removed != 0)
     }
+
+    /// Record the number read off one module, and the card it came from.
+    ///
+    /// A direct write rather than part of the modem upsert, because `None`
+    /// here is a real answer: it records that this card was asked and had
+    /// nothing to say, which is what stops the question being asked again on
+    /// every poll. The upsert's COALESCE would discard exactly that.
+    pub fn set_modem_msisdn(
+        &self,
+        imei: &str,
+        msisdn: Option<&str>,
+        iccid: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE local_modems SET msisdn = ?2, msisdn_iccid = ?3 WHERE imei = ?1",
+            params![imei, msisdn, iccid],
+        )?;
+        Ok(())
+    }
+
+    /// Replace the whole card policy set with what the cloud just pushed.
+    ///
+    /// A replacement rather than an upsert, in one transaction. The cloud sends
+    /// the complete set every time, so a card it has stopped listing has had
+    /// its policy withdrawn -- and an upsert would leave that card's old rules
+    /// in force here for as long as the stick stayed in the machine. Doing it
+    /// in a transaction is what keeps a failure halfway through from leaving
+    /// the device with neither the old set nor the new one.
+    ///
+    /// Returns how many rows the set now holds.
+    pub fn replace_card_policies(
+        &mut self,
+        policies: &[CardPolicy],
+        policy_version: &str,
+        now: i64,
+    ) -> Result<usize, StoreError> {
+        let transaction = self.conn.transaction()?;
+        transaction.execute("DELETE FROM card_policies", [])?;
+        for policy in policies {
+            transaction.execute(
+                "INSERT INTO card_policies
+                    (iccid, cellular_enabled, vertical, apn, policy_version, updated_at,
+                     sms_send, sms_receive, data, voice)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    policy.iccid,
+                    policy.cellular_enabled as i64,
+                    policy.vertical,
+                    policy.apn,
+                    policy_version,
+                    now,
+                    policy.sms_send.map(|value| value as i64),
+                    policy.sms_receive.map(|value| value as i64),
+                    policy.data.map(|value| value as i64),
+                    policy.voice.map(|value| value as i64),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(policies.len())
+    }
+
+    /// The card policy for one ICCID, if the cloud has pushed one.
+    pub fn card_policy(&self, iccid: &str) -> Result<Option<CardPolicy>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT iccid, cellular_enabled, vertical, apn,
+                    sms_send, sms_receive, data, voice
+               FROM card_policies
+              WHERE iccid = ?1",
+        )?;
+        let mut rows = statement.query_map(params![iccid], read_card_policy)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Every card policy currently in force, for the panel and for diagnosis.
+    pub fn list_card_policies(&self) -> Result<Vec<CardPolicy>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT iccid, cellular_enabled, vertical, apn,
+                    sms_send, sms_receive, data, voice
+               FROM card_policies
+              ORDER BY iccid",
+        )?;
+        let rows = statement
+            .query_map([], read_card_policy)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The version string the current set was pushed under, if there is a set.
+    pub fn card_policy_version(&self) -> Result<Option<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT policy_version FROM card_policies LIMIT 1")?;
+        let mut rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+}
+
+/// One card's policy, as the cloud last pushed it.
+///
+/// Deliberately the same four fields the contract carries and no more. The
+/// edge stores what it was told rather than an interpretation of it: deciding
+/// what `vertical` means is the job of whatever consumes the policy, and a
+/// value this agent does not recognise still has to survive being written down
+/// so that a newer build can act on it without a re-push.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardPolicy {
+    pub iccid: String,
+    pub cellular_enabled: bool,
+    pub vertical: String,
+    pub apn: Option<String>,
+    /// What the operator says this plan is sold as doing. `None` is
+    /// undeclared; `Some(false)` withholds. See the 0012 migration.
+    pub sms_send: Option<bool>,
+    pub sms_receive: Option<bool>,
+    pub data: Option<bool>,
+    pub voice: Option<bool>,
+}
+
+fn read_card_policy(row: &rusqlite::Row<'_>) -> rusqlite::Result<CardPolicy> {
+    // Three states, so each reads through Option rather than defaulting: a
+    // column nobody has filled in is not the same record as one filled in
+    // with "no".
+    let flag = |index: usize| -> rusqlite::Result<Option<bool>> {
+        Ok(row.get::<_, Option<i64>>(index)?.map(|value| value != 0))
+    };
+    Ok(CardPolicy {
+        iccid: row.get(0)?,
+        cellular_enabled: row.get::<_, i64>(1)? != 0,
+        vertical: row.get(2)?,
+        apn: row.get(3)?,
+        sms_send: flag(4)?,
+        sms_receive: flag(5)?,
+        data: flag(6)?,
+        voice: flag(7)?,
+    })
 }
 
 /// One locally cached SMS row for the offline panel.
@@ -634,6 +793,16 @@ pub struct LocalMessage {
 pub struct LocalModem {
     pub imei: String,
     pub family: String,
+    /// Firmware revision, carried between polls rather than re-read: it
+    /// changes only when the module is flashed.
+    pub firmware: Option<String>,
+    /// The card's own number, and the card it was read from. The second is
+    /// what stops a number outliving its card on an eUICC profile switch.
+    pub msisdn: Option<String>,
+    pub msisdn_iccid: Option<String>,
+    /// Packet data profiles, as the JSON the agent last read. `None` means
+    /// they have not been read; an empty array means the module held none.
+    pub apn_contexts: Option<String>,
     pub iccid: Option<String>,
     pub state: String,
     pub last_seen: Option<i64>,

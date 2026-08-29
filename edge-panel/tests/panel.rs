@@ -2470,6 +2470,10 @@ async fn panel_serves_embedded_html_and_local_json() {
         modems: vec![LocalModem {
             imei: "867018069509705".into(),
             family: "EC20".into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
             iccid: None,
             state: "registered".into(),
             last_seen: Some(1_700_000_000_000),
@@ -2552,6 +2556,129 @@ async fn panel_serves_embedded_html_and_local_json() {
     assert_eq!(inbox_json["messages"][0]["body"], "hello");
 }
 
+/// The page understands the vocabulary the agent writes, and no other.
+///
+/// The panel had grown labels for fourteen discovery states and a transport
+/// called `mbim`, while the agent writes five states and three transports --
+/// and `serial`, one of the three, had no label at all. Neither side could
+/// notice: a state that is never sent looks exactly like one that is rare.
+///
+/// The scan runs against the page with its comments blanked, so a spelling
+/// mentioned only in a note does not count as handled.
+#[tokio::test]
+async fn the_page_labels_the_states_the_agent_writes_and_no_others() {
+    let panel = Panel::load().await;
+
+    // DiscoveryState::wire, as discoveryKey normalises it.
+    for state in ["manageable", "probefailed", "atonly", "found", "claimed"] {
+        assert!(
+            panel.code.contains(state),
+            "the page has no label for the {state} state, which the agent writes",
+        );
+    }
+    // DiscoveryTransport::wire.
+    for transport in ["qmi", "at", "serial"] {
+        assert!(
+            panel.code.contains(transport),
+            "the page has no label for the {transport} transport",
+        );
+    }
+
+    // Spellings the agent has never produced, checked as object keys rather
+    // than as bare words. Several are real vocabulary elsewhere on the page
+    // and must stay: `unidentified`, `silent` and `unavailable` classify log
+    // lines by severity, and `mbim` is a USBNET mode. It is only their use as
+    // a discovery state or transport that was invented.
+    for fiction in ["unidentified:", "unsupported:", "unavailable:", "silent:", "mbim:"] {
+        assert!(
+            !panel.code.contains(fiction),
+            "the page still keys on {fiction:?}, which nothing writes",
+        );
+    }
+}
+
+/// A modem reports `fallback` only when the matrix has no entry for its
+/// (family, carrier) pair -- the pair the agent itself looks up.
+///
+/// This is what decides whether a human is interrupted, so the two ways of
+/// being wrong both matter. A recognised family is not enough: `UFI103S` is a
+/// `ModemFamily` variant with no rules in the built-in matrix. And a rule that
+/// says `probe` is still a rule: `EC20` outside China resolves to
+/// `Generic-International`, which somebody characterised as "find out", and
+/// that is a decision rather than an open question.
+#[tokio::test]
+async fn a_modem_says_whether_the_matrix_has_heard_of_its_combination() {
+    fn modem(imei: &str, family: &str, home_mcc: u16, home_mnc: u16) -> LocalModem {
+        LocalModem {
+            imei: imei.into(),
+            family: family.into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
+            iccid: None,
+            state: "registered".into(),
+            last_seen: Some(1_700_000_000_000),
+            mcc: Some(home_mcc),
+            mnc: Some(home_mnc),
+            home_mcc: Some(home_mcc),
+            home_mnc: Some(home_mnc),
+            imsi: None,
+            discovery: "qmi".into(),
+            manageable: true,
+            control_port: Some("/dev/cdc-wdm0".into()),
+        }
+    }
+
+    let app = router(Arc::new(MemoryInbox {
+        modems: vec![
+            // Measured on the bench and carried in the built-in matrix.
+            modem("867018069509705", "EC20", 460, 0),
+            // Also a rule, and one that says probe: outside China every
+            // carrier resolves to Generic-International, which EC20 has an
+            // entry for. Not an open question, so not a badge.
+            modem("867018069514820", "EC20", 310, 260),
+            // A recognised family with no rules at all in the matrix.
+            modem("862547055142811", "UFI103S", 460, 0),
+            // Hardware the matrix has never heard of.
+            modem("867018069509706", "SIM7600G", 460, 0),
+        ],
+        ..MemoryInbox::default()
+    }));
+
+    let status = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(body["modems"][0]["capability_origin"], "rule");
+    assert_eq!(body["modems"][0]["carrier_profile"], "CN-Mobile");
+
+    assert_eq!(
+        body["modems"][1]["capability_origin"], "rule",
+        "a rule that says probe is still a rule and must not raise a flag"
+    );
+    assert_eq!(body["modems"][1]["carrier_profile"], "Generic-International");
+
+    assert_eq!(
+        body["modems"][2]["capability_origin"], "fallback",
+        "a recognised family with no rules is exactly the case worth reporting"
+    );
+
+    assert_eq!(body["modems"][3]["capability_origin"], "fallback");
+    // The pair a new rule has to be keyed on has to survive to the operator.
+    assert_eq!(body["modems"][3]["family"], "SIM7600G");
+    assert_eq!(body["modems"][3]["carrier_profile"], "CN-Mobile");
+}
+
 struct RecordingActions {
     sent: Mutex<Vec<(String, String)>>,
     at: Mutex<Vec<String>>,
@@ -2596,7 +2723,13 @@ impl Actions for RecordingActions {
         Ok(CandidateClaimResult { candidate_key })
     }
 
-    fn send_sms(&self, to: String, body: String, _imei: Option<String>) -> Result<(), PanelError> {
+    fn send_sms(
+        &self,
+        to: String,
+        body: String,
+        _imei: Option<String>,
+        _commission: bool,
+    ) -> Result<(), PanelError> {
         self.sent.lock().expect("sent").push((to, body));
         Ok(())
     }
@@ -2605,7 +2738,12 @@ impl Actions for RecordingActions {
         Ok(())
     }
 
-    fn at_command(&self, _imei: Option<String>, command: String) -> Result<AtResult, PanelError> {
+    fn at_command(
+        &self,
+        _imei: Option<String>,
+        command: String,
+        _force: bool,
+    ) -> Result<AtResult, PanelError> {
         self.at.lock().expect("at").push(command.clone());
         Ok(AtResult {
             port: "/dev/ttyUSB2".into(),
@@ -2816,13 +2954,24 @@ async fn panel_runs_an_at_command() {
 async fn panel_reports_a_rejected_at_command_as_a_reply() {
     struct Rejecting;
     impl Actions for Rejecting {
-        fn send_sms(&self, _: String, _: String, _: Option<String>) -> Result<(), PanelError> {
+        fn send_sms(
+        &self,
+        _: String,
+        _: String,
+        _: Option<String>,
+        _commission: bool,
+    ) -> Result<(), PanelError> {
             Ok(())
         }
         fn restart_modem(&self, _: String) -> Result<(), PanelError> {
             Ok(())
         }
-        fn at_command(&self, _: Option<String>, command: String) -> Result<AtResult, PanelError> {
+        fn at_command(
+            &self,
+            _: Option<String>,
+            command: String,
+            _force: bool,
+        ) -> Result<AtResult, PanelError> {
             Ok(AtResult {
                 port: "/dev/ttyUSB2".into(),
                 command,
@@ -3039,13 +3188,24 @@ async fn panel_scans_for_operators() {
 async fn panel_reports_a_busy_modem_as_busy_not_offline() {
     struct Busy;
     impl Actions for Busy {
-        fn send_sms(&self, _: String, _: String, _: Option<String>) -> Result<(), PanelError> {
+        fn send_sms(
+        &self,
+        _: String,
+        _: String,
+        _: Option<String>,
+        _commission: bool,
+    ) -> Result<(), PanelError> {
             Ok(())
         }
         fn restart_modem(&self, _: String) -> Result<(), PanelError> {
             Ok(())
         }
-        fn at_command(&self, _: Option<String>, command: String) -> Result<AtResult, PanelError> {
+        fn at_command(
+            &self,
+            _: Option<String>,
+            command: String,
+            _force: bool,
+        ) -> Result<AtResult, PanelError> {
             Ok(AtResult {
                 port: "/dev/ttyUSB2".into(),
                 command,
@@ -3109,6 +3269,10 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
         modems: vec![LocalModem {
             imei: "867018069509705".into(),
             family: "EC20".into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
             iccid: None,
             state: "Registered".into(),
             last_seen: Some(1_700_000_000_000),

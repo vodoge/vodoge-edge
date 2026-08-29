@@ -331,11 +331,21 @@ fn anchors_from(files: &[(&str, &str)]) -> Vec<TrustAnchor> {
     anchors
 }
 
+/// Distinguishes two directories asked for in the same nanosecond.
+///
+/// 🔴 The clock alone was not enough, and the way it failed was ugly. `tag` is
+/// derived from the *number* of anchor files, so several tests ask for
+/// `anchors-1`; the test binary runs them on threads in one process, so the
+/// pid matches too; and `SystemTime` on macOS repeats often enough that two of
+/// them landed in one directory. The anchors one test wrote were then loaded
+/// by another, and
+/// `a_certificate_from_an_authority_we_do_not_hold_is_refused` found the CI
+/// root it is supposed to be missing and passed the verification it exists to
+/// refuse. Intermittently: three runs in five were green.
+static NEXT_TEMP_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn temp_dir(tag: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or_default();
+    let unique = NEXT_TEMP_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("t032-{tag}-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     dir

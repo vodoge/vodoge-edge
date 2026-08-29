@@ -201,6 +201,7 @@ dependencies = [
  "edge-proxy",
  "edge-store",
  "edge-uplink",
+ "libc",
  "rustls",
  "rustls-pemfile",
  "serde",

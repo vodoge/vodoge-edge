@@ -18,6 +18,7 @@ edge-panel = { path = "../edge-panel" }
 edge-proxy = { path = "../edge-proxy" }
 edge-store = { path = "../edge-store" }
 edge-uplink = { path = "../edge-uplink" }
+libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }

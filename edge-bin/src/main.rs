@@ -29,7 +29,7 @@ mod linux {
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
-    use edge_core::{assemble, CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
+    use edge_core::{CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
     use edge_modem::{
         collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice, Es9pClient,
         EsimLocalInfo, NasRegistrationState, OperatingMode, QmiClient,
@@ -39,8 +39,8 @@ mod linux {
         CandidateClaimResult, RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
     };
     use edge_store::{
-        DurableOutbox, LocalMessage, LocalModem, LocalModemDiscovery, ManualModemProfile,
-        QueueError, Store,
+        CardPolicy as StoredCardPolicy, DurableOutbox, LocalMessage, LocalModem,
+        LocalModemDiscovery, ManualModemProfile, QueueError, Store,
     };
     use serde_json::Value as JsonValue;
     use edge_uplink::dial::{DialError, Socket};
@@ -49,7 +49,10 @@ mod linux {
     use edge_uplink::worker::{Outbox, RetainedRecord, UplinkWorker};
     use edge_uplink::{EnvelopeId, RetentionClass, UplinkAck, UplinkError};
     use rustls_pemfile::{certs, pkcs8_private_keys};
-    use vodoge_contract::{Envelope, EsimInventoryPayload, MessageKind, PROTOCOL_VERSION};
+    use vodoge_contract::{
+        CardPolicy as ContractCardPolicy, Envelope, EsimInventoryPayload, MessageKind,
+        PROTOCOL_VERSION,
+    };
 
     const DEVICE_ID: &str = "b0000000-0000-4000-8000-00000000000b";
 
@@ -127,13 +130,6 @@ mod linux {
     ///
     /// `slot` is its position in the pass, kept because the row that gets
     /// deleted afterwards has to be the row it was actually read from.
-    struct InboundFragment {
-        slot: usize,
-        encoding: &'static str,
-        fingerprint: String,
-        part: ConcatPart,
-    }
-
     struct SharedStore(Mutex<Store>);
 
     impl Inbox for SharedStore {
@@ -789,9 +785,61 @@ mod linux {
         /// been restarted, so the two desynced sticks on 2026-08-23 could not
         /// be named at all and the recovery answered `modem_not_found`.
         store: Arc<SharedStore>,
+        /// The capability matrix as it currently stands, including anything
+        /// the cloud has pushed.
+        ///
+        /// Held so the LAN panel's own send is decided by the same three
+        /// layers the cloud's is. Without it the panel was the way round the
+        /// ledger: a pairing nobody has measured could not be sent on from
+        /// the console and could be sent on from a browser on the same
+        /// network as the box, which is not the more trusted of the two.
+        ///
+        /// Shared rather than rebuilt here, and that distinction has bitten
+        /// before -- see the note where this is created: two sites each
+        /// building `CapabilityMatrix::builtin()` is how a pushed matrix
+        /// changed the executor's routing and nothing else.
+        matrix: Arc<Mutex<CapabilityMatrix>>,
     }
 
     impl RadioPort {
+        /// `Err` when the three layers do not allow this operation.
+        ///
+        /// Sits on the port rather than in the agent because both entry points
+        /// need it and only one of them is the agent. The agent keeps its own
+        /// copy of the rule for the commands it executes; this is the same
+        /// resolution, reached from the panel.
+        fn refuse_unsupported(
+            &self,
+            imei: Option<&str>,
+            operation: edge_core::Operation,
+        ) -> Result<(), SendError> {
+            let context = {
+                let mut port = RadioPort {
+                    radio: self.radio.clone(),
+                    proxies: self.proxies.clone(),
+                    store: self.store.clone(),
+                    matrix: self.matrix.clone(),
+                };
+                SendPort::operating_context(&mut port, imei)?
+            };
+            let ledger = {
+                let matrix = self.matrix.lock().expect("capability matrix");
+                edge_core::SupportLedger::from_matrix(&matrix)
+            };
+            let registry = edge_core::builtin_strategy_registry(ledger)
+                .map_err(|error| SendError::new("strategy_registry_invalid", error.to_string()))?;
+            match registry
+                .resolve(&context.family, &context.carrier, &context.subscription, operation)
+                .support
+            {
+                edge_core::Support::Supported(_) => Ok(()),
+                edge_core::Support::Unsupported { by, reason } => Err(SendError::new(
+                    format!("{}_refused_by_{}", operation.wire(), by.wire()),
+                    reason,
+                )),
+            }
+        }
+
         /// Read the chip back after a switch, waiting for it to come back.
         ///
         /// `set_profile` asks the card for a REFRESH, so the card re-initialises
@@ -865,7 +913,15 @@ mod linux {
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     })
                 }),
-                None => Actions::at_command(self, Some(imei.to_string()), command.to_string())
+                // Forced, because this is the internal primitive rather than
+                // an entry point. Both raw-console entries classify before
+                // they reach it, and everything else that lands here is a
+                // purpose-built operation -- `AT+COPS=2` for a re-register,
+                // `AT+QCFG="usbnet"` for a mode read -- which carries its own
+                // command kind and its own confirmation in the console. Left
+                // unforced, the classifier would refuse this agent's own
+                // buttons while the console's text box still worked.
+                None => Actions::at_command(self, Some(imei.to_string()), command.to_string(), true)
                     .map_err(action_failed),
             }
         }
@@ -1065,7 +1121,17 @@ mod linux {
             let reference = (NEXT_MESSAGE_REFERENCE.fetch_add(1, Ordering::Relaxed) & 0xff) as u8;
             let pdu = encode_submit(&send.to, &send.body, reference)
                 .map_err(|error| SendError::new("pdu_encode_failed", error.to_string()))?;
-            let assigned = self
+            // A module with no QMI interface is not a module that cannot send.
+            // The EC200U series exposes no `cdc-wdm` at all -- its USB
+            // composition simply has none -- so every structured operation
+            // this agent performs was unavailable on it, and a China Telecom
+            // card in one could be seen, identified and registered while
+            // nothing could be asked of it. The AT path is for exactly those.
+            //
+            // Tried only after QMI, and only when QMI could not find the
+            // module: a module that has QMI and refused is a refusal to
+            // report, not a reason to try a second way in.
+            let assigned = match self
                 .radio
                 .with_client(send.modem_imei.as_deref(), |client| {
                     client.send_sms(0x06, &pdu).map_err(|error| {
@@ -1076,7 +1142,31 @@ mod linux {
                         ));
                         described
                     })
-                })?;
+                }) {
+                Ok(assigned) => assigned,
+                Err(error) if error.reason_code == "modem_not_found" => {
+                    let to = send.to.clone();
+                    let body = send.body.clone();
+                    let outcome = self.radio.with_at_port(send.modem_imei.as_deref(), |port| {
+                        edge_modem::send_sms_over_at(port, &to, &body, reference)
+                            .map_err(|error| SendError::new("at_send_failed", error.to_string()))
+                    })?;
+                    return json_details(&serde_json::json!({
+                        "message_reference": outcome
+                            .reference
+                            .map(u16::from)
+                            .unwrap_or(u16::from(reference)),
+                        "requested_reference": reference,
+                        // The AT submission asks for no status report, so a
+                        // later `+CDS` is not expected and must not be waited
+                        // for. Said here rather than left to be inferred from
+                        // its absence.
+                        "status_report_requested": false,
+                        "transport": "at",
+                    }));
+                }
+                Err(error) => return Err(error),
+            };
             // The modem answers with the reference it actually used. It is
             // normally the one in the PDU -- RAW_SEND transmits the bytes as
             // given -- but where firmware substitutes its own, the report will
@@ -1139,12 +1229,82 @@ mod linux {
         // console and one from the panel cannot behave differently — there is
         // one implementation, not two.
 
+        /// What module this is, on whose network, with what plan on the card.
+        ///
+        /// Read from the local store rather than the hardware: the poll loop
+        /// has already established all three and re-reading them here would
+        /// take the radio away from it to learn something already known.
+        ///
+        /// The carrier comes from the **home** network, not the serving one.
+        /// What a card is entitled to do belongs to its subscription, and a
+        /// roaming card keeps its own operator's rules -- the same reason the
+        /// capability matrix is keyed that way.
+        fn operating_context(
+            &mut self,
+            imei: Option<&str>,
+        ) -> Result<edge_core::OperatingContext, SendError> {
+            let store = self.store.0.lock().expect("store");
+            let modems = store
+                .list_local_modems()
+                .map_err(|error| SendError::new("store_unavailable", error.to_string()))?;
+            let modem = match imei {
+                Some(imei) => modems.iter().find(|modem| modem.imei == imei),
+                // No IMEI named and exactly one module present is
+                // unambiguous; more than one is not, and picking would decide
+                // which card a message is billed to by list order.
+                None if modems.len() == 1 => modems.first(),
+                None => {
+                    return Err(SendError::new(
+                        "modem_ambiguous",
+                        format!("{} modules are present, so one has to be named", modems.len()),
+                    ))
+                }
+            }
+            .ok_or_else(|| {
+                SendError::new(
+                    "modem_not_found",
+                    format!("no module in the inventory for {imei:?}"),
+                )
+            })?;
+
+            let carrier = CarrierProfile::from(
+                modem
+                    .home_mcc
+                    .zip(modem.home_mnc)
+                    .map(|(mcc, mnc)| Network::new(mcc as u16, mnc as u16).carrier_profile())
+                    .unwrap_or("Generic-International"),
+            );
+
+            // The plan is keyed on the card, so a module with no readable
+            // ICCID has no declaration -- which withholds nothing, and leaves
+            // the ledger and the hardware to decide.
+            let subscription = modem
+                .iccid
+                .as_deref()
+                .and_then(|iccid| store.card_policy(iccid).ok().flatten())
+                .map(|policy| edge_core::SubscriptionCapability {
+                    sms_send: policy.sms_send,
+                    sms_receive: policy.sms_receive,
+                    data: policy.data,
+                    voice: policy.voice,
+                })
+                .unwrap_or_default();
+
+            Ok(edge_core::OperatingContext {
+                family: ModemFamily::from(modem.family.as_str()),
+                carrier,
+                subscription,
+            })
+        }
+
         fn run_at(
             &mut self,
             imei: &str,
             command: &str,
             timeout_ms: Option<i64>,
+            force: bool,
         ) -> Result<JsonValue, SendError> {
+            refuse_disruptive_at(command, force)?;
             let result = self.at_exchange(imei, command, timeout_ms)?;
             json_details(&result)
         }
@@ -1209,7 +1369,13 @@ mod linux {
             };
             // Registering on a chosen network takes far longer than a normal
             // AT round trip, and the module stays silent until it settles.
-            self.run_at(imei, &command, Some(120_000))
+            //
+            // Forced: `select_operator` is its own command kind with its own
+            // confirmation, and the string it builds is `AT+COPS=`, which the
+            // classifier holds back for the raw console. The guard is there to
+            // catch a typed command nobody meant, not to disable the button
+            // whose entire purpose is this.
+            self.run_at(imei, &command, Some(120_000), true)
         }
 
         fn modem_report(&mut self, imei: &str) -> Result<JsonValue, SendError> {
@@ -1384,6 +1550,56 @@ mod linux {
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>(),
                 "rescan": "requested",
+            }))
+        }
+
+        /// Store the pushed card policy set, replacing whatever was held.
+        ///
+        /// The receipt names the ICCIDs actually written rather than only a
+        /// count. A policy set is keyed on cards this device may well not
+        /// have: the cloud pushes the tenant's whole set to every device, so
+        /// "stored 4" tells an operator nothing about whether the card they
+        /// just edited is one of them, while the list can be compared against
+        /// the modems on the same page.
+        fn update_card_policies(
+            &mut self,
+            policy_version: &str,
+            policies: &[ContractCardPolicy],
+        ) -> Result<JsonValue, SendError> {
+            let stored: Vec<StoredCardPolicy> = policies
+                .iter()
+                .map(|policy| StoredCardPolicy {
+                    iccid: policy.iccid.clone(),
+                    cellular_enabled: policy.cellular_enabled,
+                    vertical: policy.vertical.clone(),
+                    apn: policy.apn.clone(),
+                    // What the operator declared this plan is sold as doing.
+                    // Absent from an older console, which is the same as
+                    // declaring nothing and withholds nothing. Each field
+                    // stays three-valued all the way down: `None` is
+                    // undeclared, and only `Some(false)` takes anything away.
+                    sms_send: policy.capability.as_ref().and_then(|it| it.sms_send),
+                    sms_receive: policy.capability.as_ref().and_then(|it| it.sms_receive),
+                    data: policy.capability.as_ref().and_then(|it| it.data),
+                    voice: policy.capability.as_ref().and_then(|it| it.voice),
+                })
+                .collect();
+            let written = self
+                .store
+                .0
+                .lock()
+                .expect("store")
+                .replace_card_policies(&stored, policy_version, unix_ms())
+                .map_err(|error| {
+                    SendError::new("card_policy_not_stored", error.to_string())
+                })?;
+            json_details(&serde_json::json!({
+                "policy_version": policy_version,
+                "stored": written,
+                "iccids": stored
+                    .iter()
+                    .map(|policy| policy.iccid.clone())
+                    .collect::<Vec<_>>(),
             }))
         }
 
@@ -2744,11 +2960,31 @@ mod linux {
             Ok(CandidateClaimResult { candidate_key })
         }
 
-        fn send_sms(&self, to: String, body: String, imei: Option<String>) -> Result<(), PanelError> {
+        fn send_sms(
+            &self,
+            to: String,
+            body: String,
+            imei: Option<String>,
+            commission: bool,
+        ) -> Result<(), PanelError> {
+            // The same three layers the cloud's send goes through. The panel
+            // reaches the modem by a different trait, so a check written into
+            // only the relay would leave this path able to send on a pairing
+            // nobody has measured -- and this path is a browser on the edge
+            // machine's LAN, not a more trusted one.
+            //
+            // `commission` is the one way past it, and it is how a pairing
+            // gets into the ledger in the first place: somebody deliberately
+            // sends on an unmeasured combination to find out what happens.
+            if !commission {
+                self.refuse_unsupported(imei.as_deref(), edge_core::Operation::SmsSend)
+                    .map_err(|error| PanelError::Action(error.message))?;
+            }
             let mut port = RadioPort {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
                 store: self.store.clone(),
+                matrix: self.matrix.clone(),
             };
             SendPort::send_sms(
                 &mut port,
@@ -2768,6 +3004,7 @@ mod linux {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
                 store: self.store.clone(),
+                matrix: self.matrix.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
                 .map_err(|error| PanelError::Action(error.to_string()))
@@ -2931,7 +3168,10 @@ mod linux {
             &self,
             imei: Option<String>,
             command: String,
+            force: bool,
         ) -> Result<AtResult, PanelError> {
+            refuse_disruptive_at(&command, force)
+                .map_err(|error| PanelError::Action(error.message))?;
             self.radio
                 .with_at_port(imei.as_deref(), |port| {
                     let path = port.path().display().to_string();
@@ -3008,15 +3248,39 @@ mod linux {
         let (radio, rescans) = Radio::new();
         start_at_lease(&radio);
         let proxies = Arc::new(ProxyRuntime::new(radio.clone())?);
+        let live_matrix = Arc::new(Mutex::new(
+            CapabilityMatrix::builtin().map_err(|error| error.to_string())?,
+        ));
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
             proxies: proxies.clone(),
             store: shared.clone(),
+            matrix: live_matrix.clone(),
         })));
+        // The capability matrix as it currently stands, republished here every
+        // time a command may have replaced it.
+        //
+        // The executor owns the authoritative copy, but nothing outside the
+        // uplink thread may reach in for it: `handle_envelope` holds that mutex
+        // for the whole of a command -- an operator scan is 150 seconds -- and
+        // underneath it the port locks the store, so a poll pass that waited on
+        // the executor while holding the store would deadlock rather than wait.
+        //
+        // This mutex is therefore a leaf: it is locked on its own, only ever to
+        // clone the matrix out or write a new one in, and never while another
+        // lock is held. That is what makes it safe regardless of the order
+        // anything else takes.
+        //
+        // Without it, `update_capability_matrix` succeeded and changed nothing
+        // the cloud could see: both reporting sites built a fresh
+        // `CapabilityMatrix::builtin()`, so the capabilities in DeviceState and
+        // the `capability_matrix_version` on Resume stayed at the compiled-in
+        // version while the executor routed by the pushed one.
         let panel_actions = Arc::new(RadioPort {
             radio: radio.clone(),
             proxies: proxies.clone(),
             store: shared.clone(),
+            matrix: live_matrix.clone(),
         });
 
         // The panel reads this to report cloud vs local, so what it shows is the
@@ -3026,10 +3290,17 @@ mod linux {
         let panel_bind = env("VODOGE_EDGE_PANEL", "0.0.0.0:8743");
         let panel_store = shared.clone();
         let panel_online = uplink_online.clone();
+        let panel_matrix = live_matrix.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("tokio");
             if let Err(error) =
-                runtime.block_on(serve(panel_bind, panel_store, Some(panel_actions), panel_online))
+                runtime.block_on(serve(
+                    panel_bind,
+                    panel_store,
+                    Some(panel_actions),
+                    panel_online,
+                    panel_matrix,
+                ))
             {
                 log_error(format!("panel: {error}"));
             }
@@ -3037,7 +3308,10 @@ mod linux {
 
         let uplink_outbox = outbox.clone();
         let uplink_executor = executor.clone();
-        std::thread::spawn(move || uplink_loop(uplink_outbox, uplink_executor, uplink_online));
+        let uplink_matrix = live_matrix.clone();
+        std::thread::spawn(move || {
+            uplink_loop(uplink_outbox, uplink_executor, uplink_matrix, uplink_online)
+        });
 
         log_line(format!(
             "vodoge-edge panel on {} device_id={DEVICE_ID}",
@@ -3053,7 +3327,7 @@ mod linux {
         // of all time since boot.
         let mut memory = PollMemory::default();
         loop {
-            if let Err(error) = poll_modems(&shared, &outbox, &radio, &mut memory) {
+            if let Err(error) = poll_modems(&shared, &outbox, &radio, &live_matrix, &mut memory) {
                 log_error(format!("poll: {error}"));
             }
             // Measured rather than assumed to be the poll interval: a rescan
@@ -3199,6 +3473,17 @@ mod linux {
         cpu: Option<CpuTimes>,
         /// Last successful public address lookup and when it happened.
         public_ip: Option<(String, Instant)>,
+        /// Previous `/proc/net/dev` totals and when they were taken, so
+        /// throughput is a rate over the interval rather than a counter that
+        /// only ever grows.
+        net: Option<(NetTotals, Instant)>,
+    }
+
+    /// Received and transmitted bytes summed across the host's own interfaces.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct NetTotals {
+        rx: u64,
+        tx: u64,
     }
 
     /// The last thing known about a module that is not answering now.
@@ -3240,6 +3525,7 @@ mod linux {
         shared: &Arc<SharedStore>,
         outbox: &Arc<Mutex<DurableOutbox>>,
         radio: &Radio,
+        live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         memory: &mut PollMemory,
     ) -> Result<(), String> {
         let now = unix_ms();
@@ -3293,9 +3579,9 @@ mod linux {
                     }
                     record_discovery(
                         shared,
-                        "qmi",
+                        DiscoveryTransport::Qmi,
                         path,
-                        "manageable",
+                        DiscoveryState::Manageable,
                         Some(&snapshot.imei),
                         "QMI identity probe succeeded",
                         now,
@@ -3310,9 +3596,9 @@ mod linux {
                     log_error(format!("poll {} FAIL {error}", path.display()));
                     record_discovery(
                         shared,
-                        "qmi",
+                        DiscoveryTransport::Qmi,
                         path,
-                        "probe_failed",
+                        DiscoveryState::ProbeFailed,
                         None,
                         error,
                         now,
@@ -3352,9 +3638,9 @@ mod linux {
                     upsert_at_only_local_modem(shared, &snapshot, &at_path, now)?;
                     record_discovery(
                         shared,
-                        "at",
+                        DiscoveryTransport::At,
                         &at_path,
-                        "at_only",
+                        DiscoveryState::AtOnly,
                         Some(&snapshot.imei),
                         "AT identified the modem; QMI-managed actions are unavailable",
                         now,
@@ -3387,9 +3673,9 @@ mod linux {
                             log_error(format!("poll {} silent, unidentified", at_path.display()));
                             record_discovery(
                                 shared,
-                                "at",
+                                DiscoveryTransport::At,
                                 &at_path,
-                                "probe_failed",
+                                DiscoveryState::ProbeFailed,
                                 None,
                                 "AT+CGSN did not return a usable IMEI",
                                 now,
@@ -3437,7 +3723,31 @@ mod linux {
         }
 
         let host = host_stats(memory);
-        enqueue_device_state(outbox, &snapshots, &host, now)?;
+        fill_msisdn(shared, radio, &mut snapshots);
+        fill_apn_contexts(shared, radio, &mut snapshots);
+        // Modules the QMI sweep never reached. Their store fills up and stops
+        // accepting messages with nothing upstream aware of it, which is how
+        // China Telecom's reply sat unread on this bench with the agent
+        // reporting the stick as healthy.
+        for snapshot in &snapshots {
+            if snapshot.manageable {
+                continue;
+            }
+            match sweep_inbox_over_at(shared, outbox, radio, &snapshot.imei, now) {
+                Ok(0) => {}
+                Ok(carried) => log_line(format!(
+                    "collected {carried} sms over AT from {}",
+                    snapshot.imei
+                )),
+                // Never fatal to the pass: a module that would not answer its
+                // store is still a module whose state belongs upstream.
+                Err(error) => log_line(format!("at inbox {}: {error}", snapshot.imei)),
+            }
+        }
+        // Cloned out under its own lock and then used, rather than held across
+        // the enqueue: see the note where `live_matrix` is created.
+        let matrix = live_matrix.lock().expect("capability matrix").clone();
+        enqueue_device_state(outbox, &matrix, &snapshots, &host, now)?;
         if qmi_paths.is_empty() && snapshots.is_empty() {
             return Err("no /dev/cdc-wdm* and no AT control port answered".into());
         }
@@ -3458,6 +3768,13 @@ mod linux {
             .upsert_local_modem(&LocalModem {
                 imei: snapshot.imei.clone(),
                 family: snapshot.family.clone(),
+                firmware: snapshot.firmware.clone(),
+                msisdn: snapshot.msisdn.clone(),
+                msisdn_iccid: snapshot
+                    .msisdn
+                    .as_ref()
+                    .and(snapshot.iccid.clone()),
+                apn_contexts: snapshot.apn_contexts.clone(),
                 iccid: snapshot.iccid.clone(),
                 state: snapshot.state.to_string(),
                 last_seen: Some(now),
@@ -3475,24 +3792,86 @@ mod linux {
 
     /// Retain an endpoint-level discovery result so the panel can show a
     /// real hardware problem before the module has supplied an IMEI.
+    /// How an endpoint was reached when it was recorded.
+    ///
+    /// Deliberately a wider set than [`Discovery`], which says how a *modem*
+    /// answered. `Serial` is an endpoint that has produced no IMEI and is
+    /// therefore not modem inventory at all.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DiscoveryTransport {
+        Qmi,
+        At,
+        Serial,
+    }
+
+    impl DiscoveryTransport {
+        fn wire(self) -> &'static str {
+            match self {
+                Self::Qmi => "qmi",
+                Self::At => "at",
+                Self::Serial => "serial",
+            }
+        }
+    }
+
+    /// What the last observation of one endpoint established.
+    ///
+    /// This is the whole vocabulary. It is an enum because the panel had come
+    /// to defend against fourteen spellings -- `managed`, `failed`, `error`,
+    /// `unavailable`, `silent`, `unidentified`, `unsupported`, `pending` and
+    /// more -- of which nine were never written by anything. An untyped string
+    /// crossing that boundary is what let the two vocabularies drift apart
+    /// without either side being wrong about anything it could check.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DiscoveryState {
+        /// QMI answered. Everything the agent can do is available.
+        Manageable,
+        /// A transport was tried and the module did not identify itself.
+        ProbeFailed,
+        /// AT answered but QMI did not: identity is known, QMI-only actions
+        /// are out of reach.
+        AtOnly,
+        /// A modem-shaped serial endpoint that nobody has approved for
+        /// probing. Recorded, never written to.
+        Found,
+        /// Approved by an operator; the next poll will try an identity probe.
+        Claimed,
+    }
+
+    impl DiscoveryState {
+        fn wire(self) -> &'static str {
+            match self {
+                Self::Manageable => "manageable",
+                Self::ProbeFailed => "probe_failed",
+                Self::AtOnly => "at_only",
+                Self::Found => "found",
+                Self::Claimed => "claimed",
+            }
+        }
+    }
+
     fn record_discovery(
         shared: &Arc<SharedStore>,
-        transport: &str,
+        transport: DiscoveryTransport,
         control_port: &Path,
-        state: &str,
+        state: DiscoveryState,
         imei: Option<&str>,
         detail: impl Into<String>,
         now: i64,
     ) {
         let usb_device = match transport {
-            "qmi" => edge_modem::usb_device_of_qmi(control_port),
-            "at" => edge_modem::usb_device_of_at(control_port),
-            _ => None,
+            DiscoveryTransport::Qmi => edge_modem::usb_device_of_qmi(control_port),
+            DiscoveryTransport::At => edge_modem::usb_device_of_at(control_port),
+            // Serial rows are written by `record_manual_serial_candidate`,
+            // which has the live candidate and so already knows its USB
+            // device. Nothing reaches here with it.
+            DiscoveryTransport::Serial => None,
         };
         let identity = usb_device
             .as_deref()
             .and_then(edge_modem::usb_identity);
         let path = control_port.display().to_string();
+        let transport = transport.wire();
         let candidate_key = match usb_device.as_deref() {
             Some(usb) => format!("{transport}:usb:{usb}"),
             None => format!("{transport}:port:{path}"),
@@ -3508,7 +3887,7 @@ mod linux {
                 control_port: path,
                 vendor_id: identity.as_ref().map(|identity| identity.vendor.clone()),
                 product_id: identity.as_ref().map(|identity| identity.product.clone()),
-                state: state.to_string(),
+                state: state.wire().to_string(),
                 imei: imei.map(str::to_string),
                 detail: detail.into(),
                 last_seen: now,
@@ -3553,11 +3932,16 @@ mod linux {
             .upsert_local_modem_discovery(&LocalModemDiscovery {
                 candidate_key,
                 usb_device: candidate.usb_device.clone(),
-                transport: "serial".into(),
+                transport: DiscoveryTransport::Serial.wire().into(),
                 control_port: path,
                 vendor_id: candidate.vendor_id.clone(),
                 product_id: candidate.product_id.clone(),
-                state: if approved { "claimed" } else { "found" }.into(),
+                state: if approved {
+                    DiscoveryState::Claimed.wire()
+                } else {
+                    DiscoveryState::Found.wire()
+                }
+                .into(),
                 imei: None,
                 detail: facts.join("; "),
                 last_seen: now,
@@ -3573,9 +3957,10 @@ mod linux {
     /// overwrite an unrelated sibling merely because they share a stick.
     fn manual_candidate_key(candidate: &edge_modem::AtPortCandidate) -> String {
         let path = candidate.path.display();
+        let transport = DiscoveryTransport::Serial.wire();
         match candidate.usb_device.as_deref() {
-            Some(usb) => format!("serial:usb:{usb}:port:{path}"),
-            None => format!("serial:port:{path}"),
+            Some(usb) => format!("{transport}:usb:{usb}:port:{path}"),
+            None => format!("{transport}:port:{path}"),
         }
     }
 
@@ -3629,8 +4014,8 @@ mod linux {
         discovery: &LocalModemDiscovery,
         candidate: &edge_modem::AtPortCandidate,
     ) -> bool {
-        discovery.transport == "serial"
-            && discovery.state == "found"
+        discovery.transport == DiscoveryTransport::Serial.wire()
+            && discovery.state == DiscoveryState::Found.wire()
             && discovery.candidate_key == manual_candidate_key(candidate)
             && discovery.usb_device == candidate.usb_device
             && discovery.vendor_id == candidate.vendor_id
@@ -3689,11 +4074,11 @@ mod linux {
             let found = LocalModemDiscovery {
                 candidate_key: manual_candidate_key(&candidate),
                 usb_device: candidate.usb_device.clone(),
-                transport: "serial".into(),
+                transport: DiscoveryTransport::Serial.wire().into(),
                 control_port: candidate.path.display().to_string(),
                 vendor_id: candidate.vendor_id.clone(),
                 product_id: candidate.product_id.clone(),
-                state: "found".into(),
+                state: DiscoveryState::Found.wire().into(),
                 imei: None,
                 detail: String::new(),
                 last_seen: 1,
@@ -3702,7 +4087,7 @@ mod linux {
             assert!(
                 !manual_discovery_matches(
                     &LocalModemDiscovery {
-                        state: "claimed".into(),
+                        state: DiscoveryState::Claimed.wire().into(),
                         ..found
                     },
                     &candidate,
@@ -3771,6 +4156,14 @@ mod linux {
             discovery: Discovery::At,
             manageable: false,
             usb: seen.usb.clone(),
+            // Identity that belongs to the hardware rather than to this pass.
+            // A module that has stopped answering still has the firmware it
+            // had; the projection keeps the last non-null anyway, and sending
+            // None here would be a reading rather than an absence.
+            firmware: None,
+            msisdn: None,
+            control_port: None,
+            apn_contexts: None,
         }
     }
 
@@ -3806,13 +4199,17 @@ mod linux {
         // thing an IMSI does not carry: where its MNC ends.
         let ef_ad = read_ef_ad_over_at(&mut port);
         let home = at_home_network(imsi.as_deref(), &ef_ad, &at_path.display().to_string());
-        let family = port
-            .command("AT+CGMM")
-            .ok()
-            .filter(edge_modem::AtExchange::succeeded)
-            .and_then(|exchange| exchange.lines.first().map(|line| line.trim().to_string()))
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| "unknown".to_string());
+        // Same derivation as the QMI path, and for the same reason: the model
+        // alone does not key the matrix. `AT+CGMM` answers "EC20F" where the
+        // matrix is keyed on "EC20", so the raw reply used to arrive upstream
+        // as its own family and `ModemFamily::from` -- an exact match -- turned
+        // it into `Other("EC20F")`. The stick then took the matrix fallback and
+        // reported every capability as `probe`, while the same hardware
+        // answering over QMI got the measured EC20 rules. Both sources go to
+        // `detect`, which is what reconciles the two paths.
+        let model = at_identity_line(&mut port, "AT+CGMM").unwrap_or_default();
+        let revision = at_identity_line(&mut port, "AT+CGMR").unwrap_or_default();
+        let family = at_family(&model, &revision);
         // Packet-switched registration first: this is an LTE module and
         // `+CEREG` is the domain it actually attaches on. `+CREG` is the
         // fallback for a module that answered nothing there.
@@ -3837,7 +4234,385 @@ mod linux {
             discovery: Discovery::At,
             manageable: false,
             usb: edge_modem::usb_device_of_at(at_path),
+            firmware: Some(revision.clone()).filter(|value| !value.is_empty()),
+            // Free here: the port is already open and the command is one more
+            // round trip on it.
+            msisdn: at_identity_line(&mut port, "AT+CNUM")
+                .and_then(|line| edge_modem::parse_cnum(&[line])),
+            control_port: Some(at_path.display().to_string()),
+            // Free here, like the number: the port is open and this is one
+            // more round trip on it.
+            apn_contexts: read_apn_contexts(&mut port),
         })
+    }
+
+    /// Refuse an AT command that reaches disruptive state, unless the caller
+    /// said `force`.
+    ///
+    /// One implementation for both entry points. The cloud relay and the LAN
+    /// panel reach the modem through different traits, and a check written
+    /// into only one of them would be a console the other way round: the panel
+    /// is on the edge machine's LAN, so it is not the less exposed of the two.
+    ///
+    /// The refusal names the classification rather than saying "no", because
+    /// the operator's next move is either to re-send with `force` or to
+    /// discover they meant a different command.
+    fn refuse_disruptive_at(command: &str, force: bool) -> Result<(), SendError> {
+        if force {
+            return Ok(());
+        }
+        match edge_core::classify_at_command(command).disruptive() {
+            None => Ok(()),
+            Some(kind) => Err(SendError::new(
+                format!("at_{}_refused", kind.wire()),
+                format!(
+                    "{command:?} {} and was not sent; re-send with force to mean it",
+                    kind.reason()
+                ),
+            )),
+        }
+    }
+
+    /// Fill in each module's own number, reading it only when it is not
+    /// already known for the card that is in the slot.
+    ///
+    /// Deliberately outside the probe. The QMI probe holds the modem arbiter
+    /// for its whole run, and reading `AT+CNUM` needs that same arbiter for
+    /// the module's serial port, so asking for it in there would wait on a
+    /// lock this thread is holding.
+    ///
+    /// Read once per card rather than once per poll: the number cannot change
+    /// while the same ICCID is in the same module, and this runs every eight
+    /// seconds. `msisdn_iccid` is what makes "already known" answerable --
+    /// on an eUICC a profile switch changes the ICCID under a module that has
+    /// not moved, and a number carried across that boundary would be shown
+    /// against a card it does not belong to.
+    ///
+    /// Every failure here is silent by design: a card that carries no number
+    /// is the common case, not a fault, and a module that would not answer
+    /// gets asked again next time.
+    fn fill_msisdn(shared: &Arc<SharedStore>, radio: &Radio, snapshots: &mut [ModemSnapshot]) {
+        let known = match shared.0.lock().expect("store").list_local_modems() {
+            Ok(modems) => modems,
+            Err(error) => {
+                log_error(format!("msisdn cache not read: {error}"));
+                return;
+            }
+        };
+        for snapshot in snapshots.iter_mut() {
+            if snapshot.msisdn.is_some() {
+                continue;
+            }
+            // The AT probe already asked on the port it had open, so a `None`
+            // there is an answer rather than an omission. Asking again here
+            // would be a second round trip every eight seconds for a card
+            // that has already said it has no number.
+            if snapshot.discovery == Discovery::At {
+                continue;
+            }
+            let stored = known.iter().find(|modem| modem.imei == snapshot.imei);
+            if let Some(stored) = stored {
+                // Same card as when it was read, so the stored answer stands
+                // -- including a stored `None`, which is a card that has
+                // already been asked and had nothing to say.
+                if stored.msisdn_iccid.is_some() && stored.msisdn_iccid == snapshot.iccid {
+                    snapshot.msisdn = stored.msisdn.clone();
+                    continue;
+                }
+            }
+            let read = radio.with_at_port(Some(&snapshot.imei), |port| {
+                Ok(port
+                    .command("AT+CNUM")
+                    .ok()
+                    .filter(edge_modem::AtExchange::succeeded)
+                    .and_then(|exchange| edge_modem::parse_cnum(&exchange.lines)))
+            });
+            match read {
+                Ok(number) => {
+                    snapshot.msisdn = number.clone();
+                    // Written even when the answer was nothing: that is the
+                    // fact that keeps the next poll from asking again.
+                    if let Err(error) = shared.0.lock().expect("store").set_modem_msisdn(
+                        &snapshot.imei,
+                        number.as_deref(),
+                        snapshot.iccid.as_deref(),
+                    ) {
+                        log_error(format!("msisdn not recorded: {error}"));
+                    }
+                }
+                Err(error) => log_line(format!(
+                    "msisdn for {} unavailable: {error}",
+                    snapshot.imei
+                )),
+            }
+        }
+    }
+
+    /// The module's packet data profiles, as JSON, or `None` if it would not
+    /// say.
+    ///
+    /// Serialised here rather than carried as a struct because it is stored,
+    /// sent and displayed as a block and nothing queries inside it.
+    fn read_apn_contexts(port: &mut edge_modem::AtPort) -> Option<String> {
+        let exchange = port
+            .command("AT+CGDCONT?")
+            .ok()
+            .filter(edge_modem::AtExchange::succeeded)?;
+        let contexts = edge_core::parse_cgdcont(&exchange.lines);
+        // An empty answer is still an answer: a module holding no contexts is
+        // a real state, and recording it as "not read" would leave an operator
+        // unable to tell it from an agent that never asked.
+        serde_json::to_string(&contexts).ok()
+    }
+
+    /// Collect a module's stored messages over AT.
+    ///
+    /// For modules the QMI sweep cannot reach: the EC200U series exposes no
+    /// `cdc-wdm`, so a message that arrives on one is delivered, stored, and
+    /// invisible. Proved on this bench -- China Telecom's reply to a balance
+    /// query sat unread in module storage with nothing able to read it.
+    ///
+    /// 🔴 **The orchestration here is a second copy of the QMI collector's,
+    /// and that is a deliberate, temporary choice rather than an oversight.**
+    /// Every primitive is shared -- `decode_deliver`, `fragment_fingerprint`,
+    /// `seen_before`, `assemble`, `enqueue_sms`, the ingest ledger -- because
+    /// those are where a second implementation would drift. What is duplicated
+    /// is the sequencing around them, and it was not extracted because the QMI
+    /// path is load-bearing for three sticks, has no test over its
+    /// orchestration, and could only have been refactored against a type
+    /// check. Consolidating the two is worth doing with a test in front of it.
+    ///
+    /// The two rules that matter are restated rather than assumed, because
+    /// getting either wrong loses messages:
+    ///
+    /// * A fragment whose siblings have not arrived stays on the module. The
+    ///   next pass completes it; deleting it loses half a message for good.
+    /// * A message our books already hold is deleted anyway. The store is
+    ///   small and a full one stops accepting new messages, so a slot we have
+    ///   already carried away must not be left occupying it.
+    fn sweep_inbox_over_at(
+        shared: &Arc<SharedStore>,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        radio: &Radio,
+        imei: &str,
+        now: i64,
+    ) -> Result<usize, String> {
+        let stored = radio
+            .with_at_port(Some(imei), |port| {
+                edge_modem::list_over_at(port)
+                    .map_err(|error| SendError::new("at_list_failed", error.to_string()))
+            })
+            .map_err(|error| error.message)?;
+
+        // Only what arrived. `AT+CMGL=4` asks for everything, and a store
+        // holding this module's own sent messages would otherwise have them
+        // decoded as deliveries and carried upstream as if somebody had sent
+        // them to us.
+        let received: Vec<_> = stored.into_iter().filter(|row| row.is_received()).collect();
+        if received.is_empty() {
+            return Ok(0);
+        }
+
+        let mut fragments: Vec<edge_core::InboundFragment> = Vec::with_capacity(received.len());
+        for (slot, row) in received.iter().enumerate() {
+            let decoded = edge_core::decode_deliver(&row.pdu);
+            log_line(format!(
+                "sms(at) from={} dcs={} encoding={} bytes={} udh={}",
+                decoded.peer,
+                decoded
+                    .dcs
+                    .map(|dcs| format!("{dcs:#04x}"))
+                    .unwrap_or_else(|| "none".into()),
+                decoded.encoding,
+                row.pdu.len(),
+                decoded.concat.is_some()
+            ));
+            let (ref_id, total, seq) = decoded.concat.unwrap_or((0, 1, 1));
+            let fingerprint = edge_modem::fragment_fingerprint(
+                &decoded.peer,
+                decoded.received_at,
+                ref_id,
+                total,
+                seq,
+                &decoded.body,
+            );
+            fragments.push(edge_core::InboundFragment {
+                slot,
+                encoding: decoded.encoding,
+                fingerprint,
+                part: ConcatPart {
+                    sender: decoded.peer,
+                    ref_id,
+                    total,
+                    seq,
+                    body: decoded.body,
+                    received_at: decoded.received_at,
+                },
+            });
+        }
+
+        let ingested = {
+            let store = shared.0.lock().expect("store");
+            let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+            for fragment in &fragments {
+                if counts.contains_key(&fragment.fingerprint) {
+                    continue;
+                }
+                let copies = store
+                    .ingested_sms_copies(imei, &fragment.fingerprint)
+                    .map_err(|e| e.to_string())?;
+                if copies > 0 {
+                    counts.insert(fragment.fingerprint.clone(), copies);
+                }
+            }
+            counts.into_iter().collect::<std::collections::HashMap<_, _>>()
+        };
+        let seen = edge_modem::seen_before(
+            &fragments
+                .iter()
+                .map(|fragment| fragment.fingerprint.clone())
+                .collect::<Vec<_>>(),
+            &ingested,
+        );
+
+        // The decision, shared with the QMI collector. Both rules that lose
+        // messages when they are broken live in there and are tested there.
+        let settlement = edge_core::settle_inbound(fragments, &seen, now);
+        if settlement.pending > 0 {
+            log_line(format!(
+                "{} sms(at) fragment(s) awaiting the rest, left on the module",
+                settlement.pending
+            ));
+        }
+
+        let mut stored_fingerprints: Vec<String> = Vec::new();
+        let mut carried = 0usize;
+        for settled in &settlement.ready {
+            let message = &settled.message;
+            if !message.missing.is_empty() {
+                log_error(format!(
+                    "sms(at) from={} released with part(s) {:?} of {} never delivered",
+                    message.sender, message.missing, message.parts
+                ));
+            }
+            let local = LocalMessage {
+                seq: (carried as u64) + (now as u64 % 1_000_000) * 1000,
+                peer: message.sender.clone(),
+                body: message.body.clone(),
+                bearer: "cellular".into(),
+                direction: "inbound".into(),
+                received_at: now,
+                modem_imei: Some(imei.to_string()),
+            };
+            shared
+                .0
+                .lock()
+                .expect("store")
+                .insert_local_message(&local)
+                .map_err(|e| e.to_string())?;
+            enqueue_sms(outbox, imei, &message.sender, &message.body, settled.encoding, now)?;
+            carried += 1;
+            stored_fingerprints.extend(settled.fingerprints.iter().cloned());
+        }
+
+        if !stored_fingerprints.is_empty() {
+            let store = shared.0.lock().expect("store");
+            store
+                .record_ingested_sms(imei, &stored_fingerprints, now)
+                .map_err(|e| e.to_string())?;
+            store
+                .prune_ingested_sms(imei, SMS_LEDGER_KEEP)
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Last, and only after the stores above committed.
+        let deletable = settlement.deletable();
+        if !deletable.is_empty() {
+            let _ = radio.with_at_port(Some(imei), |port| {
+                for slot in &deletable {
+                    if let Some(row) = received.get(*slot) {
+                        let _ = edge_modem::delete_over_at(port, row.index);
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(carried)
+    }
+
+    /// Fill in the packet data profiles for modules whose probe did not read
+    /// them.
+    ///
+    /// Same shape and the same reasons as `fill_msisdn`: the QMI probe holds
+    /// the arbiter, `AT+CGDCONT?` needs it, and the table only changes when
+    /// something writes to it. Re-read when the card changes, because a
+    /// different profile on an eUICC can arrive with a different operator
+    /// default.
+    fn fill_apn_contexts(shared: &Arc<SharedStore>, radio: &Radio, snapshots: &mut [ModemSnapshot]) {
+        let known = match shared.0.lock().expect("store").list_local_modems() {
+            Ok(modems) => modems,
+            Err(error) => {
+                log_error(format!("apn cache not read: {error}"));
+                return;
+            }
+        };
+        for snapshot in snapshots.iter_mut() {
+            if snapshot.apn_contexts.is_some() {
+                continue;
+            }
+            let stored = known.iter().find(|modem| modem.imei == snapshot.imei);
+            if let Some(stored) = stored {
+                // Keyed on the card for the same reason the number is: a
+                // profile switch changes the ICCID under a module that has not
+                // moved, and the operator default can change with it.
+                if stored.apn_contexts.is_some() && stored.msisdn_iccid == snapshot.iccid {
+                    snapshot.apn_contexts = stored.apn_contexts.clone();
+                    continue;
+                }
+            }
+            match radio.with_at_port(Some(&snapshot.imei), |port| Ok(read_apn_contexts(port))) {
+                Ok(contexts) => snapshot.apn_contexts = contexts,
+                Err(error) => log_line(format!(
+                    "apn contexts for {} unavailable: {error}",
+                    snapshot.imei
+                )),
+            }
+        }
+    }
+
+    /// One identifying AT value, trimmed.
+    ///
+    /// `None` covers all three ways this can fail to produce something worth
+    /// keying on -- the port was lost, the module rejected the command, or it
+    /// answered `OK` with no content -- because none of them is different to a
+    /// caller deciding what the hardware is.
+    fn at_identity_line(port: &mut edge_modem::AtPort, command: &str) -> Option<String> {
+        port.command(command)
+            .ok()
+            .filter(edge_modem::AtExchange::succeeded)
+            .and_then(|exchange| exchange.lines.first().map(|line| line.trim().to_string()))
+            .filter(|value| !value.is_empty())
+    }
+
+    /// The canonical family name for a module identified over AT.
+    ///
+    /// The naming rule itself lives in `edge-core` so both transports share
+    /// one copy of it and it stays testable off Linux. What belongs here is
+    /// the log: an unrecognised family is an honest answer but a useless one,
+    /// and without the strings that produced it there is no way to find out
+    /// which pattern is missing.
+    fn at_family(model: &str, revision: &str) -> String {
+        let name = ModemFamily::detect_name(model, revision);
+        if name == ModemFamily::UNKNOWN {
+            log_error(format!(
+                "family unreadable over AT at+cgmm={model:?} at+cgmr={revision:?}"
+            ));
+        } else if matches!(ModemFamily::from(name.as_str()), ModemFamily::Other(_)) {
+            log_error(format!(
+                "family unrecognised over AT model={model:?} revision={revision:?}"
+            ));
+        }
+        name
     }
 
     /// What to assume when the card would not say how long its MNC is.
@@ -4108,6 +4883,30 @@ mod linux {
             .filter(|(_, at)| at.elapsed() < PUBLIC_IP_TTL)
             .map(|(address, _)| address.clone());
 
+        let net_sample = std::fs::read_to_string("/proc/net/dev")
+            .ok()
+            .map(|text| parse_proc_net_dev(&text));
+        let now = Instant::now();
+        let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = match (memory.net, net_sample) {
+            (Some((previous, at)), Some(current)) => {
+                let seconds = now.duration_since(at).as_secs_f64();
+                if seconds > 0.0 {
+                    (
+                        Some(((current.rx.saturating_sub(previous.rx)) as f64 / seconds) as u64),
+                        Some(((current.tx.saturating_sub(previous.tx)) as f64 / seconds) as u64),
+                    )
+                } else {
+                    (None, None)
+                }
+            }
+            _ => (None, None),
+        };
+        if let Some(current) = net_sample {
+            memory.net = Some((current, now));
+        }
+
+        let disk = disk_usage(Path::new(&env("VODOGE_EDGE_DATA", "/var/lib/vodoge-edge")));
+
         HostStats {
             public_ip,
             cpu_percent,
@@ -4115,7 +4914,83 @@ mod linux {
                 total.saturating_sub(available)
             }),
             memory_total_bytes: memory_reading.map(|(total, _)| total),
+            disk_used_bytes: disk.map(|(total, available)| total.saturating_sub(available)),
+            disk_total_bytes: disk.map(|(total, _)| total),
+            net_rx_bytes_per_sec,
+            net_tx_bytes_per_sec,
+            cpu_model: read_cpu_model(),
+            kernel: read_trimmed_file("/proc/sys/kernel/osrelease"),
+            hostname: read_trimmed_file("/proc/sys/kernel/hostname"),
         }
+    }
+
+    /// One line per interface; the first two counter columns are received and
+    /// the ninth is transmitted.
+    ///
+    /// Loopback and the modules' own `wwan` interfaces are left out. This
+    /// number is meant to answer "is the box's link to the world busy", and
+    /// counting traffic the agent sends to hardware sitting inside the same
+    /// machine would answer a different question with the same figure.
+    fn parse_proc_net_dev(text: &str) -> NetTotals {
+        let mut totals = NetTotals::default();
+        for line in text.lines() {
+            let Some((name, counters)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            if name == "lo" || name.starts_with("wwan") || name.starts_with("veth") {
+                continue;
+            }
+            let fields: Vec<u64> = counters
+                .split_whitespace()
+                .map(|field| field.parse().unwrap_or(0))
+                .collect();
+            if fields.len() < 9 {
+                continue;
+            }
+            totals.rx = totals.rx.saturating_add(fields[0]);
+            totals.tx = totals.tx.saturating_add(fields[8]);
+        }
+        totals
+    }
+
+    /// Total and available bytes of the filesystem holding `path`.
+    ///
+    /// Available rather than free: the difference is the root reserve, and
+    /// reporting free space the agent cannot actually use would say a disk is
+    /// fine right up to the point where writes start failing.
+    fn disk_usage(path: &Path) -> Option<(u64, u64)> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `raw` is a valid NUL-terminated path and `stats` is a
+        // correctly sized, zeroed target that statvfs only writes into.
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(raw.as_ptr(), &mut stats) } != 0 {
+            return None;
+        }
+        let block = stats.f_frsize as u64;
+        Some((
+            block.saturating_mul(stats.f_blocks as u64),
+            block.saturating_mul(stats.f_bavail as u64),
+        ))
+    }
+
+    fn read_trimmed_file(path: &str) -> Option<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn read_cpu_model() -> Option<String> {
+        let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        text.lines()
+            .find(|line| line.starts_with("model name"))
+            .and_then(|line| line.split_once(':'))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     /// The aggregate `cpu` line of `/proc/stat`.
@@ -4340,6 +5215,13 @@ mod linux {
                 .upsert_local_modem(&LocalModem {
                     imei: imei.clone(),
                     family: family_name.clone(),
+                    firmware: Some(revision.clone()).filter(|value| !value.is_empty()),
+                    // Filled by `fill_msisdn` after the arbiter is free, so
+                    // nothing is written for it here.
+                    msisdn: None,
+                    msisdn_iccid: None,
+                    // Filled by `fill_apn_contexts` after the arbiter is free.
+                    apn_contexts: None,
                     iccid: iccid.clone(),
                     state: state.clone(),
                     last_seen: Some(now),
@@ -4383,7 +5265,8 @@ mod linux {
         // message invisible to every later pass while it went on occupying a
         // storage slot. Read state is the modem's; what we have stored is
         // ours.
-        let mut fragments: Vec<InboundFragment> = Vec::with_capacity(pass.inbound.len());
+        let mut fragments: Vec<edge_core::InboundFragment> =
+            Vec::with_capacity(pass.inbound.len());
         for (slot, message) in pass.inbound.iter().enumerate() {
             let decoded = edge_core::decode_deliver(&message.raw.pdu);
             // The coding scheme, and what was made of it.
@@ -4415,7 +5298,7 @@ mod linux {
                 seq,
                 &decoded.body,
             );
-            fragments.push(InboundFragment {
+            fragments.push(edge_core::InboundFragment {
                 slot,
                 encoding: decoded.encoding,
                 fingerprint,
@@ -4457,56 +5340,43 @@ mod linux {
             &ingested,
         );
 
-        let mut parts = Vec::with_capacity(fragments.len());
-        // Every fragment of one message shares its data coding scheme, so the
-        // alphabet is recorded per fragment and read back off the fragment the
-        // assembled message names. Looking it up by sender, as this did, gave
-        // whichever alphabet that sender's *first* message of the pass used --
-        // and this bench routinely holds several from 10086 in one pass.
-        let mut encodings: Vec<&'static str> = Vec::with_capacity(fragments.len());
-        let mut fingerprints: Vec<String> = Vec::with_capacity(fragments.len());
-        // Where each fragment handed to `assemble` sits in the pass, so the
-        // delete afterwards names the storage row it actually came from.
-        let mut slots: Vec<usize> = Vec::with_capacity(fragments.len());
-        let mut settled: Vec<edge_modem::CollectedMessage> = Vec::new();
-        for (fragment, stored_before) in fragments.into_iter().zip(seen) {
-            if stored_before {
-                if let Some(row) = pass.inbound.get(fragment.slot) {
-                    settled.push(row.clone());
-                }
-                continue;
-            }
-            encodings.push(fragment.encoding);
-            fingerprints.push(fragment.fingerprint);
-            slots.push(fragment.slot);
-            parts.push(fragment.part);
-        }
+        // The decision, shared with the AT collector in `sweep_inbox_over_at`.
+        // Both rules that lose messages when they are broken live in
+        // `edge_core::settle_inbound` and are tested there rather than in
+        // either transport.
+        let settlement = edge_core::settle_inbound(fragments, &seen, now);
 
         // Rows our books already account for. A previous pass stored them and
         // the delete that should have followed did not take -- or somebody
         // read them out from under us. Storing them again would show the
         // operator the same message twice, so the slot is cleared instead.
-        if !settled.is_empty() {
+        if !settlement.already_ours.is_empty() {
             log_line(format!(
                 "{} sms already stored, clearing the modem's copy",
-                settled.len()
+                settlement.already_ours.len()
             ));
+            let settled: Vec<_> = settlement
+                .already_ours
+                .iter()
+                .filter_map(|slot| pass.inbound.get(*slot).cloned())
+                .collect();
             let _ = delete_inbound(&mut client, &settled);
         }
-
-        let (assembled, pending) = assemble(&parts, now, edge_core::FRAGMENT_GRACE_MS);
 
         // A fragment whose siblings have not arrived stays on the modem, so
         // the next pass can complete it. Deleting it would lose half a message
         // permanently, which is worse than reading it twice.
-        if !pending.is_empty() {
+        if settlement.pending > 0 {
             log_line(format!(
                 "{} sms fragment(s) awaiting the rest, left on the modem",
-                pending.len()
+                settlement.pending
             ));
         }
 
-        for (index, message) in assembled.iter().enumerate() {
+        let mut stored_fingerprints: Vec<String> = Vec::new();
+        let mut stored: Vec<edge_modem::CollectedMessage> = Vec::new();
+        for (index, settled) in settlement.ready.iter().enumerate() {
+            let message = &settled.message;
             if !message.missing.is_empty() {
                 // Loud, because this is the one path that stores something the
                 // sender did not write. It happens only after the grace period
@@ -4519,14 +5389,6 @@ mod linux {
                     message.parts
                 ));
             }
-            // The alphabet of the fragment this message was built from. Every
-            // fragment of one message shares its coding scheme, so the first
-            // source answers for all of them.
-            let encoding = message
-                .sources
-                .first()
-                .and_then(|slot| encodings.get(*slot).copied())
-                .unwrap_or("unknown");
             let local = LocalMessage {
                 seq: (index as u64) + (now as u64 % 1_000_000) * 1000,
                 peer: message.sender.clone(),
@@ -4542,7 +5404,14 @@ mod linux {
                 .expect("store")
                 .insert_local_message(&local)
                 .map_err(|e| e.to_string())?;
-            enqueue_sms(outbox, &imei, &message.sender, &message.body, encoding, now)?;
+            enqueue_sms(outbox, &imei, &message.sender, &message.body, settled.encoding, now)?;
+            stored_fingerprints.extend(settled.fingerprints.iter().cloned());
+            stored.extend(
+                settled
+                    .slots
+                    .iter()
+                    .filter_map(|slot| pass.inbound.get(*slot).cloned()),
+            );
         }
 
         // Write down what was stored, then delete exactly those rows, and both
@@ -4555,24 +5424,6 @@ mod linux {
         // fail. A pass that stored a message and then failed to clear it will
         // meet that message again, and the entry written here is what stops it
         // from being stored twice.
-        //
-        // Named by position rather than re-derived from the PDU: two
-        // deliveries can share a sender and a reference, so a filter on that
-        // pair would sweep away a fragment that is still waiting for its
-        // siblings along with the message that is done.
-        let sources: Vec<usize> = assembled
-            .iter()
-            .flat_map(|message| message.sources.iter().copied())
-            .collect();
-        let stored_fingerprints: Vec<String> = sources
-            .iter()
-            .filter_map(|part| fingerprints.get(*part).cloned())
-            .collect();
-        let stored: Vec<_> = sources
-            .iter()
-            .filter_map(|part| slots.get(*part).copied())
-            .filter_map(|slot| pass.inbound.get(slot).cloned())
-            .collect();
         if !stored_fingerprints.is_empty() {
             let store = shared.0.lock().expect("store");
             store
@@ -4602,6 +5453,18 @@ mod linux {
             discovery: Discovery::Qmi,
             usb: edge_modem::usb_device_of_qmi(path),
             manageable: true,
+            // Already read above to decide the family, and previously thrown
+            // away with it.
+            firmware: Some(revision.clone()).filter(|value| !value.is_empty()),
+            // Filled in after the probe by `fill_msisdn`: reading it needs the
+            // module's AT port, which this function cannot take because it is
+            // already holding the arbiter.
+            msisdn: None,
+            control_port: Some(path.display().to_string()),
+            // Filled by `fill_apn_contexts` after the probe, for the same
+            // reason the number is: reading them needs the module's AT port,
+            // which this function is already holding the arbiter against.
+            apn_contexts: None,
         })
     }
 
@@ -4978,6 +5841,20 @@ mod linux {
         /// it, which is the only way to name hardware that has stopped
         /// answering.
         usb: Option<String>,
+        /// Firmware revision as the module reports it. Both probes already
+        /// read this to decide the family; it used to be discarded, so the
+        /// only way to learn which build was on a stick was to ask for a
+        /// diagnostic report and read the answer by hand.
+        firmware: Option<String>,
+        /// The card's own number, where the card carries one. Often absent:
+        /// plenty of operators never write it, so `None` means the card did
+        /// not say rather than that there is no number.
+        msisdn: Option<String>,
+        /// The kernel node this module is driven through.
+        control_port: Option<String>,
+        /// Packet data profiles, as JSON. `None` means not read this pass --
+        /// they are cached and re-read only when the card changes.
+        apn_contexts: Option<String>,
         /// Whether the agent can currently carry out commands against it.
         manageable: bool,
     }
@@ -4989,10 +5866,22 @@ mod linux {
         cpu_percent: Option<f64>,
         memory_used_bytes: Option<u64>,
         memory_total_bytes: Option<u64>,
+        /// The filesystem holding the agent's own databases, not every mount.
+        /// That is the one whose exhaustion stops the outbox committing.
+        disk_used_bytes: Option<u64>,
+        disk_total_bytes: Option<u64>,
+        /// Averaged over the interval between two polls, like `cpu_percent`,
+        /// rather than being the since-boot counter `/proc/net/dev` holds.
+        net_rx_bytes_per_sec: Option<u64>,
+        net_tx_bytes_per_sec: Option<u64>,
+        cpu_model: Option<String>,
+        kernel: Option<String>,
+        hostname: Option<String>,
     }
 
     fn enqueue_device_state(
         outbox: &Arc<Mutex<DurableOutbox>>,
+        matrix: &CapabilityMatrix,
         modems: &[ModemSnapshot],
         host: &HostStats,
         now: i64,
@@ -5003,7 +5892,6 @@ mod linux {
             // in the log and sends nothing.
             return Ok(());
         }
-        let matrix = CapabilityMatrix::builtin().map_err(|error| error.to_string())?;
         let mut entries = Vec::with_capacity(modems.len());
         for modem in modems {
             // The matrix is keyed on the home carrier, not the serving one:
@@ -5038,6 +5926,20 @@ mod linux {
                 "sinr": modem.quality.sinr,
                 "discovery": modem.discovery.wire(),
                 "manageable": modem.manageable,
+                // Read by both identity probes and previously discarded with
+                // the family they were used to detect.
+                "firmware": modem.firmware,
+                "msisdn": modem.msisdn,
+                // Physical topology. The cloud cannot see the edge machine's
+                // /dev or sysfs, so without these an operator diagnosing a
+                // silent stick has to ask somebody with a shell on the box.
+                "control_port": modem.control_port,
+                "usb_device": modem.usb,
+                // The module's own profile table. Which context carries data
+                // is a row on the module rather than a property of the card,
+                // and this is the only way the cloud can see it.
+                "apn_contexts": modem.apn_contexts.as_deref()
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
                 "capability": {
                     "sms_mo": capability.sms_mo.wire(),
                     "sms_mt": capability.sms_mt.wire(),
@@ -5053,6 +5955,13 @@ mod linux {
                 "cpu_percent": host.cpu_percent,
                 "memory_used_bytes": host.memory_used_bytes,
                 "memory_total_bytes": host.memory_total_bytes,
+                "disk_used_bytes": host.disk_used_bytes,
+                "disk_total_bytes": host.disk_total_bytes,
+                "net_rx_bytes_per_sec": host.net_rx_bytes_per_sec,
+                "net_tx_bytes_per_sec": host.net_tx_bytes_per_sec,
+                "cpu_model": host.cpu_model,
+                "kernel": host.kernel,
+                "hostname": host.hostname,
             }
         });
         append_kind(outbox, "DeviceState", payload)
@@ -5076,12 +5985,13 @@ mod linux {
     fn uplink_loop(
         outbox: Arc<Mutex<DurableOutbox>>,
         executor: Arc<Mutex<CommandExecutor<RadioPort>>>,
+        live_matrix: Arc<Mutex<CapabilityMatrix>>,
         online: Arc<AtomicBool>,
     ) {
         let url = env("VODOGE_UPLINK_URL", "wss://43.108.53.126:444/v1/edge");
         let cert_dir = env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge");
         loop {
-            let result = uplink_once(&url, &cert_dir, &outbox, &executor, &online);
+            let result = uplink_once(&url, &cert_dir, &outbox, &executor, &live_matrix, &online);
             online.store(false, Ordering::Relaxed);
             match result {
                 Ok(()) => log_error("uplink closed, reconnecting"),
@@ -5096,10 +6006,20 @@ mod linux {
         cert_dir: &str,
         outbox: &Arc<Mutex<DurableOutbox>>,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
+        live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         online: &Arc<AtomicBool>,
     ) -> Result<(), String> {
         let tls = load_tls(Path::new(cert_dir))?;
         let mut socket = Socket::connect(url, tls).map_err(|e| e.to_string())?;
+        // Read before the outbox is locked, so the matrix mutex is never held
+        // underneath another one. It reports what this agent is actually
+        // routing by, which after an `update_capability_matrix` is no longer
+        // the version compiled into the binary.
+        let matrix_version = live_matrix
+            .lock()
+            .expect("capability matrix")
+            .version()
+            .to_string();
         let snapshot = {
             let box_ = outbox.lock().expect("outbox");
             ResumeSnapshot {
@@ -5107,9 +6027,7 @@ mod linux {
                 last_acked_seq: box_.committed_through(),
                 lowest_retained_seq: box_.lowest_retained_seq(),
                 pending_gap_ids: box_.pending_gap_ids(),
-                capability_matrix_version: CapabilityMatrix::builtin()
-                    .map(|m| m.version().to_string())
-                    .unwrap_or_else(|_| "unversioned".into()),
+                capability_matrix_version: matrix_version,
                 edge_version: Some(env!("CARGO_PKG_VERSION").into()),
                 queue_records: Some(box_.queue_records()),
                 queue_bytes: box_.queue_bytes(),
@@ -5129,7 +6047,7 @@ mod linux {
                         .map_err(|e| e.to_string())?;
                     if let Inbound::CommandDeliver(deliver) = inbound {
                         if let Err(error) =
-                            handle_command(&deliver, executor, &mut socket, outbox)
+                            handle_command(&deliver, executor, live_matrix, &mut socket, outbox)
                         {
                             log_error(format!("command: {error}"));
                         }
@@ -5161,15 +6079,25 @@ mod linux {
     fn handle_command(
         envelope: &Envelope,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
+        live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         socket: &mut Socket,
         outbox: &Arc<Mutex<DurableOutbox>>,
     ) -> Result<(), String> {
         let now = unix_ms();
-        let outcome = executor
-            .lock()
-            .expect("executor")
-            .handle_envelope(envelope, now)
-            .map_err(|error| error.to_string())?;
+        // Read the matrix back out under the same lock that may have just
+        // replaced it, then publish it below. Cloning on every command rather
+        // than only on `update_capability_matrix` keeps this from having to
+        // know which kinds can change it -- the matrix is a dozen rules and
+        // commands are rare.
+        let (outcome, matrix) = {
+            let mut running = executor.lock().expect("executor");
+            let outcome = running
+                .handle_envelope(envelope, now)
+                .map_err(|error| error.to_string())?;
+            let matrix = running.matrix().clone();
+            (outcome, matrix)
+        };
+        *live_matrix.lock().expect("capability matrix") = matrix;
         socket
             .send_envelope(&Envelope {
                 v: PROTOCOL_VERSION,
@@ -5422,6 +6350,66 @@ mod linux {
         fn discovery_spells_itself_the_way_the_contract_does() {
             assert_eq!(Discovery::Qmi.wire(), "qmi");
             assert_eq!(Discovery::At.wire(), "at");
+        }
+
+        /// The whole vocabulary the panel has to understand, written down once.
+        ///
+        /// It had drifted the other way: the panel carried fourteen state
+        /// spellings and four possible names for the detail field, of which
+        /// nine and three respectively were never produced by anything here.
+        /// Neither side could catch that on its own, because a string that is
+        /// never sent is indistinguishable from one that is merely rare.
+        #[test]
+        fn the_discovery_vocabulary_is_these_five_states_and_three_transports() {
+            let states = [
+                DiscoveryState::Manageable,
+                DiscoveryState::ProbeFailed,
+                DiscoveryState::AtOnly,
+                DiscoveryState::Found,
+                DiscoveryState::Claimed,
+            ];
+            assert_eq!(
+                states.map(DiscoveryState::wire),
+                ["manageable", "probe_failed", "at_only", "found", "claimed"],
+            );
+
+            let transports = [
+                DiscoveryTransport::Qmi,
+                DiscoveryTransport::At,
+                DiscoveryTransport::Serial,
+            ];
+            assert_eq!(transports.map(DiscoveryTransport::wire), ["qmi", "at", "serial"]);
+
+            // A serial endpoint's transport has to agree with the prefix its
+            // candidate key is built from, or an approval never matches the
+            // discovery it was granted against.
+            assert!(manual_candidate_key(&edge_modem::AtPortCandidate {
+                path: PathBuf::from("/dev/ttyUSB8"),
+                kind: edge_modem::AtPortKind::Usb,
+                usb_device: Some("2-4.2".into()),
+                interface: None,
+                interface_label: None,
+                driver: None,
+                vendor_id: None,
+                product_id: None,
+                policy: edge_modem::AtProbePolicy::Manual,
+            })
+            .starts_with(DiscoveryTransport::Serial.wire()));
+        }
+
+        /// The AT probe stored its raw `AT+CGMM` reply, so one physical stick
+        /// was `EC20` over QMI and `Other("EC20F")` over AT -- taking the
+        /// probe-everything matrix fallback on the second path only, with
+        /// nothing in the log to say so.
+        ///
+        /// The naming rule itself is specified and exercised in `edge-core`
+        /// (`family_detect_tests`), where it runs on any machine. What this
+        /// pins is that the AT path still defers to it rather than growing a
+        /// second copy that can drift back.
+        #[test]
+        fn the_at_path_reports_the_canonical_family_not_the_raw_reply() {
+            assert_eq!(at_family("EC20F", ""), ModemFamily::EC20.as_str());
+            assert_eq!(at_family("", ""), ModemFamily::UNKNOWN);
         }
     }
 

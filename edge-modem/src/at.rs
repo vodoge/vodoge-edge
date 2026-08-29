@@ -274,6 +274,124 @@ impl AtPort {
         }
     }
 
+    /// Run a command that answers with a prompt, then send the payload.
+    ///
+    /// `AT+CMGS` is the reason this exists. It does not answer with a result
+    /// code: it answers with `>` and then waits, and the message is only
+    /// submitted once the payload and a Ctrl-Z have followed. `command` reads
+    /// until a terminal code, so on this exchange it waits out its whole
+    /// timeout while the module sits holding a prompt -- and the module is
+    /// then left mid-command, which is worse than the timeout.
+    ///
+    /// So this reads until the prompt instead, writes the payload and the
+    /// Ctrl-Z, and only then reads for a result code. `ESC` is sent if the
+    /// prompt never arrives, because a module abandoned at a prompt eats the
+    /// next command as message text.
+    pub fn command_with_payload(
+        &mut self,
+        command: &str,
+        payload: &str,
+        timeout: Duration,
+    ) -> Result<AtExchange, AtError> {
+        let command = command.trim();
+        self.drain();
+        let started = Instant::now();
+        self.file
+            .write_all(format!("{command}\r").as_bytes())
+            .map_err(|error| AtError::Io(format!("write {command}: {error}")))?;
+        self.file
+            .flush()
+            .map_err(|error| AtError::Io(format!("flush {command}: {error}")))?;
+
+        // Read until the module offers its prompt.
+        let mut buffer = String::new();
+        loop {
+            if started.elapsed() >= timeout {
+                // Abandon the prompt rather than leave it open.
+                let _ = self.file.write_all(&[0x1b]);
+                let _ = self.file.flush();
+                return Err(AtError::Timeout {
+                    command: command.to_string(),
+                    elapsed: started.elapsed(),
+                });
+            }
+            // The prompt is checked first, and that order is the whole of the
+            // fix that made this work: `terminal_code` counts `>` as terminal
+            // -- correctly, for a caller that has no payload to send -- so
+            // asking it first turns the module's invitation into a refusal
+            // reading "module refused the submission: >".
+            if buffer.contains('>') {
+                break;
+            }
+            // A module that rejects the command answers with a result code and
+            // no prompt -- an unknown recipient, or a mode that does not take
+            // one -- and that answer is the useful one.
+            if let Some(terminator) = terminal_code(&buffer) {
+                let lines = response_lines(&buffer, command, &terminator);
+                return Ok(AtExchange {
+                    command: command.to_string(),
+                    lines,
+                    terminator,
+                    elapsed: started.elapsed(),
+                });
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !wait_readable(&self.file, remaining)? {
+                continue;
+            }
+            let mut chunk = [0u8; READ_CHUNK];
+            let read = self
+                .file
+                .read(&mut chunk)
+                .map_err(|error| AtError::Io(format!("read {command}: {error}")))?;
+            if read == 0 {
+                continue;
+            }
+            buffer.push_str(&String::from_utf8_lossy(&chunk[..read]));
+        }
+
+        // Ctrl-Z submits; ESC would discard. Written together with the payload
+        // so a module cannot see a complete message and act on it early.
+        self.file
+            .write_all(format!("{payload}\x1a").as_bytes())
+            .map_err(|error| AtError::Io(format!("write payload for {command}: {error}")))?;
+        self.file
+            .flush()
+            .map_err(|error| AtError::Io(format!("flush payload for {command}: {error}")))?;
+
+        let mut answer = String::new();
+        loop {
+            if started.elapsed() >= timeout {
+                return Err(AtError::Timeout {
+                    command: command.to_string(),
+                    elapsed: started.elapsed(),
+                });
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !wait_readable(&self.file, remaining)? {
+                continue;
+            }
+            let mut chunk = [0u8; READ_CHUNK];
+            let read = self
+                .file
+                .read(&mut chunk)
+                .map_err(|error| AtError::Io(format!("read answer for {command}: {error}")))?;
+            if read == 0 {
+                continue;
+            }
+            answer.push_str(&String::from_utf8_lossy(&chunk[..read]));
+            if let Some(terminator) = terminal_code(&answer) {
+                let lines = response_lines(&answer, command, &terminator);
+                return Ok(AtExchange {
+                    command: command.to_string(),
+                    lines,
+                    terminator,
+                    elapsed: started.elapsed(),
+                });
+            }
+        }
+    }
+
     /// Wait for an unsolicited line beginning with `prefix`.
     ///
     /// Some operations answer twice. `AT+CUSD=1,...` returns `OK` as soon as

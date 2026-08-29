@@ -1,4 +1,4 @@
-use edge_store::{ManualModemProfile, Store};
+use edge_store::{CardPolicy, ManualModemProfile, Store};
 
 /// The invariant is that migrations replay to the same schema, not that there
 /// happen to be N of them. Asserting the count made every added migration look
@@ -40,6 +40,10 @@ fn a_rebuilt_store_still_holds_every_column() {
         .upsert_local_modem(&edge_store::LocalModem {
             imei: "867018069509705".into(),
             family: "EC20".into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
             iccid: Some("8986".into()),
             state: "registered".into(),
             last_seen: Some(11),
@@ -84,4 +88,122 @@ fn a_rebuilt_store_still_holds_manual_profiles() {
             .len(),
         1
     );
+}
+
+/// A push replaces the set rather than merging into it.
+///
+/// The cloud sends every policy it holds on every push, so a card missing from
+/// the new set has had its policy withdrawn. Merging would leave that card's
+/// old rules in force on the device -- the one outcome an operator who deleted
+/// a policy would never expect, and one nothing upstream could detect.
+#[test]
+fn a_card_dropped_from_a_push_loses_its_policy() {
+    let mut store = Store::open_in_memory().expect("open");
+    store
+        .replace_card_policies(
+            &[
+                CardPolicy {
+                    iccid: "8985235122504221420".into(),
+                    cellular_enabled: true,
+                    vertical: "cn".into(),
+                    apn: Some("cmnet".into()),
+
+                    sms_send: None,
+
+                    sms_receive: None,
+
+                    data: None,
+
+                    voice: None,
+                },
+                CardPolicy {
+                    iccid: "8901240527197122156".into(),
+                    cellular_enabled: false,
+                    vertical: "intl".into(),
+                    apn: None,
+
+                    sms_send: None,
+
+                    sms_receive: None,
+
+                    data: None,
+
+                    voice: None,
+                },
+            ],
+            "v1",
+            10,
+        )
+        .expect("first push");
+    assert_eq!(store.list_card_policies().expect("list").len(), 2);
+    assert_eq!(store.card_policy_version().expect("version").as_deref(), Some("v1"));
+
+    let kept = store
+        .card_policy("8901240527197122156")
+        .expect("read")
+        .expect("the card was pushed");
+    assert!(!kept.cellular_enabled);
+    assert_eq!(kept.vertical, "intl");
+    assert_eq!(kept.apn, None);
+
+    store
+        .replace_card_policies(
+            &[CardPolicy {
+                iccid: "8985235122504221420".into(),
+                cellular_enabled: true,
+                vertical: "cn".into(),
+                apn: Some("cmnet".into()),
+
+                sms_send: None,
+
+                sms_receive: None,
+
+                data: None,
+
+                voice: None,
+            }],
+            "v2",
+            20,
+        )
+        .expect("second push");
+
+    assert_eq!(store.list_card_policies().expect("list").len(), 1);
+    assert_eq!(
+        store.card_policy("8901240527197122156").expect("read"),
+        None,
+        "a card the cloud stopped listing must not keep its old rules"
+    );
+    assert_eq!(store.card_policy_version().expect("version").as_deref(), Some("v2"));
+}
+
+/// An empty push is a withdrawal of everything, not a no-op.
+#[test]
+fn an_empty_push_clears_the_set() {
+    let mut store = Store::open_in_memory().expect("open");
+    store
+        .replace_card_policies(
+            &[CardPolicy {
+                iccid: "8985235122504221420".into(),
+                cellular_enabled: true,
+                vertical: "cn".into(),
+                apn: None,
+
+                sms_send: None,
+
+                sms_receive: None,
+
+                data: None,
+
+                voice: None,
+            }],
+            "v1",
+            10,
+        )
+        .expect("push");
+    store.replace_card_policies(&[], "v2", 20).expect("empty push");
+
+    assert!(store.list_card_policies().expect("list").is_empty());
+    // With no rows there is no version either: the version lives on the rows
+    // so it cannot outlive the set it describes.
+    assert_eq!(store.card_policy_version().expect("version"), None);
 }

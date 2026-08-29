@@ -8,14 +8,16 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use edge_core::CapabilityMatrix;
+use edge_core::{
+    builtin_strategy_registry, CapabilityMatrix, OperatingContext, Operation, RefusedBy, SupportLedger,
+};
 use edge_uplink::update::UpdateGuard;
 use edge_uplink::{EnvelopeId, RetentionClass, UplinkError, UplinkState};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use vodoge_contract::{
-    Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload, ContextValue,
-    Envelope, EsimInventoryPayload, MessageKind,
+    CardPolicy, Command, CommandDeliverPayload, CommandReceiptPayload, CommandResultPayload,
+    ContextValue, Envelope, EsimInventoryPayload, MessageKind,
 };
 
 /// Receipt status: first durable accept of a `cmd_id`.
@@ -76,6 +78,18 @@ pub trait SendPort {
     /// to that number, which is right on a quiet bench and silently wrong the
     /// first time two messages to one recipient are in flight together.
     fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError>;
+
+    /// The module's identity and the policy on the card in it.
+    ///
+    /// Supplied by the port rather than decided here because the facts live in
+    /// the edge binary's store, while the rule that reads them lives with the
+    /// capability matrix, which is here. A port that cannot answer leaves the
+    /// operation unresolved — see the call site, which refuses rather than
+    /// proceeding, because "we could not tell what this module is" is not a
+    /// reason to send anyway.
+    fn operating_context(&mut self, _imei: Option<&str>) -> Result<OperatingContext, SendError> {
+        Err(unsupported("operating_context"))
+    }
     fn restart_modem(&mut self, _imei: &str) -> Result<(), SendError> {
         Err(unsupported("restart_modem"))
     }
@@ -89,11 +103,18 @@ pub trait SendPort {
     // round trip. Defaults refuse rather than pretend: a port that cannot do
     // one of these must say so, not report a success with no effect.
 
+    /// Run one AT command.
+    ///
+    /// `force` carries the caller's intent past the agent's own classification
+    /// of disruptive commands; see `edge_core::classify_at_command`. It is not
+    /// a permission — the console decides who may ask — only a statement that
+    /// the disruptive command was the one meant.
     fn run_at(
         &mut self,
         _imei: &str,
         _command: &str,
         _timeout_ms: Option<i64>,
+        _force: bool,
     ) -> Result<JsonValue, SendError> {
         Err(unsupported("run_at_command"))
     }
@@ -157,6 +178,24 @@ pub trait SendPort {
     /// Takes no IMEI: the point is the ones that are not in the inventory yet.
     fn refresh_modems(&mut self) -> Result<JsonValue, SendError> {
         Err(unsupported("refresh_modems"))
+    }
+
+    /// Store the card policy set the cloud just pushed.
+    ///
+    /// The whole set arrives every time and replaces what is held, so an
+    /// implementation must not merge: a card the cloud has stopped listing has
+    /// had its policy withdrawn.
+    ///
+    /// Takes the policies as the contract carries them. The agent deliberately
+    /// does not interpret `vertical` on the way in -- an unrecognised value
+    /// still has to be written down, or a newer build could not act on it
+    /// without asking the cloud to push again.
+    fn update_card_policies(
+        &mut self,
+        _policy_version: &str,
+        _policies: &[CardPolicy],
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("update_card_policy"))
     }
 
     fn list_esim_profiles(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
@@ -266,16 +305,51 @@ fn unsupported(what: &str) -> SendError {
 }
 
 /// In-memory send target used by command tests.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FakeSendPort {
     sent: Vec<SmsSend>,
     restarted: Vec<String>,
     error: Option<SendError>,
+    context: OperatingContext,
+}
+
+impl Default for FakeSendPort {
+    fn default() -> Self {
+        Self {
+            sent: Vec::new(),
+            restarted: Vec::new(),
+            error: None,
+            context: measured_context(),
+        }
+    }
+}
+
+/// An EC20 on China Mobile: the pairing the shipped ledger records as working.
+fn measured_context() -> OperatingContext {
+    OperatingContext {
+        family: edge_core::ModemFamily::EC20,
+        carrier: edge_core::CarrierProfile::CN_MOBILE,
+        subscription: edge_core::SubscriptionCapability::default(),
+    }
 }
 
 impl FakeSendPort {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Present as a module and network nobody has measured, so the ledger
+    /// refuses. The point of a knob rather than a second fake: the refusal has
+    /// to be reachable through the same path a real send takes.
+    pub fn unmeasured(&mut self) -> &mut Self {
+        self.context.family = edge_core::ModemFamily::from("SIM7600G");
+        self
+    }
+
+    /// Declare what the plan on this card is sold as doing.
+    pub fn with_subscription(&mut self, subscription: edge_core::SubscriptionCapability) -> &mut Self {
+        self.context.subscription = subscription;
+        self
     }
 
     pub fn fail_with(&mut self, reason_code: impl Into<String>, message: impl Into<String>) {
@@ -292,6 +366,16 @@ impl FakeSendPort {
 }
 
 impl SendPort for FakeSendPort {
+    /// A module and card the built-in matrix has a measured rule for.
+    ///
+    /// Chosen so the fake exercises the *send*, not the refusal: an EC20 on
+    /// China Mobile is the pairing the shipped ledger records as working. A
+    /// test that wants the refusal path builds a context that has none, which
+    /// is what `unmeasured` is for.
+    fn operating_context(&mut self, _imei: Option<&str>) -> Result<OperatingContext, SendError> {
+        Ok(self.context.clone())
+    }
+
     fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
         if let Some(error) = self.error.clone() {
             return Err(error);
@@ -639,11 +723,22 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     modem_imei: modem_imei.clone(),
                     iccid: iccid.clone(),
                 };
-                // Same shape as the diagnostic relays: whatever the port
-                // reported travels back in `details`. For a send that is the
-                // message reference, which the cloud stores against the
-                // message so a later status report settles the right one.
-                let outcome = self.port.send_sms(&send);
+                // Decided before the modem is touched: a send that the
+                // measured (module, network) pair or the card's own plan does
+                // not cover must not be attempted and then explained. The
+                // refusal names which of the three layers withheld it, so the
+                // reader is told whether the fix is a test, a different
+                // module, or a form somebody has to fill in.
+                let outcome = match self.refuse_unsupported(modem_imei.as_deref(), Operation::SmsSend)
+                {
+                    Some(refusal) => Err(refusal),
+                    // Same shape as the diagnostic relays: whatever the port
+                    // reported travels back in `details`. For a send that is
+                    // the message reference, which the cloud stores against
+                    // the message so a later status report settles the right
+                    // one.
+                    None => self.port.send_sms(&send),
+                };
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -752,9 +847,10 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 command,
                 timeout_ms,
+                force,
             } => {
                 self.mark_executing(&payload.cmd_id);
-                let outcome = self.port.run_at(modem_imei, command, *timeout_ms);
+                let outcome = self.port.run_at(modem_imei, command, *timeout_ms, *force);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -853,6 +949,17 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::RefreshModems => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.refresh_modems();
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::UpdateCardPolicy {
+                policy_version,
+                policies,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.update_card_policies(policy_version, policies);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -977,17 +1084,16 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     true,
                 ))
             }
-            _ => Ok((
-                terminal_result(
-                    &payload.cmd_id,
-                    RESULT_FAILED,
-                    now_ms,
-                    attempts,
-                    Some("unsupported_command"),
-                    Some("command kind is not implemented"),
-                ),
-                false,
-            )),
+            // No catch-all. `update_card_policy` was the last kind the
+            // contract carried and this match did not, and while the arm was
+            // missing the cloud's push came back `unsupported_command` -- a
+            // runtime answer to what is really a build-time question.
+            //
+            // Exhaustiveness is the guard now: a kind added to the contract
+            // stops the build here until somebody decides what it does. A
+            // *port* that cannot perform an action it was handed still refuses
+            // at run time, through the trait defaults, which is a different
+            // fact and keeps its own reason code.
         }
     }
 
@@ -1014,6 +1120,66 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             executed: false,
             inventory: None,
         })
+    }
+
+    /// `Some(refusal)` when this operation must not be attempted.
+    ///
+    /// The three layers are resolved in `edge-core`; what happens here is
+    /// only the plumbing — asking the port what module and card it is holding,
+    /// and turning a refusal into the error a `CommandResult` carries.
+    ///
+    /// A port that cannot describe its own module refuses too. That is the
+    /// deliberate direction to fail: the whole point of the ledger is that
+    /// nothing runs on hardware nobody has measured, and "we could not work
+    /// out what this is" is the strongest possible case of that.
+    fn refuse_unsupported(&mut self, imei: Option<&str>, operation: Operation) -> Option<SendError> {
+        let context = match self.port.operating_context(imei) {
+            Ok(context) => context,
+            Err(error) => {
+                return Some(SendError::new(
+                    "operating_context_unavailable",
+                    format!(
+                        "could not establish which module and card this is, so {} was not attempted: {}",
+                        operation.wire(),
+                        error.message
+                    ),
+                ));
+            }
+        };
+
+        let ledger = SupportLedger::from_matrix(&self.matrix);
+        let registry = match builtin_strategy_registry(ledger) {
+            Ok(registry) => registry,
+            Err(error) => {
+                // A registry that will not build is a fault in this binary,
+                // not in the request. It still refuses: acting on a policy
+                // that could not be assembled is the one outcome worse than
+                // not acting.
+                return Some(SendError::new(
+                    "strategy_registry_invalid",
+                    error.to_string(),
+                ));
+            }
+        };
+
+        let resolved = registry.resolve(
+            &context.family,
+            &context.carrier,
+            &context.subscription,
+            operation,
+        );
+        match resolved.support {
+            edge_core::Support::Supported(_) => None,
+            edge_core::Support::Unsupported { by, reason } => Some(SendError::new(
+                format!("{}_refused_by_{}", operation.wire(), by.wire()),
+                match by {
+                    RefusedBy::Ledger => format!(
+                        "{reason}. Nothing is attempted on an untested pairing; measure it and record the result."
+                    ),
+                    _ => reason,
+                },
+            )),
+        }
     }
 
     fn mark_executing(&mut self, cmd_id: &str) {

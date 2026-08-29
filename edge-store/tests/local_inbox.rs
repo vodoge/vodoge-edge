@@ -30,6 +30,10 @@ fn local_inbox_survives_duplicate_seq() {
         .upsert_local_modem(&LocalModem {
             imei: "867018069509705".into(),
             family: "EC20".into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
             iccid: Some("8986".into()),
             state: "registered".into(),
             last_seen: Some(11),

@@ -6,10 +6,11 @@
 
 mod aka;
 mod at;
+mod at_inbox;
+mod at_sms;
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
 mod channels;
-mod discovery;
 mod dms;
 mod es10c;
 mod es9p;
@@ -42,6 +43,11 @@ pub use aka::{
     RAND_BYTES, RES_MAX_BYTES, RES_MIN_BYTES, STATUS_FCP_APDU, SW_INCORRECT_MAC,
     USIM_ADF_AID_PREFIX,
 };
+pub use at_inbox::{
+    delete as delete_over_at, list as list_over_at, parse_listing as parse_at_listing, StoredMessage,
+    LIST_TIMEOUT,
+};
+pub use at_sms::{send_sms as send_sms_over_at, AtSendOutcome, AtSmsError, SEND_TIMEOUT};
 pub use at::{
     at_control_ports, at_port_candidates, at_port_for_qmi, first_bare_digits,
     handle_lease_request, lease_socket_path, usb_device_of_at, ArbiterWaiting, AtError,
@@ -60,8 +66,8 @@ pub use ussd::{
     UssdStage,
 };
 pub use report::{
-    collect as collect_report, parse_cops_scan, parse_creg, parse_csq, ModemReport, Registration,
-    ScannedOperator, Signal,
+    collect as collect_report, parse_cnum, parse_cops_scan, parse_creg, parse_csq, ModemReport,
+    Registration, ScannedOperator, Signal,
 };
 pub use es10c::{
     authenticate_server_payload, bound_profile_package_segments, cancel_session_payload,
@@ -89,7 +95,6 @@ pub use es9p::{
 #[cfg(target_os = "linux")]
 pub use cdc_wdm::CdcWdmDevice;
 pub use channels::LogicalChannels;
-pub use discovery::{discover, DeviceEnumerator, DiscoveredModem, FakeEnumerator};
 pub use fake::FakeModem;
 pub use inbox::{
     collect_inbound, collect_inbound_sweeping, delete_inbound, fragment_fingerprint, seen_before,

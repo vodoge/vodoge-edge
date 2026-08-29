@@ -1,0 +1,16 @@
+-- The packet data profiles a module is carrying, as JSON.
+--
+-- Cached beside the modem rather than read on every poll, for the same reason
+-- the card's own number is: the table only changes when something writes to
+-- it, and the poll runs every eight seconds. `AT+CGDCONT?` costs a round trip
+-- on a port the QMI probe does not hold, so reading it per pass would take the
+-- arbiter away from the poll to learn something already known.
+--
+-- Stored as JSON rather than a second table because nothing queries inside it:
+-- it is displayed as a block and replaced as a block, and a join would buy
+-- nothing but a migration.
+--
+-- NULL means the agent has not read them, which is not the same as a module
+-- holding none -- that is an empty array, and the difference matters when
+-- somebody is looking at a stick with no data connection.
+ALTER TABLE local_modems ADD COLUMN apn_contexts TEXT;

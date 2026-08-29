@@ -348,6 +348,32 @@ pub struct HostState {
     pub memory_used_bytes: Option<i64>,
     #[serde(rename = "memory_total_bytes", default, skip_serializing_if = "Option::is_none")]
     pub memory_total_bytes: Option<i64>,
+    #[serde(rename = "disk_used_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<i64>,
+    #[serde(rename = "disk_total_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<i64>,
+    #[serde(rename = "net_rx_bytes_per_sec", default, skip_serializing_if = "Option::is_none")]
+    pub net_rx_bytes_per_sec: Option<i64>,
+    #[serde(rename = "net_tx_bytes_per_sec", default, skip_serializing_if = "Option::is_none")]
+    pub net_tx_bytes_per_sec: Option<i64>,
+    #[serde(rename = "cpu_model", default, skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
+    #[serde(rename = "kernel", default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    #[serde(rename = "hostname", default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+}
+
+/// One packet data profile as the module reports it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApnContext {
+    #[serde(rename = "cid")]
+    pub cid: u8,
+    #[serde(rename = "pdp_type", default, skip_serializing_if = "String::is_empty")]
+    pub pdp_type: String,
+    #[serde(rename = "apn", default, skip_serializing_if = "String::is_empty")]
+    pub apn: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -381,6 +407,18 @@ pub struct ModemState {
     pub home_plmn: Option<String>,
     #[serde(rename = "serving_plmn", default, skip_serializing_if = "Option::is_none")]
     pub serving_plmn: Option<String>,
+    #[serde(rename = "firmware", default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    #[serde(rename = "msisdn", default, skip_serializing_if = "Option::is_none")]
+    pub msisdn: Option<String>,
+    #[serde(rename = "control_port", default, skip_serializing_if = "Option::is_none")]
+    pub control_port: Option<String>,
+    #[serde(rename = "usb_device", default, skip_serializing_if = "Option::is_none")]
+    pub usb_device: Option<String>,
+    /// Packet data profiles the module holds. `None` from an agent that does
+    /// not read them; `Some(vec![])` means it asked and the module held none.
+    #[serde(rename = "apn_contexts", default, skip_serializing_if = "Option::is_none")]
+    pub apn_contexts: Option<Vec<ApnContext>>,
     #[serde(rename = "capability")]
     pub capability: CapabilitySummary,
 }
@@ -491,6 +529,8 @@ pub struct RunAtCommandCommand {
     pub command: String,
     #[serde(rename = "timeout_ms", default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<i64>,
+    #[serde(rename = "force", default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -765,6 +805,25 @@ pub struct CardPolicy {
     pub vertical: String,
     #[serde(rename = "apn", default, skip_serializing_if = "Option::is_none")]
     pub apn: Option<String>,
+    /// What the operator says this card's plan is sold as doing. Absent from
+    /// an older console, which is the same as declaring nothing.
+    #[serde(rename = "capability", default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<SubscriptionCapability>,
+}
+
+/// Strictly subtractive: `Some(false)` withholds, `Some(true)` asserts
+/// nothing, `None` is undeclared.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubscriptionCapability {
+    #[serde(rename = "sms_send", default, skip_serializing_if = "Option::is_none")]
+    pub sms_send: Option<bool>,
+    #[serde(rename = "sms_receive", default, skip_serializing_if = "Option::is_none")]
+    pub sms_receive: Option<bool>,
+    #[serde(rename = "data", default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<bool>,
+    #[serde(rename = "voice", default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -873,6 +932,12 @@ pub enum Command {
         #[serde(rename = "timeout_ms")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<i64>,
+        /// Send a command the agent classifies as disruptive anyway. Absent
+        /// is false: an old console that does not know about the flag can
+        /// only ever issue the safe set.
+        #[serde(rename = "force")]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
     },
     SendUssd {
         #[serde(rename = "modem_imei")]
