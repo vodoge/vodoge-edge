@@ -329,6 +329,41 @@ impl<T: QmiTransport> QmiClient<T> {
         Ok(outcome?)
     }
 
+    /// Rename one profile, or clear its name with an empty string.
+    ///
+    /// No refresh flag: a nickname is stored on the card and read back by the
+    /// next profile listing, so nothing on the modem needs to re-read the card
+    /// for it to take effect.
+    pub fn set_profile_nickname(
+        &mut self,
+        slot: u8,
+        iccid: &str,
+        nickname: &str,
+    ) -> Result<(), SessionError> {
+        let payload = es10c::set_nickname_payload(iccid, nickname)?;
+        let mut session = self.isdr_session(slot)?;
+        let bytes = session.execute(&payload)?;
+        let outcome = es10c::parse_set_nickname_result(&bytes);
+        session.close()?;
+        Ok(outcome?)
+    }
+
+    /// Delete one profile from the card.
+    ///
+    /// 🔴 Irreversible. The card keeps no copy, and a profile that was paid
+    /// for generally cannot be re-downloaded without the operator issuing a
+    /// fresh activation code. The card refuses to delete the profile it is
+    /// currently running on, which is the one guard that exists below this
+    /// layer -- everything else is the caller's to ask about.
+    pub fn delete_profile(&mut self, slot: u8, iccid: &str) -> Result<(), SessionError> {
+        let payload = es10c::delete_profile_payload(iccid)?;
+        let mut session = self.isdr_session(slot)?;
+        let bytes = session.execute(&payload)?;
+        let outcome = es10c::parse_delete_result(&bytes);
+        session.close()?;
+        Ok(outcome?)
+    }
+
     pub fn read_eid(&mut self, slot: u8) -> Result<String, SessionError> {
         let mut session = self.isdr_session(slot)?;
         let eid = session.read_eid()?;

@@ -40,6 +40,12 @@ pub const MAX_STORE_DATA_BYTES: usize = STORE_DATA_BLOCK_BYTES * MAX_STORE_DATA_
 const TAG_GET_PROFILES_INFO: &[u8] = &[0xbf, 0x2d];
 const TAG_ENABLE_PROFILE: &[u8] = &[0xbf, 0x31];
 const TAG_DISABLE_PROFILE: &[u8] = &[0xbf, 0x32];
+/// `SetNicknameRequest ::= [41]`, SGP.22 5.7.21.
+const TAG_SET_NICKNAME: &[u8] = &[0xbf, 0x29];
+/// `DeleteProfileRequest ::= [51]`, SGP.22 5.7.18.
+const TAG_DELETE_PROFILE: &[u8] = &[0xbf, 0x33];
+/// The longest nickname SGP.22 admits.
+const NICKNAME_MAX_BYTES: usize = 64;
 /// ES10c `GetEUICCData`, which is how the EID is read.
 const TAG_GET_EUICC_DATA: &[u8] = &[0xbf, 0x3e];
 /// ES10b `GetEUICCInfo2`.
@@ -150,6 +156,9 @@ pub enum Es10cError {
     NotificationsUnavailable { code: u64 },
     /// A field SGP.22 makes mandatory was absent.
     MissingField { name: &'static str },
+    /// SGP.22 caps `profileNickname` at 64 bytes. Refused here rather than
+    /// truncated: a name silently cut in half is one nobody can search for.
+    NicknameTooLong { bytes: usize },
     /// `GetEUICCChallenge` returned something other than sixteen bytes.
     ///
     /// Its own error rather than `Truncated`: the challenge is what binds an
@@ -186,6 +195,10 @@ impl std::fmt::Display for Es10cError {
             ),
             Self::MissingProfileList => formatter.write_str("response has no profile list"),
             Self::InvalidIccid => formatter.write_str("ICCID is not a digit string"),
+            Self::NicknameTooLong { bytes } => write!(
+                formatter,
+                "nickname is {bytes} bytes; SGP.22 allows {NICKNAME_MAX_BYTES}"
+            ),
             Self::Refused { code, reason } => {
                 write!(formatter, "eUICC refused the request: {reason} ({code})")
             }
@@ -485,6 +498,104 @@ pub fn enable_profile_payload(iccid: &str, refresh: bool) -> Result<Vec<u8>, Es1
 /// `DisableProfile` by ICCID.
 pub fn disable_profile_payload(iccid: &str, refresh: bool) -> Result<Vec<u8>, Es10cError> {
     profile_command(TAG_DISABLE_PROFILE, iccid, refresh)
+}
+
+/// `SetNickname` by ICCID.
+///
+/// An empty nickname is sent as an absent field rather than an empty string:
+/// SGP.22 makes `profileNickname` OPTIONAL, and omitting it is how a name is
+/// cleared. Sending a zero-length UTF8String instead leaves cards free to
+/// store one and report it back as a name that renders as nothing.
+pub fn set_nickname_payload(iccid: &str, nickname: &str) -> Result<Vec<u8>, Es10cError> {
+    let iccid = encode_iccid(iccid)?;
+    let nickname = nickname.trim();
+    if nickname.len() > NICKNAME_MAX_BYTES {
+        return Err(Es10cError::NicknameTooLong {
+            bytes: nickname.len(),
+        });
+    }
+    let mut body = vec![TAG_ICCID, iccid.len() as u8];
+    body.extend_from_slice(&iccid);
+    if !nickname.is_empty() {
+        body.push(TAG_NICKNAME);
+        body.push(nickname.len() as u8);
+        body.extend_from_slice(nickname.as_bytes());
+    }
+    let mut request = TAG_SET_NICKNAME.to_vec();
+    request.push(body.len() as u8);
+    request.extend_from_slice(&body);
+    Ok(request)
+}
+
+/// `DeleteProfile` by ICCID.
+///
+/// 🔴 The body is the ICCID directly, NOT wrapped in the `a0` list that
+/// `EnableProfile` and `DisableProfile` use. `DeleteProfileRequest` is a
+/// CHOICE rather than a SEQUENCE in SGP.22, and a request built like its two
+/// neighbours is rejected by the card -- or worse, understood as something
+/// else. This asymmetry is the whole reason this is not `profile_command`.
+///
+/// Irreversible: a deleted profile cannot be restored from the card, and a
+/// paid one generally cannot be re-downloaded without the operator issuing a
+/// new activation code.
+pub fn delete_profile_payload(iccid: &str) -> Result<Vec<u8>, Es10cError> {
+    let iccid = encode_iccid(iccid)?;
+    let mut body = vec![TAG_ICCID, iccid.len() as u8];
+    body.extend_from_slice(&iccid);
+    let mut request = TAG_DELETE_PROFILE.to_vec();
+    request.push(body.len() as u8);
+    request.extend_from_slice(&body);
+    Ok(request)
+}
+
+/// Parse a `SetNickname` response.
+pub fn parse_set_nickname_result(response: &[u8]) -> Result<(), Es10cError> {
+    parse_simple_result(response, TAG_SET_NICKNAME, nickname_refusal)
+}
+
+/// Parse a `DeleteProfile` response.
+pub fn parse_delete_result(response: &[u8]) -> Result<(), Es10cError> {
+    parse_simple_result(response, TAG_DELETE_PROFILE, delete_refusal)
+}
+
+fn parse_simple_result(
+    response: &[u8],
+    tag: &[u8],
+    reason: fn(u8) -> &'static str,
+) -> Result<(), Es10cError> {
+    let body = expect_tag(response, tag)?;
+    let (result_tag, value, _) = read_tlv(body)?;
+    if result_tag != [TAG_RESULT] {
+        return Err(Es10cError::UnexpectedTag {
+            expected: vec![TAG_RESULT],
+            actual: result_tag,
+        });
+    }
+    match value.first().copied().ok_or(Es10cError::Truncated)? {
+        0 => Ok(()),
+        code => Err(Es10cError::Refused {
+            code,
+            reason: reason(code),
+        }),
+    }
+}
+
+fn nickname_refusal(code: u8) -> &'static str {
+    match code {
+        1 => "ICCID or AID not found",
+        _ => "undefined error",
+    }
+}
+
+fn delete_refusal(code: u8) -> &'static str {
+    match code {
+        1 => "ICCID or AID not found",
+        // The common one, and the one worth naming: a card refuses to delete
+        // the profile it is currently running on.
+        2 => "profile is not in the disabled state",
+        3 => "disallowed by policy",
+        _ => "undefined error",
+    }
 }
 
 fn profile_command(tag: &[u8], iccid: &str, refresh: bool) -> Result<Vec<u8>, Es10cError> {
@@ -2423,5 +2534,81 @@ mod tests {
             parse_cancel_session_response(&bytes("BF410B A009 8004AABBCCDD 810100")),
             Ok(bytes("BF410B A009 8004AABBCCDD 810100"))
         );
+    }
+
+    /// 🔴 `DeleteProfileRequest` is a CHOICE, not a SEQUENCE: the ICCID sits
+    /// directly in the body, with no `a0` list around it. Enable and disable
+    /// next door DO use the list, so a delete built by copying one of them is
+    /// wrong in a way that only a real card reports.
+    #[test]
+    fn a_delete_carries_the_iccid_without_the_list_wrapper() {
+        let request = delete_profile_payload("8985200014632179571").expect("payload");
+        assert_eq!(&request[..2], &[0xbf, 0x33], "DeleteProfileRequest is [51]");
+        // Body starts at index 3 (two tag bytes and one length byte).
+        assert_eq!(request[3], 0x5a, "the ICCID follows the length directly");
+        let enable = enable_profile_payload("8985200014632179571", true).expect("payload");
+        assert_eq!(enable[3], 0xa0, "enable really does wrap it, which is the trap");
+    }
+
+    #[test]
+    fn a_nickname_is_carried_as_utf8_under_its_own_tag() {
+        let request = set_nickname_payload("8985200014632179571", "bench").expect("payload");
+        assert_eq!(&request[..2], &[0xbf, 0x29], "SetNicknameRequest is [41]");
+        assert!(
+            request.windows(5).any(|window| window == b"bench"),
+            "the nickname is not in the request"
+        );
+        let tag_at = request.iter().position(|byte| *byte == 0x90).expect("nickname tag");
+        assert_eq!(request[tag_at + 1], 5, "length precedes the text");
+    }
+
+    /// 🔴 Clearing a name is an absent field, not an empty string. A card that
+    /// stores a zero-length nickname reports it back as a name that renders as
+    /// nothing, which is not the same as having none.
+    #[test]
+    fn an_empty_nickname_is_omitted_rather_than_sent_empty() {
+        let request = set_nickname_payload("8985200014632179571", "  ").expect("payload");
+        assert!(
+            !request.contains(&0x90),
+            "an empty nickname was sent as a field: {request:02x?}"
+        );
+    }
+
+    #[test]
+    fn a_nickname_past_the_limit_is_refused_rather_than_cut() {
+        let long = "x".repeat(65);
+        assert!(matches!(
+            set_nickname_payload("8985200014632179571", &long),
+            Err(Es10cError::NicknameTooLong { bytes: 65 })
+        ));
+    }
+
+    /// The refusal an operator will actually meet: a card will not delete the
+    /// profile it is running on.
+    #[test]
+    fn deleting_the_running_profile_is_refused_by_name() {
+        let response = [0xbf, 0x33, 0x03, 0x80, 0x01, 0x02];
+        match parse_delete_result(&response) {
+            Err(Es10cError::Refused { code: 2, reason }) => {
+                assert!(reason.contains("disabled state"), "reason = {reason}");
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_delete_and_rename_read_as_success() {
+        assert!(parse_delete_result(&[0xbf, 0x33, 0x03, 0x80, 0x01, 0x00]).is_ok());
+        assert!(parse_set_nickname_result(&[0xbf, 0x29, 0x03, 0x80, 0x01, 0x00]).is_ok());
+    }
+
+    #[test]
+    fn a_rename_against_a_missing_iccid_is_reported() {
+        match parse_set_nickname_result(&[0xbf, 0x29, 0x03, 0x80, 0x01, 0x01]) {
+            Err(Es10cError::Refused { code: 1, reason }) => {
+                assert!(reason.contains("not found"), "reason = {reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 }

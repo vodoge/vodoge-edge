@@ -29,7 +29,9 @@ mod linux {
     use std::sync::MutexGuard;
 
     use edge_agent::{CommandExecutor, SendError, SendPort, SmsSend};
-    use edge_core::{CapabilityMatrix, CarrierProfile, ConcatPart, ModemFamily, Network};
+    use edge_core::{
+        CapabilityMatrix, CapabilityOrigin, CarrierProfile, ConcatPart, ModemFamily, Network,
+    };
     use edge_modem::{
         collect_inbound_sweeping, delete_inbound, encode_submit, CdcWdmDevice, Es9pClient,
         EsimLocalInfo, NasRegistrationState, OperatingMode, QmiClient,
@@ -1107,6 +1109,38 @@ mod linux {
     /// differ even when they leave on different sticks.
     static NEXT_MESSAGE_REFERENCE: AtomicU32 = AtomicU32::new(0);
 
+    impl RadioPort {
+        /// Fold one written context into this module's cached table.
+        fn cache_apn_context(
+            &self,
+            imei: &str,
+            written: &edge_core::ApnContext,
+        ) -> Result<(), String> {
+            let store = self.store.0.lock().expect("store");
+            let modems = store.list_local_modems().map_err(|error| error.to_string())?;
+            let Some(modem) = modems.iter().find(|modem| modem.imei == imei) else {
+                return Ok(());
+            };
+            let mut contexts: Vec<edge_core::ApnContext> = modem
+                .apn_contexts
+                .as_deref()
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default();
+            match contexts
+                .iter_mut()
+                .find(|context| context.cid == written.cid)
+            {
+                Some(existing) => *existing = written.clone(),
+                None => contexts.push(written.clone()),
+            }
+            contexts.sort_by_key(|context| context.cid);
+            let encoded = serde_json::to_string(&contexts).map_err(|error| error.to_string())?;
+            store
+                .set_apn_contexts(imei, &encoded)
+                .map_err(|error| error.to_string())
+        }
+    }
+
     impl SendPort for RadioPort {
         fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
             // TP-MR, chosen here and reported back. A delivery receipt names
@@ -1353,6 +1387,206 @@ mod linux {
 
         fn set_radio(&mut self, imei: &str, enabled: bool) -> Result<(), SendError> {
             Actions::set_radio(self, Some(imei.to_string()), enabled).map_err(action_failed)
+        }
+
+        /// Write one packet data context with `AT+QICSGP`.
+        ///
+        /// 🔴 **The password appears in the command string and nowhere else.**
+        /// It is not logged, not echoed into the result, and not read back:
+        /// the verification below compares the APN, the username and the
+        /// method, and asks only whether *a* password is now set. A result
+        /// that carried the command text would put the credential in the
+        /// cloud's command journal.
+        fn configure_apn(&mut self, request: &edge_agent::ApnWrite<'_>) -> Result<JsonValue, SendError> {
+            // AT has no escape for a quote inside a quoted field, so a value
+            // containing one cannot be sent correctly. Refusing is the only
+            // honest answer; stripping it would write a different APN than the
+            // one asked for and report success.
+            for (name, value) in [
+                ("apn", Some(request.apn)),
+                ("username", request.username),
+                ("password", request.password),
+            ] {
+                if value.is_some_and(|value| value.contains('"') || value.contains('\r') || value.contains('\n')) {
+                    return Err(SendError::new(
+                        "apn_value_unquotable",
+                        format!("{name} contains a character AT cannot carry inside a quoted field"),
+                    ));
+                }
+            }
+            let auth = match request.auth {
+                Some(value) => Some(edge_core::ApnAuth::from_wire(value).ok_or_else(|| {
+                    SendError::new(
+                        "apn_auth_unknown",
+                        format!("unknown authentication method {value:?}"),
+                    )
+                })?),
+                None => None,
+            };
+            let requested_type = match request.pdp_type {
+                None => None,
+                Some("IP") => Some(1u8),
+                Some("IPV6") => Some(2),
+                Some("IPV4V6") => Some(3),
+                Some(other) => {
+                    return Err(SendError::new(
+                        "apn_pdp_type_unknown",
+                        format!("unknown PDP type {other:?}"),
+                    ))
+                }
+            };
+            let cid = request.cid;
+            let apn = request.apn.to_string();
+            // Held as options and resolved against the module's own reading
+            // inside the closure: `AT+QICSGP=` rewrites every field, so a
+            // request that names no credential must put back the one the
+            // context already had rather than send two empty strings and
+            // clear it.
+            let username = request.username.map(str::to_owned);
+            let password = request.password.map(str::to_owned);
+            let imei = request.imei.to_string();
+            self.radio
+                .with_at_port(Some(&imei), move |port| {
+                    let read = |port: &mut edge_modem::AtPort| {
+                        port.command(&format!("AT+QICSGP={cid}"))
+                            .ok()
+                            .filter(edge_modem::AtExchange::succeeded)
+                            .and_then(|exchange| edge_core::parse_qicsgp(&exchange.lines))
+                    };
+                    // Read before writing, for the same reason the radio does:
+                    // an edit that only changes a username must send back the
+                    // context type and method the context already had, and
+                    // defaulting them would silently downgrade an IPv4v6
+                    // context to IPv4 or drop CHAP to none.
+                    let before = read(port);
+                    let context_type = requested_type
+                        .or_else(|| before.as_ref().and_then(|value| value.context_type))
+                        .unwrap_or(1);
+                    let auth_code = auth
+                        .or_else(|| before.as_ref().and_then(|value| value.auth))
+                        .map(edge_core::ApnAuth::code)
+                        .unwrap_or(0);
+                    let username = username
+                        .or_else(|| before.as_ref().map(|value| value.username.clone()))
+                        .unwrap_or_default();
+                    let password = password
+                        .or_else(|| before.as_ref().map(|value| value.password.clone()))
+                        .unwrap_or_default();
+                    let exchange = port
+                        .command(&format!(
+                            "AT+QICSGP={cid},{context_type},\"{apn}\",\"{username}\",\"{password}\",{auth_code}"
+                        ))
+                        .map_err(|error| SendError::new("apn_write_failed", error.to_string()))?;
+                    if !exchange.succeeded() {
+                        return Err(SendError::new(
+                            "apn_write_refused",
+                            format!("module answered {}", exchange.terminator),
+                        ));
+                    }
+                    // 🔴 The reading after the write decides the outcome, not
+                    // the `OK`. A module that answers OK and keeps its old
+                    // context is the failure this exists to catch -- the same
+                    // one `+CFUN` taught on this bench.
+                    let after = read(port).ok_or_else(|| {
+                        SendError::new(
+                            "apn_write_unverified",
+                            "the module accepted the write and would not read the context back",
+                        )
+                    })?;
+                    if after.apn != apn || after.username != username {
+                        return Err(SendError::new(
+                            "apn_write_not_applied",
+                            "the module answered OK and the context did not change",
+                        ));
+                    }
+                    Ok(edge_core::ApnContext {
+                        cid,
+                        pdp_type: match context_type {
+                            2 => "IPV6",
+                            3 => "IPV4V6",
+                            _ => "IP",
+                        }
+                        .to_string(),
+                        apn: after.apn,
+                        username: after.username,
+                        auth: after.auth,
+                        has_password: after.has_password,
+                        source: Some(edge_core::SOURCE_CONFIGURED.to_string()),
+                    })
+                })
+                .map_err(|error| SendError::new("apn_write_failed", error.to_string()))
+                .map(|written| {
+                    // Put the result back in the cache the poll loop reads.
+                    // Failing to do so is not worth failing the command over --
+                    // the write happened -- so it is logged and the console
+                    // catches up when the card next changes.
+                    if let Err(error) = self.cache_apn_context(&imei, &written) {
+                        log_line(format!("apn cache not updated for {imei}: {error}"));
+                    }
+                    serde_json::json!({
+                        "cid": written.cid,
+                        "pdp_type": written.pdp_type,
+                        "apn": written.apn,
+                        "username": written.username,
+                        "auth": written.auth,
+                        "has_password": written.has_password,
+                    })
+                })
+        }
+        /// Approve one observed endpoint, the same act as the panel's button.
+        ///
+        /// Routed through the panel's `Actions` rather than reimplemented so
+        /// there is one approval path: the rule that a claim only ever names
+        /// something already discovered lives there, and a second copy of it
+        /// here is where the two would drift.
+        fn claim_modem_candidate(&mut self, candidate_key: &str) -> Result<JsonValue, SendError> {
+            let result = Actions::claim_modem_candidate(self, candidate_key.to_string())
+                .map_err(action_failed)?;
+            Ok(serde_json::json!({ "candidate_key": result.candidate_key }))
+        }
+
+        /// The agent's own log ring, the one the LAN panel serves.
+        ///
+        /// Bounded at 500 lines, which a healthy poll loop fills in about
+        /// twenty minutes, so the default here is smaller than the ring on
+        /// purpose: a caller who wants the lot asks for it, and a caller who
+        /// wants the tail is not made to carry the rest of it over the link.
+        ///
+        /// `contains` is applied here rather than in the cloud for the same
+        /// reason: filtering after the transfer is the transfer.
+        fn read_logs(
+            &mut self,
+            after: Option<u64>,
+            limit: Option<u32>,
+            contains: Option<&str>,
+        ) -> Result<JsonValue, SendError> {
+            const DEFAULT_LINES: usize = 200;
+            let ring = edge_panel::LogRing::global();
+            let cursor = ring.cursor();
+            let needle = contains.map(str::to_lowercase);
+            let mut lines: Vec<edge_panel::LogLine> = ring
+                .since(after.unwrap_or(0))
+                .into_iter()
+                .filter(|line| match needle.as_deref() {
+                    Some(needle) => line.text.to_lowercase().contains(needle),
+                    None => true,
+                })
+                .collect();
+            // The tail, not the head: what just happened is what somebody
+            // reading a log is looking for, and dropping from the front is how
+            // a limit keeps that.
+            let keep = limit.map_or(DEFAULT_LINES, |value| value as usize);
+            if lines.len() > keep {
+                lines.drain(..lines.len() - keep);
+            }
+            serde_json::to_value(serde_json::json!({
+                "lines": lines,
+                // Where to resume from, which is the ring's own cursor rather
+                // than the last line returned: a filtered read must not make
+                // the caller re-fetch everything the filter dropped.
+                "cursor": cursor,
+            }))
+            .map_err(|error| SendError::new("logs_unreadable", error.to_string()))
         }
 
         fn scan_operators(&mut self, imei: &str) -> Result<JsonValue, SendError> {
@@ -1649,6 +1883,77 @@ mod linux {
                 inventory_error: readback.error,
                 readback_attempts: readback.attempts,
             })
+        }
+
+        /// Rename one profile, or clear its name with an empty string.
+        ///
+        /// The inventory is re-read afterwards for the same reason the switch
+        /// re-reads it: what the console shows has to come from the card, not
+        /// from the fact that the command returned without an error.
+        fn rename_esim_profile(
+            &mut self,
+            imei: &str,
+            iccid: &str,
+            nickname: &str,
+        ) -> Result<JsonValue, SendError> {
+            let name = nickname.to_string();
+            let target = iccid.to_string();
+            self.radio
+                .with_client(Some(imei), |client| {
+                    client
+                        .set_profile_nickname(ESIM_SLOT, &target, &name)
+                        .map_err(|error| SendError::new("esim_rename_failed", error.to_string()))
+                })
+                .map_err(|error| SendError::new("esim_rename_failed", error.to_string()))?;
+            let readback = self.esim_inventory_after_switch(imei);
+            Ok(serde_json::json!({
+                "iccid": iccid,
+                "nickname": nickname,
+                "inventory": readback.inventory,
+                "inventory_error": readback.error,
+            }))
+        }
+
+        /// Take one profile out of service without enabling another.
+        ///
+        /// Distinct from `switch_esim_profile`, which can only ever move the
+        /// card from one profile to another: there was no way to leave a
+        /// module with nothing enabled, which is what deleting a profile
+        /// requires first.
+        fn disable_esim_profile(&mut self, imei: &str, iccid: &str) -> Result<JsonValue, SendError> {
+            Actions::switch_profile(self, Some(imei.to_string()), iccid.to_string(), false)
+                .map_err(action_failed)?;
+            let readback = self.esim_inventory_after_switch(imei);
+            Ok(serde_json::json!({
+                "iccid": iccid,
+                "enabled": false,
+                "inventory": readback.inventory,
+                "inventory_error": readback.error,
+            }))
+        }
+
+        /// Remove one profile from the card.
+        ///
+        /// 🔴 Irreversible, and the agent adds no guard of its own beyond the
+        /// card's: an eUICC refuses to delete the profile it is running on,
+        /// and everything else about whether this should happen was decided
+        /// before the command was issued.
+        fn delete_esim_profile(&mut self, imei: &str, iccid: &str) -> Result<JsonValue, SendError> {
+            let target = iccid.to_string();
+            self.radio
+                .with_client(Some(imei), |client| {
+                    client
+                        .delete_profile(ESIM_SLOT, &target)
+                        .map_err(|error| SendError::new("esim_delete_failed", error.to_string()))
+                })
+                .map_err(|error| SendError::new("esim_delete_failed", error.to_string()))?;
+            let readback = self.esim_inventory_after_switch(imei);
+            Ok(serde_json::json!({
+                "iccid": iccid,
+                "deleted": true,
+                "inventory": readback.inventory,
+                "inventory_error": readback.error,
+            }))
         }
 
         /// Everything ES10b will say about the chip, on one ISD-R channel.
@@ -3805,7 +4110,16 @@ mod linux {
         // Cloned out under its own lock and then used, rather than held across
         // the enqueue: see the note where `live_matrix` is created.
         let matrix = live_matrix.lock().expect("capability matrix").clone();
-        enqueue_device_state(outbox, &matrix, &snapshots, &host, now)?;
+        // Read here rather than inside: the state builder takes no store, and
+        // a failed read must not stop a state report that is otherwise good.
+        let discoveries = match shared.0.lock().expect("store").list_local_modem_discoveries() {
+            Ok(rows) => rows,
+            Err(error) => {
+                log_error(format!("discoveries not read: {error}"));
+                Vec::new()
+            }
+        };
+        enqueue_device_state(outbox, &matrix, &snapshots, &host, &discoveries, now)?;
         if qmi_paths.is_empty() && snapshots.is_empty() {
             return Err("no /dev/cdc-wdm* and no AT control port answered".into());
         }
@@ -4416,7 +4730,32 @@ mod linux {
             .command("AT+CGDCONT?")
             .ok()
             .filter(edge_modem::AtExchange::succeeded)?;
-        let contexts = edge_core::parse_cgdcont(&exchange.lines);
+        let mut contexts = edge_core::parse_cgdcont(&exchange.lines);
+        // Credentials arrive one context at a time: `+QICSGP` has no form that
+        // lists them all, so this is one exchange per row. It runs once per
+        // card rather than once per poll -- `fill_apn_contexts` caches the
+        // whole blob against the ICCID.
+        //
+        // `+CGAUTH` would be the standard place to read these and is not used:
+        // measured 2026-08-30, an EC20 answers `ERROR` to `AT+CGAUTH=?` while
+        // both bench families answer `AT+QICSGP`. See edge-core/src/apn.rs.
+        //
+        // A module that refuses `+QICSGP` keeps the contexts it did report.
+        // The APN is the useful half and it is already in hand; dropping the
+        // lot because the credential read failed would trade a whole answer
+        // for half of one.
+        for context in contexts.iter_mut() {
+            let Some(answer) = port
+                .command(&format!("AT+QICSGP={}", context.cid))
+                .ok()
+                .filter(edge_modem::AtExchange::succeeded)
+            else {
+                continue;
+            };
+            if let Some(credentials) = edge_core::parse_qicsgp(&answer.lines) {
+                edge_core::merge_credentials(context, &credentials);
+            }
+        }
         // An empty answer is still an answer: a module holding no contexts is
         // a real state, and recording it as "not read" would leave an operator
         // unable to tell it from an agent that never asked.
@@ -4629,6 +4968,14 @@ mod linux {
                 }
             }
             match radio.with_at_port(Some(&snapshot.imei), |port| Ok(read_apn_contexts(port))) {
+                // Distinguished from the error below because they mean
+                // different things and looked identical in the log: an error
+                // is "no port to ask on", this is "the port answered and the
+                // module would not list its contexts".
+                Ok(None) => log_line(format!(
+                    "apn contexts for {} not listed by the module",
+                    snapshot.imei
+                )),
                 Ok(contexts) => snapshot.apn_contexts = contexts,
                 Err(error) => log_line(format!(
                     "apn contexts for {} unavailable: {error}",
@@ -5942,6 +6289,7 @@ mod linux {
         matrix: &CapabilityMatrix,
         modems: &[ModemSnapshot],
         host: &HostStats,
+        discoveries: &[edge_store::LocalModemDiscovery],
         now: i64,
     ) -> Result<(), String> {
         if modems.is_empty() {
@@ -5961,10 +6309,17 @@ mod linux {
                     .map(|network| network.carrier_profile())
                     .unwrap_or("Generic-International"),
             );
-            let capability = matrix
-                .query(&ModemFamily::from(modem.family.as_str()), &carrier)
-                .capability
-                .clone();
+            let resolved = matrix.query(&ModemFamily::from(modem.family.as_str()), &carrier);
+            let capability = resolved.capability.clone();
+            // Whether the matrix had anything to say about this pair at all.
+            // The panel has shown this since it existed; the cloud could not
+            // tell "characterised as probe" from "never heard of it", and
+            // those are the two states a ledger entry is written between.
+            let capability_origin = match resolved.origin {
+                CapabilityOrigin::Rule => "rule",
+                CapabilityOrigin::Fallback => "fallback",
+            };
+            let carrier_profile = carrier.as_str().to_string();
             entries.push(serde_json::json!({
                 "modem_imei": modem.imei,
                 "state": modem.state,
@@ -6001,7 +6356,9 @@ mod linux {
                 "capability": {
                     "sms_mo": capability.sms_mo.wire(),
                     "sms_mt": capability.sms_mt.wire(),
-                    "matrix_version": matrix.version()
+                    "matrix_version": matrix.version(),
+                    "carrier_profile": carrier_profile,
+                    "origin": capability_origin
                 }
             }));
         }
@@ -6020,7 +6377,26 @@ mod linux {
                 "cpu_model": host.cpu_model,
                 "kernel": host.kernel,
                 "hostname": host.hostname,
-            }
+            },
+            // What the agent has seen and not written to. The panel could
+            // always list these and claim one; until they travelled, an
+            // operator working from the cloud could not tell that a stick had
+            // been plugged in at all.
+            "discoveries": discoveries
+                .iter()
+                .map(|candidate| serde_json::json!({
+                    "candidate_key": candidate.candidate_key,
+                    "usb_device": candidate.usb_device,
+                    "transport": candidate.transport,
+                    "control_port": candidate.control_port,
+                    "vendor_id": candidate.vendor_id,
+                    "product_id": candidate.product_id,
+                    "state": candidate.state,
+                    "imei": candidate.imei,
+                    "detail": candidate.detail,
+                    "last_seen": candidate.last_seen,
+                }))
+                .collect::<Vec<_>>()
         });
         append_kind(outbox, "DeviceState", payload)
     }

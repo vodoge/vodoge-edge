@@ -31,7 +31,10 @@ pub use concat::{assemble, AssembledSms, ConcatPart, FRAGMENT_GRACE_MS};
 pub use gsm7::decode as decode_gsm7;
 pub use pdu::{decode_deliver, decode_status_report, hex, Deliver, StatusReport};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
-pub use apn::{parse_cgdcont, ApnContext};
+pub use apn::{
+    merge_credentials, parse_cgdcont, parse_qicsgp, ApnAuth, ApnContext, ApnCredentials,
+    SOURCE_CONFIGURED,
+};
 pub use settle::{
     settle_inbound, InboundFragment, InboundSettlement, SettledMessage,
 };

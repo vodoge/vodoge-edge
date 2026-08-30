@@ -335,6 +335,9 @@ pub struct DeviceStatePayload {
     pub modems: Vec<ModemState>,
     #[serde(rename = "host", default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostState>,
+    /// Endpoints the agent has seen and not been told to probe.
+    #[serde(rename = "discoveries", default, skip_serializing_if = "Option::is_none")]
+    pub discoveries: Option<Vec<DiscoveryCandidate>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -364,7 +367,43 @@ pub struct HostState {
     pub hostname: Option<String>,
 }
 
+/// A modem-shaped endpoint the agent has seen but has not written to.
+///
+/// Carried upward so the console can approve one. The edge panel could always
+/// list and claim these; an operator who works from the cloud had no way to
+/// know a new stick had been plugged in at all, which made "add a device"
+/// something only somebody on the LAN could do.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryCandidate {
+    #[serde(rename = "candidate_key")]
+    pub candidate_key: String,
+    #[serde(rename = "usb_device", default, skip_serializing_if = "Option::is_none")]
+    pub usb_device: Option<String>,
+    #[serde(rename = "transport")]
+    pub transport: String,
+    #[serde(rename = "control_port")]
+    pub control_port: String,
+    #[serde(rename = "vendor_id", default, skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<String>,
+    #[serde(rename = "product_id", default, skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(rename = "state")]
+    pub state: String,
+    #[serde(rename = "imei", default, skip_serializing_if = "Option::is_none")]
+    pub imei: Option<String>,
+    #[serde(rename = "detail", default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(rename = "last_seen", default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<i64>,
+}
+
 /// One packet data profile as the module reports it.
+///
+/// 🔴 There is no password field and there must not be one. `AT+QICSGP`
+/// returns the password in clear on the same line as everything else, and the
+/// only thing that keeps it off the wire is that this struct has nowhere to
+/// put it. `has_password` is what an operator actually needs to know.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApnContext {
@@ -374,6 +413,22 @@ pub struct ApnContext {
     pub pdp_type: String,
     #[serde(rename = "apn", default, skip_serializing_if = "String::is_empty")]
     pub apn: String,
+    #[serde(rename = "username", default, skip_serializing_if = "String::is_empty")]
+    pub username: String,
+    /// `none`, `pap`, `chap` or `pap_or_chap`. Absent means it was not read,
+    /// which is not the same as a context that authenticates with nothing.
+    #[serde(rename = "auth", default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    #[serde(rename = "has_password", default, skip_serializing_if = "is_false")]
+    pub has_password: bool,
+    /// `configured` when this agent wrote the context and remembers doing so;
+    /// absent for whatever the module was already carrying.
+    #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -434,6 +489,12 @@ pub struct CapabilitySummary {
     pub matrix_version: String,
     #[serde(rename = "reason", default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(rename = "carrier_profile", default, skip_serializing_if = "Option::is_none")]
+    pub carrier_profile: Option<String>,
+    /// `rule` or `fallback`. A fallback is a pair nobody has considered, which
+    /// is a different fact from a rule that says `probe`.
+    #[serde(rename = "origin", default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -595,6 +656,85 @@ pub struct ResetModemUsbCommand {
     pub kind: String,
     #[serde(rename = "modem_imei")]
     pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameEsimProfileCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "iccid")]
+    pub iccid: String,
+    #[serde(rename = "nickname", default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisableEsimProfileCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "iccid")]
+    pub iccid: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteEsimProfileCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "iccid")]
+    pub iccid: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimModemCandidateCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "candidate_key")]
+    pub candidate_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadLogsCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(rename = "contains", default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureApnCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "cid")]
+    pub cid: u8,
+    #[serde(rename = "pdp_type", default, skip_serializing_if = "Option::is_none")]
+    pub pdp_type: Option<String>,
+    #[serde(rename = "apn")]
+    pub apn: String,
+    #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Write-only: it goes down to the module and has no field to come back in.
+    #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(rename = "auth", default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -980,6 +1120,54 @@ pub enum Command {
         modem_imei: String,
         #[serde(rename = "enabled")]
         enabled: bool,
+    },
+    ClaimModemCandidate {
+        #[serde(rename = "candidate_key")]
+        candidate_key: String,
+    },
+    RenameEsimProfile {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "iccid")]
+        iccid: String,
+        #[serde(rename = "nickname", default, skip_serializing_if = "Option::is_none")]
+        nickname: Option<String>,
+    },
+    DisableEsimProfile {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "iccid")]
+        iccid: String,
+    },
+    DeleteEsimProfile {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "iccid")]
+        iccid: String,
+    },
+    ReadLogs {
+        #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+        #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(rename = "contains", default, skip_serializing_if = "Option::is_none")]
+        contains: Option<String>,
+    },
+    ConfigureApn {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "cid")]
+        cid: u8,
+        #[serde(rename = "pdp_type", default, skip_serializing_if = "Option::is_none")]
+        pdp_type: Option<String>,
+        #[serde(rename = "apn")]
+        apn: String,
+        #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(rename = "password", default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        #[serde(rename = "auth", default, skip_serializing_if = "Option::is_none")]
+        auth: Option<String>,
     },
     SetUsbnetMode {
         #[serde(rename = "modem_imei")]

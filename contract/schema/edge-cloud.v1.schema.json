@@ -554,6 +554,12 @@
             { "$ref": "#/$defs/HostState" },
             { "type": "null" }
           ]
+        },
+        "discoveries": {
+          "description": "Modem-shaped endpoints the agent has seen but has not been told to probe. Carried so the cloud can approve one: the edge panel could always show and claim these, and an operator who works from the console had no way to see that a new stick had been plugged in at all.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/DiscoveryCandidate" }
         }
       }
     },
@@ -734,6 +740,134 @@
         "capability": { "$ref": "#/$defs/CapabilitySummary" }
       }
     },
+    "DiscoveryCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_key", "transport", "control_port", "state"],
+      "properties": {
+        "candidate_key": {
+          "description": "What a claim addresses. Derived from the endpoint's stable USB topology rather than its Linux device name, which changes when a module re-enumerates.",
+          "type": "string",
+          "maxLength": 128
+        },
+        "usb_device": { "$ref": "#/$defs/NullableString" },
+        "transport": { "type": "string", "enum": ["qmi", "at"] },
+        "control_port": { "type": "string", "maxLength": 128 },
+        "vendor_id": { "$ref": "#/$defs/NullableString" },
+        "product_id": { "$ref": "#/$defs/NullableString" },
+        "state": {
+          "description": "found = seen and never written to; claimed = an operator approved a probe; the rest describe what a probe found.",
+          "type": "string",
+          "enum": ["manageable", "probe_failed", "at_only", "found", "claimed"]
+        },
+        "imei": { "$ref": "#/$defs/NullableString" },
+        "detail": { "type": "string", "maxLength": 256 },
+        "last_seen": { "$ref": "#/$defs/EpochMillis" }
+      }
+    },
+    "RenameEsimProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "iccid"],
+      "properties": {
+        "kind": { "const": "RenameEsimProfile" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "iccid": { "$ref": "#/$defs/Iccid" },
+        "nickname": {
+          "description": "The new name, at most the 64 bytes SGP.22 allows. An empty string clears it, which the edge sends as an absent field rather than an empty one: a card that stores a zero-length nickname reports back a name that renders as nothing, which is not the same as having none.",
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "DisableEsimProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "iccid"],
+      "properties": {
+        "kind": { "const": "DisableEsimProfile" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "iccid": { "$ref": "#/$defs/Iccid" }
+      }
+    },
+    "DeleteEsimProfileCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "iccid"],
+      "properties": {
+        "kind": { "const": "DeleteEsimProfile" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "iccid": {
+          "description": "Which profile to remove. Irreversible: the card keeps no copy, and a profile that was paid for generally cannot be re-downloaded without the operator issuing a fresh activation code. A card refuses to delete the profile it is running on, so a disable comes first.",
+          "$ref": "#/$defs/Iccid"
+        }
+      }
+    },
+    "ClaimModemCandidateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "candidate_key"],
+      "properties": {
+        "kind": { "const": "ClaimModemCandidate" },
+        "candidate_key": {
+          "description": "Which observed endpoint to approve for an identity probe. Deliberately the only input: the command approves something the agent already saw, and taking a port or an IMEI here would let the cloud describe hardware nobody has looked at.",
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "ReadLogsCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "ReadLogs" },
+        "after": {
+          "description": "Return only lines newer than this cursor. The agent's ring is bounded, so a cursor older than what it still holds returns what remains rather than failing.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "description": "Most lines to return. The ring holds 500 and a chatty poll loop fills it in about twenty minutes, so the default is deliberately smaller than the ring.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "contains": {
+          "description": "Keep only lines containing this substring, matched case-insensitively. What an operator would reach for grep to do, done before the lines cross the link rather than after.",
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "ConfigureApnCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "cid", "apn"],
+      "properties": {
+        "kind": { "const": "ConfigureApn" },
+        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "cid": {
+          "description": "Which context to write. The same identifier AT+CGACT activates, so writing cid 1 rewrites the context the module is most likely already using.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 15
+        },
+        "pdp_type": {
+          "description": "IP, IPV6 or IPV4V6. Absent leaves the module's own default for the context, which is what an operator who only wants to change credentials means.",
+          "type": "string",
+          "enum": ["IP", "IPV6", "IPV4V6"]
+        },
+        "apn": { "type": "string", "maxLength": 128 },
+        "username": { "type": "string", "maxLength": 64 },
+        "password": {
+          "description": "Write-only. It is carried down to the module and never reported back up: the state payload has has_password and no field this could be read into.",
+          "type": "string",
+          "maxLength": 64
+        },
+        "auth": { "type": "string", "enum": ["none", "pap", "chap", "pap_or_chap"] }
+      }
+    },
     "ApnContext": {
       "type": "object",
       "additionalProperties": false,
@@ -750,6 +884,25 @@
           "description": "Empty where the module holds a context with no name, which is a normal unconfigured slot rather than a failed read.",
           "type": "string",
           "maxLength": 128
+        },
+        "username": {
+          "description": "Username the context authenticates with, empty where it carries none. Read from AT+QICSGP rather than AT+CGAUTH: measured 2026-08-30, EC20 answers ERROR to AT+CGAUTH=? while both bench families answer AT+QICSGP.",
+          "type": "string",
+          "maxLength": 64
+        },
+        "auth": {
+          "description": "Authentication method. Absent means it was not read, which is not the same as \"none\": a context whose method is unknown must not be shown as one that needs no password.",
+          "type": "string",
+          "enum": ["none", "pap", "chap", "pap_or_chap"]
+        },
+        "has_password": {
+          "description": "Whether a password is set. The password itself never leaves the module -- the AT+QICSGP read returns it in clear, and the edge reduces it to this boolean at the point of parsing.",
+          "type": "boolean"
+        },
+        "source": {
+          "description": "Where the context came from. \"configured\" means this agent wrote it and remembers doing so; absent means it is whatever the module was already carrying.",
+          "type": "string",
+          "enum": ["configured"]
         }
       }
     },
@@ -761,6 +914,16 @@
         "sms_mo": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
         "sms_mt": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
         "matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "carrier_profile": {
+          "description": "The carrier half of the matrix key, derived from the home network. Carried because it is half of what a support-ledger rule is written against, and it cannot be read off an operator name.",
+          "type": "string",
+          "maxLength": 64
+        },
+        "origin": {
+          "description": "\"rule\" when the matrix has an entry for this (family, carrier) pair, \"fallback\" when it has never heard of the combination. Deliberately not called \"measured\": a rule may say probe, which is a decision somebody took, while a fallback is nobody having considered the pair. Only the second is worth interrupting an operator about.",
+          "type": "string",
+          "enum": ["rule", "fallback"]
+        },
         "reason": { "$ref": "#/$defs/NullableString" }
       }
     },
@@ -847,9 +1010,15 @@
       { "$ref": "#/$defs/ModemReportCommand" },
       { "$ref": "#/$defs/ResetModemUsbCommand" },
       { "$ref": "#/$defs/SetDataNetworkCommand" },
+      { "$ref": "#/$defs/ConfigureApnCommand" },
       { "$ref": "#/$defs/SetUsbnetModeCommand" },
       { "$ref": "#/$defs/ReregisterNetworkCommand" },
       { "$ref": "#/$defs/RefreshModemsCommand" },
+      { "$ref": "#/$defs/ReadLogsCommand" },
+      { "$ref": "#/$defs/ClaimModemCandidateCommand" },
+      { "$ref": "#/$defs/RenameEsimProfileCommand" },
+      { "$ref": "#/$defs/DisableEsimProfileCommand" },
+      { "$ref": "#/$defs/DeleteEsimProfileCommand" },
       { "$ref": "#/$defs/ConfigureProxyCommand" },
       { "$ref": "#/$defs/ProxyLifecycleCommand" },
       { "$ref": "#/$defs/ProbeUpstreamProxyCommand" },

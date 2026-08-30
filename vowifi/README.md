@@ -352,8 +352,38 @@ code rather than about a fixture that recites 37. The recording round-trips too
 (`TestANoneVariantRecordingReplaysAsARequestWithNoCP`), because a request defined
 by an absent payload is the easiest one for a replay to silently put back.
 
-The live run is **not** in this deliverable. Write-up and the exact command in
-`docs/goals/vodoge-vowifi-call/notes/T088-no-cp-probe.md`.
+**The live run happened on 2026-08-30, and the answer was a fourth one.**
+
+| `-cfg` | outcome | notify | refused at |
+| --- | --- | --- | --- |
+| `mirror` / `dual` / `ipv6` | `internal-address-rejected` | 36 | assigning an address |
+| `none` | `challenge-answered` | **35 `NO_ADDITIONAL_SAS`** | creating the CHILD_SA |
+
+Not 37, not a CHILD_SA, and not 36 again, so the table above has no row for what
+came back. Taking the payload away did not make the ePDG ask for one, and did
+not let the SA through; it moved the refusal one step later in the ladder, to
+declining to create any CHILD_SA at all.
+
+That licenses the third row's conclusion by a different route: **no defect in an
+attribute list explains refusing a request that carries no attributes.** Four
+shapes have now been refused, one of which asked for nothing, and the plainest
+possible IPv4 ask (`mirror`) is among those answered "cannot assign an internal
+address". The arrow moves to the subscription, and bisecting the attribute list
+is retired -- which is what this experiment existed to do.
+
+One competing reading survives and cannot be settled from this side: an ePDG
+that requires a CP and says so with 35 rather than the 37 RFC 7296 defines
+answers this way too. It changes nothing actionable, because both readings put
+the remaining cause beyond anything the initiator can send.
+
+`ipv4` is still the one cell nobody has spent an SQN on, and after a refusal of
+the empty ask it stays unspent: it is the fourth guess this experiment existed
+to make unnecessary.
+
+Both runs re-confirmed criterion 2b on the way past -- T-Mobile US issued its
+own RAND/AUTN and the enabled profile on the bench eUICC computed a RES the
+operator accepted (`EAP-Success` at message 2), in both shapes. Authentication
+is not what is missing.
 
 The fourth row is worth its own sentence. TS 24.302 section 7.2.2 says the SWu
 `IDr` is not the ePDG's name, it is the **APN-FQDN** of the PDN to attach to

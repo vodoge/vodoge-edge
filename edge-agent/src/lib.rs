@@ -67,6 +67,25 @@ impl fmt::Display for SendError {
 
 impl Error for SendError {}
 
+/// One packet data context to write, as `ConfigureApn` asked for it.
+///
+/// 🔴 `password` goes down and never comes back: the state payload carries
+/// `has_password` and no field this could be read into. Anything that logs
+/// this struct logs a credential, so nothing does.
+#[derive(Clone, Copy, Debug)]
+pub struct ApnWrite<'a> {
+    pub imei: &'a str,
+    pub cid: u8,
+    /// `IP`, `IPV6` or `IPV4V6`. `None` keeps whatever type the context
+    /// already has, which is what an edit that only changes credentials means.
+    pub pdp_type: Option<&'a str>,
+    pub apn: &'a str,
+    pub username: Option<&'a str>,
+    pub password: Option<&'a str>,
+    /// `none`, `pap`, `chap` or `pap_or_chap`.
+    pub auth: Option<&'a str>,
+}
+
 /// Executes `SendSms` without requiring a real modem.
 pub trait SendPort {
     /// Sends one SMS and returns what the modem said about it.
@@ -147,6 +166,58 @@ pub trait SendPort {
 
     fn set_radio(&mut self, _imei: &str, _enabled: bool) -> Result<(), SendError> {
         Err(unsupported("set_radio"))
+    }
+
+    /// Write one packet data context on the module.
+    ///
+    /// Taken as a struct rather than seven positional arguments because four
+    /// of them are optional strings: a call site that shifted `username` into
+    /// `password` would compile and would send the password as the username.
+    fn configure_apn(&mut self, _request: &ApnWrite<'_>) -> Result<JsonValue, SendError> {
+        Err(unsupported("configure_apn"))
+    }
+
+    /// Rename one profile on the card, or clear its name.
+    fn rename_esim_profile(
+        &mut self,
+        _imei: &str,
+        _iccid: &str,
+        _nickname: &str,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("rename_esim_profile"))
+    }
+
+    /// Take one profile out of service without enabling another.
+    fn disable_esim_profile(&mut self, _imei: &str, _iccid: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("disable_esim_profile"))
+    }
+
+    /// Remove one profile from the card. Irreversible.
+    fn delete_esim_profile(&mut self, _imei: &str, _iccid: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("delete_esim_profile"))
+    }
+
+    /// Approve one observed endpoint for an identity probe.
+    ///
+    /// It takes a key and nothing else on purpose: the command approves
+    /// something the agent already saw, and accepting a port or an IMEI here
+    /// would let the cloud describe hardware nobody has looked at.
+    fn claim_modem_candidate(&mut self, _candidate_key: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("claim_modem_candidate"))
+    }
+
+    /// The agent's own recent log lines.
+    ///
+    /// The same ring the LAN panel serves. It exists because reaching these
+    /// lines otherwise means an SSH session and `journalctl`, which is the
+    /// access neither an on-site operator nor a cloud one has.
+    fn read_logs(
+        &mut self,
+        _after: Option<u64>,
+        _limit: Option<u32>,
+        _contains: Option<&str>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("read_logs"))
     }
 
     fn scan_operators(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
@@ -937,6 +1008,82 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     .port
                     .set_radio(modem_imei, *enabled)
                     .map(|()| JsonValue::Null);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ConfigureApn {
+                modem_imei,
+                cid,
+                pdp_type,
+                apn,
+                username,
+                password,
+                auth,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.configure_apn(&ApnWrite {
+                    imei: modem_imei,
+                    cid: *cid,
+                    pdp_type: pdp_type.as_deref(),
+                    apn,
+                    username: username.as_deref(),
+                    password: password.as_deref(),
+                    auth: auth.as_deref(),
+                });
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::RenameEsimProfile {
+                modem_imei,
+                iccid,
+                nickname,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.rename_esim_profile(
+                    modem_imei,
+                    iccid,
+                    nickname.as_deref().unwrap_or_default(),
+                );
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::DisableEsimProfile { modem_imei, iccid } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.disable_esim_profile(modem_imei, iccid);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::DeleteEsimProfile { modem_imei, iccid } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.delete_esim_profile(modem_imei, iccid);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ClaimModemCandidate { candidate_key } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.claim_modem_candidate(candidate_key);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ReadLogs {
+                after,
+                limit,
+                contains,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.read_logs(*after, *limit, contains.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

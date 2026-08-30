@@ -698,6 +698,21 @@ impl Store {
         Ok(())
     }
 
+    /// Replace a module's cached context table.
+    ///
+    /// `fill_apn_contexts` re-reads the module only when the card changes, so
+    /// after a write the cache is the stale copy an operator would be shown --
+    /// they would edit an APN, get an `OK`, and watch the console go on
+    /// reporting the old one until the stick was moved to another card. This
+    /// is how the write puts its own result back.
+    pub fn set_apn_contexts(&self, imei: &str, contexts: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE local_modems SET apn_contexts = ?2 WHERE imei = ?1",
+            params![imei, contexts],
+        )?;
+        Ok(())
+    }
+
     /// Replace the whole card policy set with what the cloud just pushed.
     ///
     /// A replacement rather than an upsert, in one transaction. The cloud sends
