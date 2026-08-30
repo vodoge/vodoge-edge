@@ -1167,3 +1167,62 @@ fn an_undeclared_plan_withholds_nothing() {
     assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
     assert_eq!(executor.port().sent().len(), 1);
 }
+
+/// 🔴 The push must survive a restart, and until 2026-08-30 it did not.
+///
+/// `live_matrix` is seeded from the built-in TOML at startup and the pushed
+/// document lived only in memory, so every deploy silently reverted the fleet
+/// to the compiled-in rules. The cloud never put it back: that command is
+/// already `succeeded`, so it is not redelivered.
+///
+/// It was not theoretical. The support ledger published on 2026-08-29 was in
+/// force and verified on the bench, then lost to the next deploy — and the
+/// China Telecom pairing it had authorised went back to being refused as
+/// untested, with nothing anywhere saying why.
+#[test]
+fn an_installed_matrix_is_handed_to_the_port_for_storage() {
+    let json = hot_matrix_json();
+    let matrix: ContextValue = serde_json::from_value(json.clone()).expect("context");
+    let sha = sha256_hex(&serde_json::to_vec(&matrix).expect("bytes"));
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+
+    let outcome = executor
+        .deliver(DELIVERY_A, matrix_command(CMD_ID, "hot-1", &sha, matrix), 1_500)
+        .expect("install matrix");
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+
+    let stored = executor
+        .port()
+        .persisted_matrix()
+        .expect("the installed matrix was never handed over for storage");
+    assert_eq!(stored.0, "hot-1");
+    assert_eq!(stored.1, sha);
+    // The bytes, not a re-serialisation of the parsed matrix: the digest the
+    // cloud computed is over what it sent.
+    let round: serde_json::Value = serde_json::from_str(&stored.2).expect("stored document");
+    assert_eq!(round, json);
+}
+
+/// A matrix read back at startup governs routing, which is the whole point of
+/// storing it.
+#[test]
+fn a_restored_matrix_replaces_the_built_in_one() {
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    let before = executor
+        .matrix()
+        .query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
+    assert!(matches!(before.capability.sms_mo, BearerSupport::Unsupported { .. }));
+
+    let json = hot_matrix_json();
+    let value: ContextValue = serde_json::from_value(json).expect("context");
+    let parsed = CapabilityMatrix::from_json_value(
+        &serde_json::to_value(&value).expect("json"),
+    )
+    .expect("parse");
+    executor.restore_matrix(parsed);
+
+    let after = executor
+        .matrix()
+        .query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
+    assert_eq!(after.capability.sms_mo, BearerSupport::Supported(Bearer::Cellular));
+}

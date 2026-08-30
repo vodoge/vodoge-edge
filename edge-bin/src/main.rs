@@ -1229,6 +1229,20 @@ mod linux {
         // console and one from the panel cannot behave differently — there is
         // one implementation, not two.
 
+        fn persist_capability_matrix(
+            &mut self,
+            version: &str,
+            sha256: &str,
+            document: &str,
+        ) -> Result<(), SendError> {
+            self.store
+                .0
+                .lock()
+                .expect("store")
+                .save_capability_matrix(version, sha256, document, unix_ms())
+                .map_err(|error| SendError::new("matrix_not_stored", error.to_string()))
+        }
+
         /// What module this is, on whose network, with what plan on the card.
         ///
         /// Read from the local store rather than the hardware: the poll loop
@@ -3248,15 +3262,59 @@ mod linux {
         let (radio, rescans) = Radio::new();
         start_at_lease(&radio);
         let proxies = Arc::new(ProxyRuntime::new(radio.clone())?);
-        let live_matrix = Arc::new(Mutex::new(
-            CapabilityMatrix::builtin().map_err(|error| error.to_string())?,
-        ));
+        // The matrix the cloud last pushed, or the compiled-in one.
+        //
+        // Read from the store rather than always starting from `builtin()`:
+        // the push is not redelivered -- its command is already `succeeded` --
+        // so a restart that ignored the stored copy silently reverted the whole
+        // fleet to the compiled-in rules, and nothing anywhere said so.
+        //
+        // A stored document that no longer parses leaves the built-in one
+        // standing and says so. A downgrade, or a row written by a build that
+        // wrote a shape this one cannot read, must not stop the agent starting.
+        let stored_matrix = shared
+            .0
+            .lock()
+            .expect("store")
+            .capability_matrix()
+            .map_err(|error| error.to_string())?;
+        let startup_matrix = match &stored_matrix {
+            Some((version, _, document)) => {
+                match serde_json::from_str::<serde_json::Value>(document)
+                    .ok()
+                    .and_then(|value| CapabilityMatrix::from_json_value(&value).ok())
+                {
+                    Some(matrix) => {
+                        log_line(format!("capability matrix restored from store version={version}"));
+                        matrix
+                    }
+                    None => {
+                        log_error(format!(
+                            "stored capability matrix version={version} did not parse; using the built-in one"
+                        ));
+                        CapabilityMatrix::builtin().map_err(|error| error.to_string())?
+                    }
+                }
+            }
+            None => {
+                log_line("no stored capability matrix; using the built-in one".to_string());
+                CapabilityMatrix::builtin().map_err(|error| error.to_string())?
+            }
+        };
+        let live_matrix = Arc::new(Mutex::new(startup_matrix.clone()));
         let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
             radio: radio.clone(),
             proxies: proxies.clone(),
             store: shared.clone(),
             matrix: live_matrix.clone(),
         })));
+        // The executor keeps the authoritative copy, so it has to start from
+        // the same place `live_matrix` does -- otherwise a restart would route
+        // by the built-in rules while reporting the stored version upstream.
+        executor
+            .lock()
+            .expect("executor")
+            .restore_matrix(startup_matrix);
         // The capability matrix as it currently stands, republished here every
         // time a command may have replaced it.
         //

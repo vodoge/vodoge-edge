@@ -79,6 +79,27 @@ pub trait SendPort {
     /// first time two messages to one recipient are in flight together.
     fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError>;
 
+    /// Store the capability matrix that was just installed, so it survives a
+    /// restart.
+    ///
+    /// Without it the push lives only in memory and every restart silently
+    /// reverts the fleet to the compiled-in rules — the cloud does not re-send,
+    /// because the command already succeeded. The document is handed over
+    /// verbatim: the digest the cloud computed is over the bytes it sent.
+    ///
+    /// Failing to store is reported but does not fail the command. The matrix
+    /// is installed and governing behaviour by the time this runs; answering
+    /// the cloud with a failure would invite a redelivery of something that
+    /// already took.
+    fn persist_capability_matrix(
+        &mut self,
+        _version: &str,
+        _sha256: &str,
+        _document: &str,
+    ) -> Result<(), SendError> {
+        Ok(())
+    }
+
     /// The module's identity and the policy on the card in it.
     ///
     /// Supplied by the port rather than decided here because the facts live in
@@ -311,6 +332,7 @@ pub struct FakeSendPort {
     restarted: Vec<String>,
     error: Option<SendError>,
     context: OperatingContext,
+    persisted_matrix: Option<(String, String, String)>,
 }
 
 impl Default for FakeSendPort {
@@ -320,6 +342,7 @@ impl Default for FakeSendPort {
             restarted: Vec::new(),
             error: None,
             context: measured_context(),
+            persisted_matrix: None,
         }
     }
 }
@@ -352,6 +375,11 @@ impl FakeSendPort {
         self
     }
 
+    /// What was handed over for storage, if anything.
+    pub fn persisted_matrix(&self) -> Option<(String, String, String)> {
+        self.persisted_matrix.clone()
+    }
+
     pub fn fail_with(&mut self, reason_code: impl Into<String>, message: impl Into<String>) {
         self.error = Some(SendError::new(reason_code, message));
     }
@@ -374,6 +402,17 @@ impl SendPort for FakeSendPort {
     /// is what `unmeasured` is for.
     fn operating_context(&mut self, _imei: Option<&str>) -> Result<OperatingContext, SendError> {
         Ok(self.context.clone())
+    }
+
+    fn persist_capability_matrix(
+        &mut self,
+        version: &str,
+        sha256: &str,
+        document: &str,
+    ) -> Result<(), SendError> {
+        self.persisted_matrix =
+            Some((version.to_owned(), sha256.to_owned(), document.to_owned()));
+        Ok(())
     }
 
     fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
@@ -773,6 +812,26 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             } => match install_matrix(matrix_version, matrix_sha256, matrix) {
                 Ok(parsed) => {
                     self.matrix = parsed;
+                    // Stored after the parse, so a restart cannot load a
+                    // document this agent rejected.
+                    match serde_json::to_string(matrix) {
+                        Ok(document) => {
+                            if let Err(error) = self.port.persist_capability_matrix(
+                                matrix_version,
+                                matrix_sha256,
+                                &document,
+                            ) {
+                                // Reported, not fatal: see the port method.
+                                eprintln!(
+                                    "capability matrix not persisted, it will be lost on restart: {}",
+                                    error.message
+                                );
+                            }
+                        }
+                        Err(error) => eprintln!(
+                            "capability matrix not serialisable, it will be lost on restart: {error}"
+                        ),
+                    }
                     Ok((
                         terminal_result(
                             &payload.cmd_id,
@@ -1180,6 +1239,17 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 },
             )),
         }
+    }
+
+    /// Adopt a matrix read back from storage at startup.
+    ///
+    /// The counterpart to `persist_capability_matrix`. Separate from a
+    /// constructor argument because the caller has to parse the stored
+    /// document first, and a document that no longer parses -- a downgrade, a
+    /// corrupted row -- should leave the built-in one standing rather than
+    /// stop the agent starting.
+    pub fn restore_matrix(&mut self, matrix: CapabilityMatrix) {
+        self.matrix = matrix;
     }
 
     fn mark_executing(&mut self, cmd_id: &str) {

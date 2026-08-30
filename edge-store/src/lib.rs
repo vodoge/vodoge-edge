@@ -73,6 +73,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0011_modem_identity.sql"),
     include_str!("../migrations/0012_card_capability.sql"),
     include_str!("../migrations/0013_apn_contexts.sql"),
+    include_str!("../migrations/0014_capability_matrix.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -637,6 +638,45 @@ impl Store {
             params![candidate_key],
         )?;
         Ok(removed != 0)
+    }
+
+    /// Store the capability matrix the cloud just pushed.
+    ///
+    /// Called after the agent has accepted and parsed it, so a document that
+    /// reaches here is one that already governs behaviour. Storing it before
+    /// the parse would leave a restart loading something the running agent had
+    /// rejected.
+    pub fn save_capability_matrix(
+        &self,
+        version: &str,
+        sha256: &str,
+        document: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO capability_matrix (id, version, sha256, document, installed_at)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version,
+                sha256 = excluded.sha256,
+                document = excluded.document,
+                installed_at = excluded.installed_at",
+            params![version, sha256, document, now],
+        )?;
+        Ok(())
+    }
+
+    /// The matrix to start from, or `None` to fall back to the built-in one.
+    pub fn capability_matrix(&self) -> Result<Option<(String, String, String)>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT version, sha256, document FROM capability_matrix WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// Record the number read off one module, and the card it came from.
