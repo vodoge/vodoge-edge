@@ -1,7 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
-    os::unix::io::AsRawFd,
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
     path::Path,
     time::{Duration, Instant},
 };
@@ -38,6 +38,21 @@ impl CdcWdmDevice {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            // 🔴 O_NONBLOCK is what bounds the write, and nothing else does.
+            //
+            // `wdm_write` blocks in the kernel with no timeout when the USB
+            // device behind the node has gone, and a blocked syscall cannot be
+            // cancelled, interrupted or waited on with a deadline. Checking
+            // that the node is still live before writing narrows the window
+            // but cannot close it: the check and the write are not atomic, and
+            // this bench hit exactly that race on 2026-08-31 -- wedged in
+            // `wdm_write` holding `/dev/cdc-wdm2 (deleted)`, on the build that
+            // had just added the check.
+            //
+            // Non-blocking makes the failure an `EAGAIN` this code can see. It
+            // does not change reads: `wait_readable` already polls first, and
+            // `read_qmux_frame` only reads once poll says there is a frame.
+            .custom_flags(libc::O_NONBLOCK)
             .open(path)
             .map_err(|error| {
                 SessionError::transport(format!("open {}: {error}", path.display()))
@@ -66,9 +81,7 @@ impl crate::QmiTransport for CdcWdmDevice {
         // stopped: no polls, no uplink, and no alert, because the thing that
         // would have raised one was the thing that was stuck.
         self.ensure_live()?;
-        self.file
-            .write_all(request)
-            .map_err(|error| self.io_error("write cdc-wdm request", &error, false))?;
+        self.write_bounded(request)?;
         let deadline = Instant::now() + self.timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -179,6 +192,52 @@ impl CdcWdmDevice {
         Ok(())
     }
 
+    /// Write the whole request, or give up at the deadline.
+    ///
+    /// The node is opened `O_NONBLOCK`, so a device that has gone answers
+    /// `EAGAIN` instead of blocking the caller for ever. Each `EAGAIN` waits
+    /// for `POLLOUT` with whatever is left of the timeout, which is also where
+    /// a hangup is noticed -- `classify_revents` reads `POLLERR|POLLHUP` as a
+    /// disconnect rather than a transport error.
+    ///
+    /// A partial write is resumed rather than restarted: QMUX frames are not
+    /// idempotent and re-sending a prefix produces a frame the modem cannot
+    /// parse.
+    fn write_bounded(&mut self, request: &[u8]) -> Result<(), SessionError> {
+        let deadline = Instant::now() + self.timeout;
+        let mut written = 0;
+        while written < request.len() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SessionError::transport(format!(
+                    "timed out writing to {} after {} of {} bytes",
+                    self.device,
+                    written,
+                    request.len()
+                )));
+            }
+            match self.file.write(&request[written..]) {
+                Ok(0) => {
+                    return Err(SessionError::Disconnected {
+                        device: self.device.clone(),
+                        awaiting_response: false,
+                    })
+                }
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_writable(&self.file, &self.device, remaining)?;
+                }
+                // A signal is not a failure; the loop simply tries again with
+                // whatever is left of the deadline.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    return Err(self.io_error("write cdc-wdm request", &error, false));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn io_error(&self, what: &str, error: &std::io::Error, awaiting_response: bool) -> SessionError {
         if is_gone(error) {
             return SessionError::Disconnected {
@@ -202,6 +261,37 @@ fn is_gone(error: &std::io::Error) -> bool {
         error.raw_os_error(),
         Some(libc::ENODEV) | Some(libc::ENXIO) | Some(libc::ESHUTDOWN)
     ) || error.kind() == std::io::ErrorKind::UnexpectedEof
+}
+
+/// Wait until the node will accept bytes, or the timeout runs out.
+///
+/// The mirror of `wait_readable`, and it shares `classify_revents` so a
+/// hangup while waiting to write is reported as the same disconnect a hangup
+/// while waiting to read is.
+fn wait_writable(file: &File, device: &str, timeout: Duration) -> Result<(), SessionError> {
+    let mut pollfd = libc::pollfd {
+        fd: file.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+    let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(SessionError::transport(format!("poll {device}: {error}")));
+    }
+    if ready == 0 {
+        return Err(SessionError::transport(format!(
+            "timed out waiting for {device} to accept a request"
+        )));
+    }
+    if pollfd.revents & libc::POLLOUT != 0 {
+        return Ok(());
+    }
+    classify_revents(device, pollfd.revents)
 }
 
 fn wait_readable(file: &File, device: &str, timeout: Duration) -> Result<(), SessionError> {
@@ -317,6 +407,63 @@ mod tests {
             "vodoge-wdm-{name}-{}-{ordinal}",
             std::process::id()
         ))
+    }
+
+
+    /// 🔴 The fifty-minute hang, at the layer that can actually stop it.
+    ///
+    /// `ensure_live` narrows the window and cannot close it: the check and the
+    /// write are not atomic, and this bench wedged in `wdm_write` holding
+    /// `/dev/cdc-wdm2 (deleted)` on the very build that added the check. A
+    /// blocking write cannot be cancelled, interrupted or given a deadline, so
+    /// the fix has to be that the write never blocks in the first place.
+    ///
+    /// Driven against a socket pair whose buffer is full and whose reader
+    /// never drains it, which is the one thing reachable from a test that
+    /// makes a write refuse to complete. Without O_NONBLOCK this test hangs
+    /// for ever rather than failing, which is precisely the bug.
+    #[test]
+    fn a_write_that_cannot_complete_times_out_instead_of_blocking() {
+        use std::os::unix::io::FromRawFd;
+
+        let mut fds = [0 as libc::c_int; 2];
+        let made =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(made, 0, "socketpair");
+        // The reader is never read from, so the writer's buffer fills and stays
+        // full. Held rather than dropped: closing it would turn the write into
+        // an EPIPE, which is a different outcome from the one under test.
+        let _reader = unsafe { File::from_raw_fd(fds[1]) };
+
+        let writer = unsafe { File::from_raw_fd(fds[0]) };
+        let flags = unsafe { libc::fcntl(fds[0], libc::F_GETFL) };
+        assert_eq!(
+            unsafe { libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0,
+            "the transport opens its node non-blocking; the test says so too"
+        );
+        let mut device = CdcWdmDevice {
+            file: writer,
+            timeout: Duration::from_millis(150),
+            device: "/dev/cdc-wdm-test".into(),
+        };
+
+        // Comfortably more than a default socket buffer, so it cannot complete.
+        let oversized = vec![0x41u8; 4 * 1024 * 1024];
+        let started = Instant::now();
+        let error = device
+            .write_bounded(&oversized)
+            .expect_err("a write that cannot finish must not report success");
+        let waited = started.elapsed();
+
+        assert!(
+            error.to_string().contains("timed out"),
+            "expected a timeout, got {error}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "the write blocked for {waited:?} instead of honouring its deadline"
+        );
     }
 
     /// 🔴 The fifty-minute hang, as a test. A `cdc-wdm` node whose device has
