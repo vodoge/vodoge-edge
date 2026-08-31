@@ -5,6 +5,7 @@
 //! stay deterministic and straightforward to test.
 
 mod network;
+mod alert;
 mod apn;
 mod at_policy;
 mod strategy;
@@ -31,6 +32,7 @@ pub use concat::{assemble, AssembledSms, ConcatPart, FRAGMENT_GRACE_MS};
 pub use gsm7::decode as decode_gsm7;
 pub use pdu::{decode_deliver, decode_status_report, hex, Deliver, StatusReport};
 pub use factory::{PolicyFamily, VerticalFactory, VerticalRegistry};
+pub use alert::{AlertLevel, AlertThrottle, Decision, DEFAULT_WINDOW_MS};
 pub use apn::{
     merge_credentials, parse_cgdcont, parse_qicsgp, ApnAuth, ApnContext, ApnCredentials,
     SOURCE_CONFIGURED,

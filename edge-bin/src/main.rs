@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn main() {
@@ -3957,6 +3957,18 @@ mod linux {
                 // failure to the one log line it has always been.
                 Err(error) => {
                     log_error(format!("poll {} FAIL {error}", path.display()));
+                    // The bench's own long-running example: /dev/cdc-wdm1 has
+                    // answered POLLERR every poll for hours with nothing
+                    // upstream aware of it. The port goes in the context
+                    // rather than the code so the throttle still groups them.
+                    raise_alert(
+                        outbox,
+                        edge_core::AlertLevel::Error,
+                        "qmi_poll_failed",
+                        format!("{}: {error}", path.display()),
+                        serde_json::json!({ "port": path.display().to_string() }),
+                        now,
+                    );
                     record_discovery(
                         shared,
                         DiscoveryTransport::Qmi,
@@ -4068,6 +4080,17 @@ mod linux {
                 .collect();
             for (imei, seen) in missing {
                 log_error(format!("poll imei={imei} absent from both enumerations"));
+                // A module that was in the inventory and is now in neither
+                // enumeration: unplugged, or its USB endpoint has gone. Either
+                // way nothing else says so.
+                raise_alert(
+                    outbox,
+                    edge_core::AlertLevel::Warning,
+                    "modem_absent",
+                    format!("modem {imei} is in neither enumeration"),
+                    serde_json::json!({ "imei": imei }),
+                    now,
+                );
                 snapshots.push(absent_snapshot(&imei, &seen, "offline"));
             }
         }
@@ -6399,6 +6422,76 @@ mod linux {
                 .collect::<Vec<_>>()
         });
         append_kind(outbox, "DeviceState", payload)
+    }
+
+
+    /// The alert throttle this process announces through.
+    ///
+    /// Process-global for the same reason `LogRing` is: raising an alert is
+    /// ambient, and threading a handle through every call site that can fail
+    /// would change a dozen signatures to carry something none of them are
+    /// about.
+    fn alert_throttle() -> &'static Mutex<edge_core::AlertThrottle> {
+        static THROTTLE: OnceLock<Mutex<edge_core::AlertThrottle>> = OnceLock::new();
+        THROTTLE.get_or_init(|| {
+            Mutex::new(edge_core::AlertThrottle::new(edge_core::DEFAULT_WINDOW_MS))
+        })
+    }
+
+    /// Tell the cloud something is wrong, at most once per window per code.
+    ///
+    /// 🔴 `code` must be a constant. It is what the throttle groups by, so a
+    /// code with a port or an IMEI interpolated into it makes every occurrence
+    /// a distinct fault and defeats the throttle entirely -- which is the
+    /// failure this whole path exists to avoid. Anything that varies belongs
+    /// in `context`.
+    ///
+    /// Failure to enqueue is logged and swallowed: an alert that cannot be
+    /// sent must not take down the thing that was trying to report a problem.
+    fn raise_alert(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        level: edge_core::AlertLevel,
+        code: &'static str,
+        message: impl Into<String>,
+        context: serde_json::Value,
+        now: i64,
+    ) {
+        let decision = {
+            let mut throttle = alert_throttle().lock().expect("alert throttle");
+            throttle.consider(code, now)
+        };
+        let repeats = match decision {
+            edge_core::Decision::Suppress => return,
+            edge_core::Decision::Send => 0,
+            edge_core::Decision::Repeat { repeats } => repeats,
+        };
+        let mut context = context;
+        if repeats > 0 {
+            if let Some(map) = context.as_object_mut() {
+                // The number that says "still broken" rather than "broke
+                // again": how many occurrences were held back since the last
+                // time this code was announced.
+                map.insert("repeats".into(), serde_json::json!(repeats));
+            }
+        }
+        let message: String = message.into();
+        let payload = serde_json::json!({
+            "level": level.wire(),
+            "code": code,
+            // The contract caps this at 1024 and requires at least one
+            // character. Truncating here beats having the cloud reject the
+            // envelope and lose the alert entirely.
+            "message": if message.is_empty() {
+                code.to_string()
+            } else {
+                message.chars().take(1024).collect::<String>()
+            },
+            "occurred_at": now,
+            "context": context,
+        });
+        if let Err(error) = append_kind(outbox, "Alert", payload) {
+            log_error(format!("alert {code} not enqueued: {error}"));
+        }
     }
 
     fn append_kind(
