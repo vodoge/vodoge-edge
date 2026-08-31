@@ -502,10 +502,18 @@ pub fn disable_profile_payload(iccid: &str, refresh: bool) -> Result<Vec<u8>, Es
 
 /// `SetNickname` by ICCID.
 ///
-/// An empty nickname is sent as an absent field rather than an empty string:
-/// SGP.22 makes `profileNickname` OPTIONAL, and omitting it is how a name is
-/// cleared. Sending a zero-length UTF8String instead leaves cards free to
-/// store one and report it back as a name that renders as nothing.
+/// 🔴 **The field is always sent, even empty, and that is a measurement rather
+/// than a reading of the specification.** SGP.22 makes `profileNickname`
+/// OPTIONAL, so omitting it is the obvious way to clear a name, and this
+/// function did that until 2026-08-31 -- when the bench eUICC
+/// (EID 89086030202200000026000178339240) answered a request with no
+/// `profileNickname` with `undefined error (127)`. A zero-length UTF8String is
+/// what it accepts.
+///
+/// The concern that led to the first shape still stands in principle: a card
+/// is free to store an empty name and report it back as one that renders as
+/// nothing. It is a smaller problem than a clear that does not work at all,
+/// and the one card that has spoken on the subject has settled it.
 pub fn set_nickname_payload(iccid: &str, nickname: &str) -> Result<Vec<u8>, Es10cError> {
     let iccid = encode_iccid(iccid)?;
     let nickname = nickname.trim();
@@ -516,11 +524,9 @@ pub fn set_nickname_payload(iccid: &str, nickname: &str) -> Result<Vec<u8>, Es10
     }
     let mut body = vec![TAG_ICCID, iccid.len() as u8];
     body.extend_from_slice(&iccid);
-    if !nickname.is_empty() {
-        body.push(TAG_NICKNAME);
-        body.push(nickname.len() as u8);
-        body.extend_from_slice(nickname.as_bytes());
-    }
+    body.push(TAG_NICKNAME);
+    body.push(nickname.len() as u8);
+    body.extend_from_slice(nickname.as_bytes());
     let mut request = TAG_SET_NICKNAME.to_vec();
     request.push(body.len() as u8);
     request.extend_from_slice(&body);
@@ -2562,16 +2568,18 @@ mod tests {
         assert_eq!(request[tag_at + 1], 5, "length precedes the text");
     }
 
-    /// 🔴 Clearing a name is an absent field, not an empty string. A card that
-    /// stores a zero-length nickname reports it back as a name that renders as
-    /// nothing, which is not the same as having none.
+    /// 🔴 Clearing a name sends an empty field, not no field. Measured
+    /// 2026-08-31: the bench eUICC answers `undefined error (127)` to a
+    /// SetNickname carrying no `profileNickname` at all, so the obvious
+    /// reading of SGP.22's OPTIONAL is the one that does not work here.
     #[test]
-    fn an_empty_nickname_is_omitted_rather_than_sent_empty() {
+    fn clearing_a_nickname_sends_an_empty_field_rather_than_none() {
         let request = set_nickname_payload("8985200014632179571", "  ").expect("payload");
-        assert!(
-            !request.contains(&0x90),
-            "an empty nickname was sent as a field: {request:02x?}"
-        );
+        let tag_at = request
+            .iter()
+            .position(|byte| *byte == TAG_NICKNAME)
+            .expect("the nickname field must be present even when empty");
+        assert_eq!(request[tag_at + 1], 0, "a cleared nickname has length zero");
     }
 
     #[test]

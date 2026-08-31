@@ -28,6 +28,7 @@ mod session;
 mod uim;
 mod usb;
 mod ussd;
+mod wds;
 mod wms;
 
 use std::{
@@ -131,6 +132,11 @@ pub use uim::{
     CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, MAX_GET_RESPONSE_ROUNDS,
     OPEN_LOGICAL_CHANNEL, SEND_APDU,
 };
+pub use wds::{
+    current_settings_request as wds_current_settings_request, parse_call_end_reason,
+    parse_current_settings, parse_start as parse_wds_start, start_request as wds_start_request,
+    stop_request as wds_stop_request, AuthPreference, Ipv4Settings, PacketDataHandle, WdsError,
+};
 pub use wms::{
     parse_list_messages, parse_raw_read, retain_mobile_terminated, ListedMessage, MessageMode,
     MessageTag, RawMessage, StorageType, WmsError, LIST_MESSAGES, RAW_READ, RAW_SEND,
@@ -159,6 +165,7 @@ impl ServiceId {
     pub const CONTROL: Self = Self(0x00);
     pub const DMS: Self = Self(0x02);
     pub const NAS: Self = Self(0x03);
+    pub const WDS: Self = Self(0x01);
     pub const WMS: Self = Self(0x05);
     pub const UIM: Self = Self(0x0b);
 
