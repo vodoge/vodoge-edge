@@ -52,6 +52,20 @@ impl CdcWdmDevice {
 
 impl crate::QmiTransport for CdcWdmDevice {
     fn transact(&mut self, request: &[u8]) -> Result<Vec<u8>, SessionError> {
+        // 🔴 Before writing, not after. A write to a `cdc-wdm` node whose
+        // device has re-enumerated blocks inside the kernel's `wdm_write`
+        // and never returns -- there is no timeout to reach, no error to
+        // map, and no signal that arrives.
+        //
+        // Measured on this bench 2026-08-31: a `reset_modem_usb` -- a command
+        // this product offers operators as a recovery action -- deleted
+        // /dev/cdc-wdm0 while the agent held it open, and the next QMI write
+        // wedged the process for fifty minutes. `ps` showed the main thread
+        // in `wdm_write` and `/proc/PID/fd` showed `/dev/cdc-wdm0 (deleted)`.
+        // The poll loop and the panel share that thread, so the whole agent
+        // stopped: no polls, no uplink, and no alert, because the thing that
+        // would have raised one was the thing that was stuck.
+        self.ensure_live()?;
         self.file
             .write_all(request)
             .map_err(|error| self.io_error("write cdc-wdm request", &error, false))?;
@@ -123,6 +137,48 @@ fn address_of(frame: &[u8]) -> Option<(u8, u8, u16)> {
 impl CdcWdmDevice {
     /// Classifies an `io::Error` from the node. Everything here happens with
     /// the request already written, except the write itself.
+    /// Whether this handle still refers to the node it was opened on.
+    ///
+    /// Two ways it can stop doing so, and both happen when a module
+    /// re-enumerates:
+    ///
+    /// * **The node was deleted.** The path is unlinked, the inode survives
+    ///   because this handle holds it, and its link count drops to zero. That
+    ///   is the state `/proc/PID/fd` renders as `(deleted)`.
+    /// * **The node was recreated.** The path exists again and resolves to a
+    ///   *different* inode; this handle still points at the old one. The path
+    ///   check alone would miss this, which is why both are here.
+    ///
+    /// A failure to stat the path is treated as gone rather than ignored: the
+    /// usual reason is that it is not there.
+    fn ensure_live(&self) -> Result<(), SessionError> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let gone = || SessionError::Disconnected {
+            device: self.device.clone(),
+            awaiting_response: false,
+        };
+        let held = self.file.metadata().map_err(|_| gone())?;
+        // The question is whether this character device node is still the one
+        // that was opened, and it does not apply to a handle that was never a
+        // character device. The transport tests drive `transact` over a socket
+        // pair -- which behaves like the node for `poll` and for reads, which
+        // is the point of it -- and a socket has no path and no link count to
+        // compare. Narrowing here rather than loosening the checks below keeps
+        // the guard exact for the thing it is about.
+        if !held.file_type().is_char_device() {
+            return Ok(());
+        }
+        if held.nlink() == 0 {
+            return Err(gone());
+        }
+        let current = std::fs::metadata(&self.device).map_err(|_| gone())?;
+        if current.ino() != held.ino() || current.dev() != held.dev() {
+            return Err(gone());
+        }
+        Ok(())
+    }
+
     fn io_error(&self, what: &str, error: &std::io::Error, awaiting_response: bool) -> SessionError {
         if is_gone(error) {
             return SessionError::Disconnected {
@@ -251,6 +307,66 @@ mod tests {
     use super::*;
 
     const DEVICE: &str = "/dev/cdc-wdm2";
+
+
+    /// A scratch path nobody else will collide with.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let ordinal = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "vodoge-wdm-{name}-{}-{ordinal}",
+            std::process::id()
+        ))
+    }
+
+    /// 🔴 The fifty-minute hang, as a test. A `cdc-wdm` node whose device has
+    /// re-enumerated is deleted out from under the handle, and the kernel's
+    /// `wdm_write` never returns for it -- so the only place this can be
+    /// caught is before the write.
+    ///
+    /// Driven against `/dev/null`, which is a real character device: the guard
+    /// deliberately does not apply to anything else, so a regular file would
+    /// pass it for the wrong reason and prove nothing. The node is a symlink
+    /// to it, so deleting the symlink is the re-enumeration.
+    #[test]
+    fn a_deleted_node_is_refused_before_anything_is_written() {
+        let path = scratch("deleted");
+        std::os::unix::fs::symlink("/dev/null", &path).expect("node");
+        let device = CdcWdmDevice::open(&path).expect("open");
+        assert!(device.ensure_live().is_ok(), "a live node must pass");
+
+        std::fs::remove_file(&path).expect("delete");
+        let error = device
+            .ensure_live()
+            .expect_err("a deleted node must not be written to");
+        assert!(
+            matches!(&error, SessionError::Disconnected { awaiting_response, .. }
+                if !*awaiting_response),
+            "nothing was written, so nothing is awaiting a response: {error:?}"
+        );
+    }
+
+    /// The other half, and the one a path check alone would miss: the node is
+    /// back at the same path and is a different inode. The handle still points
+    /// at the old one, so it is just as dead.
+    #[test]
+    fn a_recreated_node_is_refused_even_though_the_path_exists() {
+        let path = scratch("recreated");
+        std::os::unix::fs::symlink("/dev/null", &path).expect("node");
+        let device = CdcWdmDevice::open(&path).expect("open");
+
+        std::fs::remove_file(&path).expect("delete");
+        std::os::unix::fs::symlink("/dev/zero", &path).expect("recreate as another device");
+        assert!(
+            path.exists(),
+            "the path is back, which is exactly why the inode has to be checked"
+        );
+        assert!(
+            device.ensure_live().is_err(),
+            "a handle to the old inode was treated as live because the path returned"
+        );
+        std::fs::remove_file(&path).ok();
+    }
 
     /// The failure this whole classification exists for.
     ///
