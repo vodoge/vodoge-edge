@@ -4382,6 +4382,19 @@ mod linux {
         let matrix = live_matrix.lock().expect("capability matrix").clone();
         // Read here rather than inside: the state builder takes no store, and
         // a failed read must not stop a state report that is otherwise good.
+        // Drop sightings of endpoints nothing has seen for a day. The key is
+        // derived from USB topology, so a module that comes back on a
+        // different bus path is a new row rather than an update -- and without
+        // this the list grows by one per re-plug and never shrinks.
+        {
+            let store = shared.0.lock().expect("store");
+            let cutoff = now - DISCOVERY_RETENTION_MS;
+            match store.forget_stale_discoveries(cutoff) {
+                Ok(0) => {}
+                Ok(removed) => log_line(format!("discoveries pruned: {removed}")),
+                Err(error) => log_error(format!("discoveries not pruned: {error}")),
+            }
+        }
         let discoveries = match shared.0.lock().expect("store").list_local_modem_discoveries() {
             Ok(rows) => rows,
             Err(error) => {
@@ -6553,6 +6566,13 @@ mod linux {
         kernel: Option<String>,
         hostname: Option<String>,
     }
+
+    /// How long a candidate sighting outlives its last observation.
+    ///
+    /// A day: long enough that a module unplugged overnight is still listed in
+    /// the morning with an honest `last_seen`, short enough that a week of
+    /// re-plugs does not leave a list that is mostly archaeology.
+    const DISCOVERY_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
     fn enqueue_device_state(
         outbox: &Arc<Mutex<DurableOutbox>>,

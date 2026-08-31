@@ -114,3 +114,51 @@ fn manual_profile_updates_and_can_be_withdrawn() {
         .expect("list after withdraw")
         .is_empty());
 }
+
+/// 🔴 A candidate key is derived from USB topology, so a module that comes
+/// back on a different bus path is a *new* row rather than an update to the
+/// old one. Without a prune the list grows by one per re-plug and never
+/// shrinks: this bench reached sixteen rows for four modules, with one port
+/// name recorded against three different IMEIs.
+#[test]
+fn a_sighting_nothing_has_seen_for_a_day_is_forgotten() {
+    let store = Store::open_in_memory().expect("open");
+    let sighting = |key: &str, seen: i64| LocalModemDiscovery {
+        candidate_key: key.into(),
+        usb_device: Some("2-4.1".into()),
+        transport: "qmi".into(),
+        control_port: "/dev/cdc-wdm1".into(),
+        vendor_id: Some("2c7c".into()),
+        product_id: Some("0125".into()),
+        state: "probe_failed".into(),
+        imei: None,
+        detail: "stale".into(),
+        last_seen: seen,
+    };
+    let day = 24 * 60 * 60 * 1000;
+    let now = 10 * day;
+    store
+        .upsert_local_modem_discovery(&sighting("qmi:usb:2-4.1", now - day - 1))
+        .expect("stale");
+    store
+        .upsert_local_modem_discovery(&sighting("qmi:usb:2-4.2", now - 60_000))
+        .expect("fresh");
+
+    let removed = store.forget_stale_discoveries(now - day).expect("prune");
+    assert_eq!(removed, 1, "exactly the one nothing has seen");
+
+    let left = store.list_local_modem_discoveries().expect("list");
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        left[0].candidate_key, "qmi:usb:2-4.2",
+        "the prune took the wrong row"
+    );
+}
+
+/// Pruning nothing must not be an error, because that is the normal case: it
+/// runs every poll and almost always has nothing to do.
+#[test]
+fn pruning_an_empty_table_removes_nothing_and_succeeds() {
+    let store = Store::open_in_memory().expect("open");
+    assert_eq!(store.forget_stale_discoveries(1_000).expect("prune"), 0);
+}

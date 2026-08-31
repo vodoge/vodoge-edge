@@ -587,6 +587,28 @@ impl Store {
         Ok(rows)
     }
 
+    /// Forget candidates nothing has seen for a while.
+    ///
+    /// A candidate row is evidence that an endpoint was there. USB topology is
+    /// what the key is derived from, so a module that re-enumerates onto a
+    /// different bus path becomes a *new* key rather than an update to the old
+    /// one -- and the old one stays, describing an endpoint that no longer
+    /// exists. After a few re-plugs the list is mostly history: on this bench,
+    /// 2026-08-31, sixteen rows for four modules, with one port name appearing
+    /// against three different IMEIs.
+    ///
+    /// Approved candidates are pruned too, and deliberately. An approval is
+    /// stored separately in `manual_modem_profiles` and is matched back by
+    /// endpoint, so dropping the observation does not withdraw the approval --
+    /// it drops the sighting, which is the thing that has expired.
+    pub fn forget_stale_discoveries(&self, before: i64) -> Result<usize, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM local_modem_discoveries WHERE last_seen < ?1",
+            [before],
+        )?;
+        Ok(removed)
+    }
+
     /// Save an operator's approval of an automatically discovered candidate.
     ///
     /// `candidate_key` is intentionally the identity here: a profile cannot
