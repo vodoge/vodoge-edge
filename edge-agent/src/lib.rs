@@ -980,7 +980,12 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 force,
             } => {
                 self.mark_executing(&payload.cmd_id);
-                let outcome = self.port.run_at(modem_imei, command, *timeout_ms, *force);
+                // The contract makes `force` optional, so an absent field is
+                // the safe reading: not forced. Defaulting the other way would
+                // let a command with the field omitted run a disruptive AT.
+                let outcome =
+                    self.port
+                        .run_at(modem_imei, command, *timeout_ms, force.unwrap_or(false));
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -1025,7 +1030,13 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.configure_apn(&ApnWrite {
                     imei: modem_imei,
-                    cid: *cid,
+                    // The contract carries the identifier as an integer and
+                    // constrains it to 0..=255 there; the port is typed to
+                    // that range. A value outside it cannot have passed
+                    // validation, so clamping is unreachable rather than
+                    // lossy -- and it is still better than a cast that would
+                    // silently wrap 256 to 0, which is a context that exists.
+                    cid: u8::try_from(*cid).unwrap_or(u8::MAX),
                     pdp_type: pdp_type.as_deref(),
                     apn,
                     username: username.as_deref(),
@@ -1083,7 +1094,16 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 contains,
             } => {
                 self.mark_executing(&payload.cmd_id);
-                let outcome = self.port.read_logs(*after, *limit, contains.as_deref());
+                // Both are integers in the contract and bounded there --
+                // `after` at zero and above, `limit` at 1..=500. A negative
+                // that reached here could not have been validated, and
+                // treating it as absent is the reading that cannot invent a
+                // cursor.
+                let outcome = self.port.read_logs(
+                    after.and_then(|value| u64::try_from(value).ok()),
+                    limit.and_then(|value| u32::try_from(value).ok()),
+                    contains.as_deref(),
+                );
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

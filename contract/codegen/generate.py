@@ -123,7 +123,23 @@ def rust_type(schema: dict, defs: dict) -> str:
         return "String"
     if "const" in schema:
         return "String"
+    # `"type": ["boolean", "null"]` is the other spelling of a nullable field,
+    # and the generator understood only the `anyOf` one above. A type array it
+    # did not recognise fell through to `ContextValue`, which compiles and
+    # silently loses the type: `SubscriptionCapability` is declared this way and
+    # came out as three `Option<ContextValue>` where the schema says three
+    # nullable booleans. Handled here rather than by rewriting the schema,
+    # because both spellings are valid and the next one written will be
+    # whichever the author reached for.
     types = schema.get("type")
+    if isinstance(types, list):
+        without_null = [item for item in types if item != "null"]
+        if len(without_null) == 1 and len(types) == 2:
+            inner = rust_type({**schema, "type": without_null[0]}, defs)
+            if inner.startswith("Option<"):
+                return inner
+            return f"Option<{inner}>"
+        return "ContextValue"
     if types == "string":
         return "String"
     if types == "boolean":

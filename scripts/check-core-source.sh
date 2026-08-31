@@ -105,6 +105,7 @@ cmp          Reverse, an ordering adapter used when ranking evidence
 collections  BTreeMap and HashMap; in-memory containers
 error        the Error trait, so this crate's errors compose
 fmt          Display and Formatter; produces strings, never writes them out
+mem          take, to move a String out of a local without copying it
 sync         Arc, a reference count; no threads are spawned here
 ALLOWED
 }
