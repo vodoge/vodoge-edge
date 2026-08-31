@@ -172,12 +172,68 @@ mod linux {
         /// the panel's staleness window, so without this the panel reports a
         /// modem as offline while it is busy doing exactly what was asked.
         busy: Arc<Mutex<Option<PathBuf>>>,
+        /// Live packet data sessions, keyed by IMEI.
+        ///
+        /// 🔴 **The QMI client in here is why this map exists.** A packet data
+        /// handle is owned by the client that started it, so the session ends
+        /// the moment that client is released -- which is what every other
+        /// operation on this bench does, because `with_client` opens a device,
+        /// does its work and drops it. A data path has to outlive the call
+        /// that asked for it, so the client is parked here and stays open.
+        sessions: Arc<Mutex<BTreeMap<String, DataSession>>>,
         /// Asks the poll loop to look for modems now.
         ///
         /// Capacity one, and a full channel is not an error: a pending rescan
         /// is already what a second request wanted. Queueing one rescan per
         /// click would make an impatient operator wait longer, not less.
         rescan: SyncSender<()>,
+    }
+
+    /// One running packet data session and everything it took to make it.
+    struct DataSession {
+        /// Kept open for the session's lifetime. Dropping it ends the session.
+        client: QmiClient<CdcWdmDevice>,
+        handle: edge_modem::PacketDataHandle,
+        interface: String,
+        address: String,
+        prefix: u8,
+        gateway: Option<String>,
+    }
+
+    impl DataSession {
+        fn describe(&self) -> serde_json::Value {
+            serde_json::json!({
+                "interface": self.interface,
+                "address": self.address,
+                "prefix": self.prefix,
+                "gateway": self.gateway,
+            })
+        }
+    }
+
+    /// Run one `ip` invocation, naming what failed.
+    fn run_step(step: &edge_modem::Step) -> Result<(), SendError> {
+        let output = std::process::Command::new(step.program)
+            .args(&step.args)
+            .output()
+            .map_err(|error| {
+                SendError::new("data_plane_tool_missing", format!("{}: {error}", step.program))
+            })?;
+        if output.status.success() || step.tolerant {
+            return Ok(());
+        }
+        // The tool's own message, not the exit code: "RTNETLINK answers: File
+        // exists" and "Network is unreachable" are different faults and the
+        // number is the same.
+        Err(SendError::new(
+            "data_plane_step_failed",
+            format!(
+                "{} {}: {}",
+                step.program,
+                step.args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ))
     }
 
     impl Radio {
@@ -192,6 +248,7 @@ mod linux {
                 arbiter: Arc::new(edge_modem::ModemArbiter::new()),
                 by_imei: Arc::new(Mutex::new(BTreeMap::new())),
                 busy: Arc::new(Mutex::new(None)),
+                sessions: Arc::new(Mutex::new(BTreeMap::new())),
                 rescan,
             };
             (radio, requests)
@@ -228,6 +285,137 @@ mod linux {
             *self.busy.lock().expect("busy") = Some(path.to_path_buf());
             BusyGuard {
                 busy: self.busy.clone(),
+            }
+        }
+
+
+        /// Bring a module's data path up: QMI session, then the interface.
+        ///
+        /// The APN comes from the module's own context 1 rather than from the
+        /// caller. That is the context these modules dial on, it is what
+        /// `configure_apn` writes, and taking one here would let the data path
+        /// use a name that is not in the table an operator can see.
+        fn start_data(&self, imei: &str, apn: &str) -> Result<serde_json::Value, SendError> {
+            let _lock = self.arbiter.acquire(edge_modem::ModemPriority::Normal);
+            let path = self.path_for(Some(imei))?;
+            let _busy = self.hold(&path);
+            let sysfs = Path::new("/sys");
+            let interface = edge_modem::interface_for(sysfs, &path).ok_or_else(|| {
+                SendError::new(
+                    "no_data_interface",
+                    format!("{} has no wwan interface behind it", path.display()),
+                )
+            })?;
+
+            // Down before the framing changes: `raw_ip` returns EBUSY on a live
+            // interface, and an interface left in Ethernet framing passes no
+            // traffic while looking entirely healthy.
+            run_step(&edge_modem::Step {
+                program: "ip",
+                args: vec!["link".into(), "set".into(), interface.clone(), "down".into()],
+                tolerant: false,
+            })?;
+            let raw_ip = edge_modem::raw_ip_path(sysfs, &interface);
+            std::fs::write(&raw_ip, b"Y").map_err(|error| {
+                SendError::new(
+                    "raw_ip_refused",
+                    format!("{}: {error}", raw_ip.display()),
+                )
+            })?;
+
+            let device = CdcWdmDevice::open(&path)
+                .map_err(|error| SendError::new("modem_open_failed", error.to_string()))?;
+            let mut client = QmiClient::new(device);
+            client
+                .sync()
+                .map_err(|error| SendError::new("modem_sync_failed", error.to_string()))?;
+            // Before the session, and before anything is written to the
+            // interface: the modem has to be told the same framing the sysfs
+            // toggle just set on the host. Without this the two disagree and
+            // every packet is dropped in both directions while every status
+            // command reports a healthy connection.
+            let settled = client
+                .set_data_format(edge_modem::LinkLayer::RawIp)
+                .map_err(|error| SendError::new("data_format_refused", error.to_string()))?;
+            if settled != edge_modem::LinkLayer::RawIp {
+                return Err(SendError::new(
+                    "data_format_mismatch",
+                    format!("the modem kept {settled:?} framing while the host is raw-ip"),
+                ));
+            }
+            let handle = client
+                .start_data_session(apn, None, None, edge_modem::AuthPreference::None)
+                .map_err(|error| SendError::new("data_session_failed", error.to_string()))?;
+            let settings = client
+                .data_settings()
+                .map_err(|error| SendError::new("data_settings_failed", error.to_string()))?;
+
+            let address = settings.address.map(std::net::Ipv4Addr::from).ok_or_else(|| {
+                SendError::new("no_address_assigned", "the session carried no IPv4 address")
+            })?;
+            let prefix = settings.prefix_length().unwrap_or(32);
+            let gateway = settings.gateway.map(std::net::Ipv4Addr::from).map(|v| v.to_string());
+            let view = edge_modem::Ipv4View {
+                address: address.to_string(),
+                prefix,
+                gateway: gateway.clone(),
+                mtu: settings.mtu,
+            };
+            // A half-configured interface is worse than an unconfigured one: it
+            // has an address, so everything downstream reads it as connected.
+            // Undo before reporting.
+            for step in edge_modem::bring_up(&interface, &view) {
+                if let Err(error) = run_step(&step) {
+                    for undo in edge_modem::tear_down(&interface, Some(&view.address)) {
+                        let _ = run_step(&undo);
+                    }
+                    return Err(error);
+                }
+            }
+
+            let session = DataSession {
+                client,
+                handle,
+                interface,
+                address: address.to_string(),
+                prefix,
+                gateway,
+            };
+            let described = session.describe();
+            self.sessions
+                .lock()
+                .expect("sessions")
+                .insert(imei.to_owned(), session);
+            Ok(described)
+        }
+
+        /// Take a module's data path down, and forget the session.
+        fn stop_data(&self, imei: &str) -> Result<serde_json::Value, SendError> {
+            let _lock = self.arbiter.acquire(edge_modem::ModemPriority::Normal);
+            let mut session = match self.sessions.lock().expect("sessions").remove(imei) {
+                Some(session) => session,
+                None => {
+                    return Err(SendError::new(
+                        "no_data_session",
+                        "this agent is not holding a data session for that module",
+                    ))
+                }
+            };
+            // The interface comes down whatever the modem says: leaving a
+            // stale address on a link whose session has ended is worse than a
+            // failed stop, because everything after it looks connected.
+            let mut trouble: Option<SendError> = None;
+            if let Err(error) = session.client.stop_data_session(session.handle) {
+                trouble = Some(SendError::new("data_stop_failed", error.to_string()));
+            }
+            for step in edge_modem::tear_down(&session.interface, Some(&session.address)) {
+                if let Err(error) = run_step(&step) {
+                    trouble.get_or_insert(error);
+                }
+            }
+            match trouble {
+                Some(error) => Err(error),
+                None => Ok(serde_json::json!({ "interface": session.interface })),
             }
         }
 
@@ -1141,6 +1329,30 @@ mod linux {
         }
     }
 
+    impl RadioPort {
+        /// The APN the data path should dial, read off the module.
+        ///
+        /// Context 1 rather than an argument: it is the one these modules dial
+        /// on, it is what `configure_apn` writes, and accepting a name here
+        /// would let the data path use one that is not in the table an
+        /// operator can see.
+        fn apn_for_data(&mut self, imei: &str) -> Result<String, SendError> {
+            let listing = self.at_exchange(imei, "AT+CGDCONT?", None)?;
+            let apn = edge_core::parse_cgdcont(&listing.lines)
+                .into_iter()
+                .find(|context| context.cid == 1)
+                .map(|context| context.apn)
+                .unwrap_or_default();
+            if apn.is_empty() {
+                return Err(SendError::new(
+                    "no_apn_configured",
+                    "context 1 carries no APN; set one before bringing data up",
+                ));
+            }
+            Ok(apn)
+        }
+    }
+
     impl SendPort for RadioPort {
         fn send_sms(&mut self, send: &SmsSend) -> Result<JsonValue, SendError> {
             // TP-MR, chosen here and reported back. A delivery receipt names
@@ -1662,6 +1874,39 @@ mod linux {
         }
 
         fn set_data_network(&mut self, imei: &str, enabled: bool) -> Result<JsonValue, SendError> {
+            // The QMI path first, because it is the one that produces a usable
+            // interface. `AT+CGACT` attaches the bearer and stops there: it
+            // leaves the `wwan` device down with no address, which is how this
+            // bench came to have four registered modules, a populated APN
+            // table, and no data path at all.
+            //
+            // Falling back only on `modem_not_found` keeps the AT path for the
+            // modules that have no QMI to use -- the EC200U-CN speaks AT only.
+            // Any other failure is a real fault on a module that does have
+            // QMI, and swallowing it would hide the reason behind a second
+            // attempt that cannot work either.
+            let attempt = if enabled {
+                match self.apn_for_data(imei) {
+                    Ok(apn) => self.radio.start_data(imei, apn.as_str()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.radio.stop_data(imei)
+            };
+            match attempt {
+                Ok(details) => {
+                    return json_details(&serde_json::json!({
+                        "requested": if enabled { "up" } else { "down" },
+                        "transport": "qmi",
+                        "session": details,
+                    }))
+                }
+                Err(error)
+                    if error.reason_code == "modem_not_found"
+                        || error.reason_code == "no_data_interface" => {}
+                Err(error) => return Err(error),
+            }
+
             // 27.007 `AT+CGACT`, on context 1: the default bearer these
             // modules dial on. Contexts 2 and 3 are the IMS and emergency
             // ones, which belong to the network rather than to an operator.
@@ -1678,10 +1923,12 @@ mod linux {
             let now = self.at_exchange(imei, "AT+CGACT?", None)?;
             json_details(&serde_json::json!({
                 "requested": if enabled { "up" } else { "down" },
+                "transport": "at",
                 "elapsed_ms": wrote.elapsed_ms,
                 "contexts": now.lines,
             }))
         }
+
 
         fn set_usbnet_mode(&mut self, imei: &str, mode: &str) -> Result<JsonValue, SendError> {
             // Quectel `AT+QCFG="usbnet"`. The bench modules advertise 0-4;

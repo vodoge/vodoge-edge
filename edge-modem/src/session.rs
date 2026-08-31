@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, time::Duration};
 
 use crate::{
-    dms, es10c, es9p, nas, uim, unique_tlv, wms, ActivationCode, AllocationError, ApduResponse,
+    dms, es10c, es9p, nas, uim, unique_tlv, wda, wds, wms, ActivationCode, AllocationError, ApduResponse,
     AuthenticationStart, CellLocationInfo, ClientAllocationRequest, ClientAssignment,
     ClientAuthentication, ClientId, ClientRegistry, ClientRegistryError, ConfiguredAddresses,
     CorrelationError, DeviceRevision, DeviceSerialNumbers, DmsError, Es9pClient, Es9pError,
@@ -473,6 +473,99 @@ impl<T: QmiTransport> QmiClient<T> {
         let outcome = session.retrieve_notification(sequence_number);
         session.close()?;
         outcome
+    }
+
+
+    /// Agree the data-path framing with the modem.
+    ///
+    /// 🔴 **Must be sent before the session starts, and the sysfs toggle is
+    /// not a substitute.** `/sys/class/net/wwanX/qmi/raw_ip` sets the host's
+    /// framing; this sets the modem's. With the two disagreeing every packet
+    /// is dropped in both directions while `AT+CGACT?`, `AT+CGPADDR`,
+    /// `AT+CGREG?` and `AT+CSQ` all report a healthy connection -- measured on
+    /// this bench 2026-08-31, host sending 2196 bytes and the modem's own
+    /// counter not moving once.
+    ///
+    /// The answer is read back rather than assumed: a modem may report success
+    /// and keep the framing it had, which is the same failure again.
+    pub fn set_data_format(
+        &mut self,
+        link_layer: wda::LinkLayer,
+    ) -> Result<wda::LinkLayer, SessionError> {
+        let assignment = self.assignment(ServiceId::WDA)?;
+        let request = wda::set_data_format_request(
+            assignment,
+            self.allocate_service_transaction(),
+            link_layer,
+        )
+        .map_err(|error| SessionError::transport(error.to_string()))?;
+        let response = self.round_trip(&request)?;
+        wda::parse_data_format(&response).ok_or_else(|| {
+            SessionError::transport("the modem did not say which framing it settled on")
+        })
+    }
+
+    /// Start a packet data session and return the handle that owns it.
+    ///
+    /// 🔴 **The handle belongs to this client.** QMI releases a session when
+    /// the client that started it goes away, so a caller that opens a device,
+    /// starts a session and drops the client gets a session that ends before
+    /// it can be used. Whatever calls this has to stay alive for as long as
+    /// the data path is meant to carry traffic.
+    pub fn start_data_session(
+        &mut self,
+        apn: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        auth: wds::AuthPreference,
+    ) -> Result<wds::PacketDataHandle, SessionError> {
+        let assignment = self.assignment(ServiceId::WDS)?;
+        let request = wds::start_request(
+            assignment,
+            self.allocate_service_transaction(),
+            apn,
+            username,
+            password,
+            auth,
+        )
+        .map_err(|error| SessionError::transport(error.to_string()))?;
+        let response = self.round_trip(&request)?;
+        wds::parse_start(&response).map_err(|error| {
+            // The call end reason is the difference between "try again" and
+            // "go and look at the subscription", and it is the only thing the
+            // network says about why. Carrying it into the message is what
+            // makes the failure actionable rather than just red.
+            match wds::parse_call_end_reason(&response) {
+                Some(reason) => {
+                    SessionError::transport(format!("{error} (call end reason {reason})"))
+                }
+                None => SessionError::transport(error.to_string()),
+            }
+        })
+    }
+
+    /// End a packet data session.
+    pub fn stop_data_session(
+        &mut self,
+        handle: wds::PacketDataHandle,
+    ) -> Result<(), SessionError> {
+        let assignment = self.assignment(ServiceId::WDS)?;
+        let request =
+            wds::stop_request(assignment, self.allocate_service_transaction(), handle)
+                .map_err(|error| SessionError::transport(error.to_string()))?;
+        self.round_trip(&request)?;
+        Ok(())
+    }
+
+    /// The addressing the network handed back for the running session.
+    pub fn data_settings(&mut self) -> Result<wds::Ipv4Settings, SessionError> {
+        let assignment = self.assignment(ServiceId::WDS)?;
+        let request =
+            wds::current_settings_request(assignment, self.allocate_service_transaction())
+                .map_err(|error| SessionError::transport(error.to_string()))?;
+        let response = self.round_trip(&request)?;
+        wds::parse_current_settings(&response)
+            .map_err(|error| SessionError::transport(error.to_string()))
     }
 
     fn assignment(&mut self, service: ServiceId) -> Result<ClientAssignment, SessionError> {

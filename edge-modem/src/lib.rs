@@ -10,6 +10,8 @@ mod at_inbox;
 mod at_sms;
 #[cfg(target_os = "linux")]
 mod cdc_wdm;
+mod wda;
+mod wwan;
 mod channels;
 mod dms;
 mod es10c;
@@ -132,6 +134,8 @@ pub use uim::{
     CLOSE_LOGICAL_CHANNEL, GET_EID_APDU, ISD_R_AID, MAX_GET_RESPONSE_ROUNDS,
     OPEN_LOGICAL_CHANNEL, SEND_APDU,
 };
+pub use wda::{parse_data_format, set_data_format_request, LinkLayer, WdaError};
+pub use wwan::{bring_up, interface_for, raw_ip_path, tear_down, Ipv4View, Step};
 pub use wds::{
     current_settings_request as wds_current_settings_request, parse_call_end_reason,
     parse_current_settings, parse_start as parse_wds_start, start_request as wds_start_request,
@@ -168,6 +172,9 @@ impl ServiceId {
     pub const WDS: Self = Self(0x01);
     pub const WMS: Self = Self(0x05);
     pub const UIM: Self = Self(0x0b);
+    /// Wireless Data Administrative. Only one message is used, and it is the
+    /// one without which nothing on the data path works: see `wda`.
+    pub const WDA: Self = Self(0x1a);
 
     pub const fn new(value: u8) -> Self {
         Self(value)
