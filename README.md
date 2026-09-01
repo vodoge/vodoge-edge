@@ -1,8 +1,266 @@
 # VoDoge Edge
 
-VoDoge Edge is the Rust agent that runs beside USB cellular modems in a
-customer site. It owns hardware access, keeps working while the Internet is
-unavailable, and connects outward to the VoDoge cloud control plane.
+The Rust agent that runs beside USB cellular modems on a customer site. It owns
+hardware access, keeps working while the Internet is unavailable, and connects
+outward to the [VoDoge Cloud](https://github.com/vodoge/vodoge-cloud) control
+plane.
+
+One binary, one SQLite directory. That is the whole deployment.
+
+---
+
+## What it does
+
+Plug a few Quectel modems into a small Linux box and the agent will:
+
+- **Find them itself.** Every few seconds it enumerates `cdc-wdm` and serial
+  endpoints, probes identity over QMI, and falls back to AT for modules that do
+  not speak QMI at all. Nothing is hard-coded to a device path, because device
+  paths change every time USB re-enumerates.
+- **Collect SMS and hold onto it.** Messages land in a local SQLite inbox first
+  and go upstream second. An offline agent keeps collecting; a reconnected one
+  drains what it gathered.
+- **Refuse what it knows will not work.** A capability matrix records measured
+  `(modem family, carrier)` facts. An unsupported pairing is refused by name
+  rather than attempted and silently lost.
+- **Serve a LAN panel.** `:8743` shows every module, its card, signal and APN
+  contexts, and can send SMS and run AT — with no cloud involved.
+- **Answer the cloud.** Commands arrive over one outbound WSS connection and
+  produce a receipt and a terminal result, exactly once each.
+
+## Design
+
+Nine crates, one binary. The split is not decoration — `edge-core` is guarded by
+CI that fails if its source so much as *names* `std::fs`, `std::net`, `std::io`
+or `std::process`:
+
+```
+contract/     Protocol types, generated from the edge-cloud JSON Schema
+edge-core/    Pure domain: capability matrix, strategies, settlement, policy
+              ── no I/O, enforced by scripts/check-core-source.sh
+edge-modem/   QMI/QMUX codecs, AT transport, eUICC (ES10c), discovery
+edge-store/   SQLite: local inbox, uplink outbox, persisted matrix
+edge-uplink/  Cumulative acknowledgement and gap state — pure
+edge-agent/   Command execution: receipt, dispatch, terminal result
+edge-panel/   Axum LAN panel and the in-process log ring
+edge-proxy/   Per-modem proxy listeners
+edge-bin/     The single binary that wires all of the above together
+
+voice/        Go: IMS media relay (vodoge-voice)         ── AGPL-3.0
+vowifi/       Go: IKEv2/EAP-AKA stack (vodoge-ike-probe) ── AGPL-3.0
+```
+
+Two rules earn their keep repeatedly:
+
+**A pairing that has not been measured is not supported.** The matrix
+distinguishes "measured and refused" from "nobody has ever tried", and only the
+second is worth interrupting an operator about.
+
+**Most of `edge-bin` is behind `#[cfg(target_os = "linux")]`.** A green
+`cargo build` on macOS proves less than it looks like — several modules do not
+compile there at all. Type-check and build releases on the target.
+
+## Deploying
+
+The procedure below is the real one, with hostnames replaced by placeholders.
+It assumes a fresh Ubuntu install with the modems plugged in over USB.
+
+### 1. Silence the competition
+
+Ubuntu ships ModemManager enabled, and it will grab the serial ports out from
+under the agent:
+
+```sh
+systemctl disable --now ModemManager
+systemctl mask ModemManager
+```
+
+### 2. Toolchain
+
+```sh
+apt-get update
+apt-get install -y build-essential pkg-config libssl-dev git curl sqlite3 cargo
+```
+
+Any Rust meeting the workspace MSRV will do; distribution packages are usually
+new enough and avoid a rustup download.
+
+### 3. Build
+
+```sh
+git clone https://github.com/vodoge/vodoge-edge /root/vodoge-edge-build
+cd /root/vodoge-edge-build
+cargo test --workspace
+cargo build --release -p edge-bin
+install -m 0755 target/release/vodoge-edge /usr/local/bin/vodoge-edge
+```
+
+### 4. Identity
+
+The agent authenticates to the gateway with a client certificate. Three files
+go in `/etc/vodoge-edge`:
+
+| File | What it is |
+| --- | --- |
+| `ca.crt` | the device CA, used to verify the gateway's server certificate |
+| `device.crt` | this device's client certificate |
+| `device.key` | its private key, mode `600` |
+
+Generate the key and CSR **on the edge machine** so the private key never
+travels:
+
+```sh
+mkdir -p /etc/vodoge-edge && cd /etc/vodoge-edge
+openssl ecparam -genkey -name prime256v1 -out device.key
+chmod 600 device.key
+openssl req -new -key device.key -out /tmp/device.csr \
+    -subj "/CN=DEVICE_ID/O=TENANT_ID/OU=REGION"
+```
+
+Send `/tmp/device.csr` to whoever holds the device CA, and install what comes
+back. Normally that is the cloud's enrollment endpoint, which mints a fresh
+device; to reuse an existing device's identity, see
+[Replacing the machine](#replacing-the-machine).
+
+> **The private key must be PKCS#8.** `openssl ecparam -genkey` writes SEC1,
+> which the agent's parser rejects — and the only symptom is
+> `uplink: device key missing`, which reads like a missing file. Convert it:
+>
+> ```sh
+> openssl pkcs8 -topk8 -nocrypt -in device.key -out k && mv k device.key
+> chmod 600 device.key
+> ```
+>
+> `head -1 device.key` should say `BEGIN PRIVATE KEY`, not `BEGIN EC PARAMETERS`.
+
+### 5. Run it
+
+```ini
+# /etc/systemd/system/vodoge-edge.service
+[Unit]
+Description=VoDoge edge agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vodoge-edge
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload && systemctl enable --now vodoge-edge
+journalctl -u vodoge-edge -f
+```
+
+A healthy start logs the panel address and its device id, then a `poll ... ok`
+line per module every few seconds.
+
+### Configuration
+
+Every setting has a working default; set one only to override it.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `VODOGE_UPLINK_URL` | compiled in | `wss://HOST:PORT/v1/edge` |
+| `VODOGE_EDGE_CERTS` | `/etc/vodoge-edge` | where the three files above live |
+| `VODOGE_EDGE_DATA` | `/var/lib/vodoge-edge` | SQLite inbox and outbox |
+| `VODOGE_EDGE_PANEL` | `0.0.0.0:8743` | LAN panel bind address |
+| `VODOGE_PUBLIC_IP_URL` | a public echo service | how the host learns its egress IP |
+
+### After enrolling: push the capability matrix
+
+A fresh agent logs `no stored capability matrix; using the built-in one` and
+falls back to compiled-in defaults. Publish the support ledger from the cloud
+once, and the agent stores what it receives:
+
+```sh
+publish-ledger TENANT_ID
+```
+
+Restart and the log should say `capability matrix restored from store`. If it
+still says "no stored capability matrix", the push did not land — and the agent
+will keep making capability decisions from the built-in table without saying so
+again.
+
+### Replacing the machine
+
+Rebuilt hardware keeps its identity only if two things come across.
+
+**The certificate.** Enrollment always creates a *new* device, so re-enrolling
+orphans the old one's history. To keep it, have the device CA sign a CSR
+carrying the existing device's UUID:
+
+```
+CN = <existing device id>   O = <tenant id>   OU = <region>
+```
+
+with `keyUsage=digitalSignature`, `extendedKeyUsage=clientAuth`, ECDSA/SHA-256.
+
+**The uplink sequence.** The cloud remembers how many envelopes it has received;
+a rebuilt agent starts at 1, and the uplink stops rather than reuse spent
+numbers:
+
+```
+uplink: ack cursor 119517 exceeds last allocated sequence 5
+```
+
+Take `N` from the cloud (`SELECT MAX(seq) FROM app.ingress WHERE device_id = …`),
+stop the agent, and shift the queue above it:
+
+```sql
+UPDATE uplink_outbox SET seq = seq + N;
+UPDATE uplink_cursor
+   SET committed_through = N,
+       last_allocated = (SELECT MAX(seq) FROM uplink_outbox)
+ WHERE id = 1;
+```
+
+Shift rather than clear. Setting the cursor alone would mark anything already
+queued — real messages the modems collected — as delivered, and drop it.
+
+> The matrix and the cursor live in `inbox.db`, the queue in `outbox.db`, both
+> under `VODOGE_EDGE_DATA`. Carry the whole directory if you can; if you cannot,
+> the two steps above are the minimum.
+
+## Development
+
+```sh
+cargo test              # runs everywhere
+cargo test --workspace  # on Linux, this is the one that counts
+```
+
+Guards CI enforces, all runnable locally:
+
+```sh
+sh scripts/check-core-deps.sh      # edge-core has no I/O dependency
+sh scripts/check-core-source.sh    # edge-core names no I/O std module
+sh scripts/verify-vendor-mirror.sh # the AGPL mirror is byte-identical
+
+python3 contract/codegen/generate.py --check \
+    --schema contract/schema/edge-cloud.v1.schema.json --rust contract/src/lib.rs
+```
+
+Contract types are **generated**. Editing `contract/src/lib.rs` by hand produces
+a file no run can reproduce, and CI says so.
+
+> The same schema exists in the cloud repository. It is the one file that will
+> drift; change it in both in the same commit.
+
+## Security baseline
+
+Every edge-to-cloud connection is WSS with mTLS, TLS 1.3 only. The agent fails
+closed for plain WebSocket, TLS 1.2 or older, invalid server certificates, and
+downgrade retries. TLS 0-RTT application data is prohibited. The reasoning is in
+`docs/adr/0001-uplink-tls.md`.
+
+The LAN panel has no authentication and binds `0.0.0.0` by default. It can send
+SMS and run AT commands. Put it on a trusted network or change
+`VODOGE_EDGE_PANEL` to a loopback address.
 
 ## License, and where to get the source
 
@@ -50,92 +308,3 @@ Corresponding Source. Here is that offer. It is deliberate, not incidental:
 This repository is public on purpose so that the offer above stays satisfiable.
 A binary that serves network users must correspond to a commit that is actually
 published there — do not run a private patch against them without pushing it.
-
-## Current scope
-
-The first delivered slices are deliberately I/O-free so their behavior can be
-reviewed before real hardware is attached:
-
-- `edge-core` contains the `ModemFamily x CarrierProfile x Vertical` device
-  context, declarative TOML capability matrix, vertical factory resolution,
-  pure SMS bearer routing, and multi-source registration arbitration. `cn` and
-  `intl` are built-in; `lab` is a fictional vertical that proves a new region
-  is one factory file plus one registry line.
-- `edge-modem` owns QMUX/QMI framing, CTL sync, client-ID allocation, a
-  transport-agnostic session, DMS, NAS, WMS, and UIM codecs. WMS list entries
-  keep the returned tag so mixed MO/MT rows can be filtered after the fact.
-  UIM can open an ISD-R channel and read the EID. Linux builds include a
-  `cdc-wdm` adapter; macOS tests use a fake transport.
-- `edge-uplink` models the durable upstream journal: stable envelope IDs,
-  cumulative acknowledgements, replay order, recovery hints, and audited gap
-  acceptance. It intentionally does not open SQLite or WSS connections yet.
-- `edge-agent` executes `CommandDeliver`: persist `cmd_id`, emit
-  `CommandReceipt` (`accepted` / `duplicate`), run `SendSms` at most once
-  through a `SendPort`, install a JSON `UpdateCapabilityMatrix` after sha256
-  verification, and always sequence a terminal `CommandResult`.
-- `edge-panel` is the offline LAN UI (Axum + embedded HTML) over the SQLite
-  local inbox. It does not call the cloud.
-- `contract` contains protocol types generated from the edge-cloud JSON Schema.
-
-The matrix records real hardware facts such as EC20 plus China Telecom having
-no usable SMS bearer. Unsupported combinations are rejected before a blind
-send attempt.
-
-## Where this actually runs
-
-There is exactly **one** edge deployment today, and **one** cloud host. Nothing
-else exists — no fleet, no staging tier, no second region.
-
-| Role | Host | Notes |
-| --- | --- | --- |
-| Edge agent (this repo) | `192.168.6.83:2222` | Local VMware VM, EC20 modems attached |
-| Cloud control plane | `43.108.53.126` | Gateway + console + PostgreSQL + Redis |
-| Base domain | `vodoge.com` | |
-| First tenant | `a.vodoge.com` | That tenant is us |
-
-`region` appears in the device certificate and in `tenants`, but it is a field,
-not a second site or a second database. Treat any doc that says "regional data
-plane" as describing a possible future split, not current infrastructure.
-
-## Security baseline
-
-Every future edge-to-cloud connection is WSS with mTLS and TLS 1.3 only. The
-agent must fail closed for plain WebSocket, TLS 1.2 or older, invalid server
-certificates, and downgrade retries. TLS 0-RTT application data is prohibited.
-The full decision is in `docs/adr/0001-uplink-tls.md`.
-
-## Layout
-
-```
-contract/    Generated edge-cloud protocol types
-edge-core/   Pure domain model, capability matrix, and policy factories
-edge-modem/  QMI codecs, ModemPort, discovery, inbox collection
-edge-store/  SQLite local store and uplink outbox
-edge-uplink/ Pure cumulative acknowledgement and loss-marker state
-edge-agent/  CommandExecutor: receipt, SendSms, capability-matrix install
-edge-panel/  Offline Axum panel over the SQLite inbox
-docs/        Architecture decisions
-
-voice/       Go: IMS media relay (vodoge-voice)      -- AGPL-3.0, see LICENSE
-vowifi/      Go: IKEv2/EAP-AKA stack (vodoge-ike-probe) -- AGPL-3.0, see LICENSE
-```
-
-## Picking up the work
-
-The plan, the environment, and the traps live in the cloud repo:
-`vodoge-cloud/docs/execution-plan.md`. Read it before changing anything here —
-in particular the note that most of `edge-bin` sits behind
-`#[cfg(target_os = "linux")]` and does not compile on a Mac at all, so a green
-`cargo build` on the workstation proves less than it looks like. Type-check and
-build releases on the edge machine.
-
-## Development
-
-Install a Rust toolchain compatible with the workspace's declared MSRV, then:
-
-```sh
-cargo test
-```
-
-Hardware transport, persistence, uplink, and the single-binary application are
-added as separate, independently testable milestones.
