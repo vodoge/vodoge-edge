@@ -4497,12 +4497,36 @@ mod linux {
                             .map(|(imei, seen)| (imei.clone(), seen.clone()))
                     });
                     match known {
-                        Some((imei, seen)) => {
+                        // Same rule: a silent port whose last occupant was
+                        // never adopted is a candidate that went quiet, not a
+                        // managed module that went missing.
+                        Some((imei, seen)) if is_managed(shared, &imei) => {
                             log_error(format!(
                                 "poll {} silent, last held imei={imei}",
                                 at_path.display()
                             ));
                             snapshots.push(absent_snapshot(&imei, &seen, "unknown"));
+                            claimed.extend(usb.clone());
+                        }
+                        // 🔴 The arm the guard above makes necessary. A module
+                        // this process identified but nobody adopted has gone
+                        // quiet: worth recording, never worth reporting. Its
+                        // USB device is still claimed so the port is not then
+                        // re-examined as if nothing were known about it.
+                        Some((imei, _)) => {
+                            log_line(format!(
+                                "poll {} silent, last held unadopted imei={imei}",
+                                at_path.display()
+                            ));
+                            record_discovery(
+                                shared,
+                                DiscoveryTransport::At,
+                                &at_path,
+                                DiscoveryState::Found,
+                                Some(&imei),
+                                "identified on an earlier pass and awaiting adoption",
+                                now,
+                            );
                             claimed.extend(usb.clone());
                         }
                         None => {
@@ -4533,10 +4557,16 @@ mod linux {
         if !snapshots.is_empty() {
             let present: std::collections::BTreeSet<String> =
                 snapshots.iter().map(|s| s.imei.clone()).collect();
+            // 🔴 Managed only. `memory.seen` remembers every module this
+            // process has identified, adopted or not, so reporting all of them
+            // as absent would send unadopted hardware to the cloud by the back
+            // door -- as an offline row, which is worse than a live one:
+            // nothing will ever update it again.
             let missing: Vec<(String, SeenModem)> = memory
                 .seen
                 .iter()
                 .filter(|(imei, _)| !present.contains(*imei))
+                .filter(|(imei, _)| is_managed(shared, imei))
                 .map(|(imei, seen)| (imei.clone(), seen.clone()))
                 .collect();
             for (imei, seen) in missing {
