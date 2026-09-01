@@ -555,6 +555,12 @@
             { "type": "null" }
           ]
         },
+        "managed_imeis": {
+          "description": "Every module this agent has been told to manage, including ones it cannot currently find. Sent explicitly rather than inferred from `modems`, because inference makes a partial report destructive: a pass that failed to enumerate would read as an instruction to unmanage the fleet. Absent means the agent did not say, which the cloud treats as no change.",
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/Imei" }
+        },
         "discoveries": {
           "description": "Modem-shaped endpoints the agent has seen but has not been told to probe. Carried so the cloud can approve one: the edge panel could always show and claim these, and an operator who works from the console had no way to see that a new stick had been plugged in at all.",
           "type": "array",

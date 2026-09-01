@@ -335,6 +335,8 @@ pub struct DeviceStatePayload {
     pub modems: Vec<ModemState>,
     #[serde(rename = "host", default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostState>,
+    #[serde(rename = "managed_imeis", default, skip_serializing_if = "Option::is_none")]
+    pub managed_imeis: Option<Vec<String>>,
     #[serde(rename = "discoveries", default, skip_serializing_if = "Option::is_none")]
     pub discoveries: Option<Vec<DiscoveryCandidate>>,
 }

@@ -4646,7 +4646,26 @@ mod linux {
                 Vec::new()
             }
         };
-        enqueue_device_state(outbox, &matrix, &snapshots, &host, &discoveries, now)?;
+        // Read separately from the snapshots: the registry is the authority on
+        // what is managed, and a module adopted but never yet seen has no
+        // snapshot to be inferred from.
+        let managed: Option<Vec<String>> = match shared.0.lock().expect("store").registered_modems()
+        {
+            Ok(rows) => Some(rows.into_iter().map(|row| row.imei).collect()),
+            Err(error) => {
+                log_error(format!("registry not read: {error}"));
+                None
+            }
+        };
+        enqueue_device_state(
+            outbox,
+            &matrix,
+            &snapshots,
+            &host,
+            &discoveries,
+            managed.as_deref(),
+            now,
+        )?;
         if qmi_paths.is_empty() && snapshots.is_empty() {
             return Err("no /dev/cdc-wdm* and no AT control port answered".into());
         }
@@ -6858,6 +6877,7 @@ mod linux {
         modems: &[ModemSnapshot],
         host: &HostStats,
         discoveries: &[edge_store::LocalModemDiscovery],
+        managed: Option<&[String]>,
         now: i64,
     ) -> Result<(), String> {
         if modems.is_empty() {
@@ -6946,6 +6966,11 @@ mod linux {
                 "kernel": host.kernel,
                 "hostname": host.hostname,
             },
+            // Everything this agent manages, including what it cannot find
+            // right now. Sent so the cloud can retire a row for a module
+            // nobody manages any more: the edge simply stops reporting one,
+            // and without this the row sits at its last observation for ever,
+            // which reads as a healthy module that went quiet.
             // What the agent has seen and not written to. The panel could
             // always list these and claim one; until they travelled, an
             // operator working from the cloud could not tell that a stick had
@@ -6966,6 +6991,19 @@ mod linux {
                 }))
                 .collect::<Vec<_>>()
         });
+        // 🔴 Inserted only when the registry was actually read, and `json!`
+        // is why this is not a field above: `Option::None` there serialises as
+        // `null`, and the contract types this as an array -- a failed read
+        // would produce an envelope the cloud rejects outright.
+        //
+        // The distinction matters beyond validity. An empty list is a real
+        // state (nothing adopted) and the cloud acts on it by retiring every
+        // row; sending one because a store read failed would unmanage the
+        // whole device on a transient error.
+        let mut payload = payload;
+        if let (Some(managed), Some(map)) = (managed, payload.as_object_mut()) {
+            map.insert("managed_imeis".into(), serde_json::json!(managed));
+        }
         append_kind(outbox, "DeviceState", payload)
     }
 
