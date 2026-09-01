@@ -822,6 +822,10 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
                 "/api/report", "/api/esim", "/api/esim/switch", "/api/scan", "/api/ussd",
                 "/api/ussd/cancel", "/api/radio", "/api/usb-reset", "/api/rescan",
                 "/api/discoveries/claim", "/api/restart",
+                // Adoption and its reversal. Both are served by `lib.rs`; this
+                // list is a copy of that router and has to be kept in step,
+                // which is exactly what this assertion is for.
+                "/api/modems/register", "/api/modems/unregister",
             ]
             .contains(&site.as_str()),
             "the panel calls {site}, which the daemon does not serve"

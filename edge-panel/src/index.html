@@ -1017,6 +1017,14 @@
                       @click="claimDiscovery(d)" :disabled="claimBusyFor(d)"
                       :aria-busy="claimBusyFor(d)"
                       x-text="claimBusyFor(d) ? '确认中…' : '确认纳入探测'"></button>
+              <!-- The other decision, and a different one. Claiming above is
+                   permission to *probe* a port nobody has spoken to. This is
+                   adoption: the module already answered with an IMEI, and the
+                   only question left is whether this agent should manage it. -->
+              <button type="button" class="btn candidate-action" x-show="candidateCanAdopt(d)"
+                      @click="adoptCandidate(d)" :disabled="claimBusyFor(d)"
+                      :aria-busy="claimBusyFor(d)"
+                      x-text="claimBusyFor(d) ? '纳管中…' : '纳管这个模组'"></button>
             </article>
           </template>
         </section>
@@ -1035,12 +1043,18 @@
               <button type="button" class="btn risk" @click="usbReset($event.currentTarget)">USB 复位</button>
             </span>
             <p class="danger-note">两个操作都会让这根模组暂时从机队消失。</p>
+            <button type="button" class="btn risk" @click="unregisterActive()">取消纳管</button>
+            <p class="danger-note">不再轮询它，并从上方列表移除。历史保留，之后可在 USB 候选里重新纳管。</p>
           </div>
         </template>
         <template x-if="!activeManageable()">
           <div>
             <span class="danger-title">AT 通道 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
             <p class="danger-note">该设备经 AT 控制口管理。查询与短信收发都走这条路；需要 QMI 的射频开关、eSIM 操作与 USB 恢复不可用。</p>
+            <!-- Offered here too. An AT-only module is managed like any other,
+                 and the ability to stop managing it must not depend on which
+                 control channel it happens to answer on. -->
+            <button type="button" class="btn risk" @click="unregisterActive()">取消纳管</button>
           </div>
         </template>
       </div>
@@ -2968,6 +2982,62 @@
         /* Claiming does not accept a port or an IMEI. The server rechecks the
            candidate key, then the next hardware poll is the first time an AT
            identity read is attempted. */
+        /* Whether this candidate is a module waiting to be adopted.
+           Identified (it answered with an IMEI) and not already managed --
+           anything in the modem list above is managed by definition. */
+        candidateCanAdopt(candidate) {
+          if (!candidate || !candidate.imei) return false;
+          return !this.modems.some((m) => m.imei === candidate.imei);
+        },
+
+        /* Adoption. Deliberately not confirmed the way claiming is: reading
+           the identity has already happened, and managing a module writes
+           nothing to it. The reversal is one button away in the danger zone. */
+        async adoptCandidate(candidate) {
+          if (!this.candidateCanAdopt(candidate) || this.claimBusyFor(candidate)) return;
+          const key = candidate.candidate_key;
+          const imei = candidate.imei;
+          this.claimBusy[key] = true;
+          try {
+            const result = await this.post("/api/modems/register", { imei });
+            if (!result.registered || result.imei !== imei) {
+              throw new Error("纳管回执与候选不一致");
+            }
+            this.out(
+              result.changed ? "已纳管 " + imei : "已纳管 " + imei + "（此前已在管理中）",
+              "out-meta"
+            );
+            await this.load().catch(() => {});
+          } catch (error) {
+            this.out("纳管 " + imei + " 失败：" + error.message, "out-warn");
+          } finally {
+            this.claimBusy[key] = false;
+          }
+        },
+
+        /* Stop managing the selected module. Confirmed, because a working
+           stick disappears from the list and the operator who did it by
+           accident has to find it again below to put it back. */
+        async unregisterActive() {
+          const imei = this.activeImei;
+          if (!imei) return;
+          if (!confirm("取消纳管 " + imei + "？\n它将不再被轮询，并从上方列表消失。\n它承载过的短信和命令都会保留，之后可在 USB 候选里重新纳管。")) {
+            this.out("已取消操作；" + imei + " 仍在管理中", "out-warn");
+            return;
+          }
+          try {
+            const result = await this.post("/api/modems/unregister", { imei });
+            this.out(
+              result.changed ? "已取消纳管 " + imei : imei + " 本就不在管理中",
+              "out-meta"
+            );
+            this.activeImei = null;
+            await this.load().catch(() => {});
+          } catch (error) {
+            this.out("取消纳管 " + imei + " 失败：" + error.message, "out-warn");
+          }
+        },
+
         async claimDiscovery(candidate) {
           if (!this.candidateCanClaim(candidate) || this.claimBusyFor(candidate)) return;
           const candidateKey = candidate.candidate_key;
