@@ -74,6 +74,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0012_card_capability.sql"),
     include_str!("../migrations/0013_apn_contexts.sql"),
     include_str!("../migrations/0014_capability_matrix.sql"),
+    include_str!("../migrations/0015_registered_modems.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -125,6 +126,8 @@ impl Store {
             });
         }
         if target < current {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS registered_modems;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS card_policies;")?;
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS manual_modem_profiles;")?;
@@ -1194,5 +1197,92 @@ mod ingested_sms_tests {
             .record_ingested_sms(IMEI, &[fingerprint.clone()], 1)
             .expect("record after rebuild");
         assert_eq!(store.ingested_sms_copies(IMEI, &fingerprint).expect("read"), 1);
+    }
+}
+
+/// One module an operator chose to manage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisteredModem {
+    pub imei: String,
+    pub registered_at: i64,
+    /// `panel`, `cloud`, or `migration`.
+    pub registered_by: String,
+    /// What it looked like when adopted. Evidence, never a lookup key.
+    pub usb_device: Option<String>,
+    pub family: Option<String>,
+    pub note: Option<String>,
+}
+
+impl Store {
+    /// Adopt a module, or refresh the evidence on one already adopted.
+    ///
+    /// Idempotent on IMEI: adopting twice is not an error, because the two
+    /// paths that can do it -- the panel and a cloud command -- can race, and
+    /// the second one arriving is not a fault worth reporting to anybody.
+    pub fn register_modem(&self, modem: &RegisteredModem) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO registered_modems
+                 (imei, registered_at, registered_by, usb_device, family, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(imei) DO UPDATE SET
+                 usb_device = excluded.usb_device,
+                 family = COALESCE(excluded.family, registered_modems.family)",
+            params![
+                modem.imei,
+                modem.registered_at,
+                modem.registered_by,
+                modem.usb_device,
+                modem.family,
+                modem.note,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stop managing a module.
+    ///
+    /// 🔴 History is deliberately untouched. Messages it carried, commands it
+    /// ran and the rows it wrote stay exactly where they are -- unmanaging a
+    /// stick is a statement about the future, not a retraction of what it did.
+    /// Returns whether a row was actually removed, so a caller can tell
+    /// "unregistered it" from "it was never registered".
+    pub fn unregister_modem(&self, imei: &str) -> Result<bool, StoreError> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM registered_modems WHERE imei = ?1", params![imei])?;
+        Ok(removed > 0)
+    }
+
+    pub fn is_registered(&self, imei: &str) -> Result<bool, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM registered_modems WHERE imei = ?1",
+            params![imei],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Everything this agent is managing, oldest adoption first.
+    pub fn registered_modems(&self) -> Result<Vec<RegisteredModem>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT imei, registered_at, registered_by, usb_device, family, note
+               FROM registered_modems
+              ORDER BY registered_at, imei",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(RegisteredModem {
+                imei: row.get(0)?,
+                registered_at: row.get(1)?,
+                registered_by: row.get(2)?,
+                usb_device: row.get(3)?,
+                family: row.get(4)?,
+                note: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 }
