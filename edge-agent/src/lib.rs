@@ -211,6 +211,16 @@ pub trait SendPort {
     /// The same ring the LAN panel serves. It exists because reaching these
     /// lines otherwise means an SSH session and `journalctl`, which is the
     /// access neither an on-site operator nor a cloud one has.
+    /// Start managing a module the agent has already identified.
+    fn register_modem(&mut self, _imei: &str, _note: Option<&str>) -> Result<JsonValue, SendError> {
+        Err(unsupported("register_modem"))
+    }
+
+    /// Stop managing a module. What it produced is kept.
+    fn unregister_modem(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("unregister_modem"))
+    }
+
     fn read_logs(
         &mut self,
         _after: Option<u64>,
@@ -1083,6 +1093,22 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::ClaimModemCandidate { candidate_key } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.claim_modem_candidate(candidate_key);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::RegisterModem { modem_imei, note } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.register_modem(modem_imei, note.as_deref());
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::UnregisterModem { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.unregister_modem(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

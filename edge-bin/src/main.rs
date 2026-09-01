@@ -1768,6 +1768,26 @@ mod linux {
         ///
         /// `contains` is applied here rather than in the cloud for the same
         /// reason: filtering after the transfer is the transfer.
+        /// Adopt from the cloud, through the same code the panel uses.
+        ///
+        /// One implementation for both entry points on purpose: two copies of
+        /// "which IMEIs may be adopted" would drift, and the one that drifts
+        /// is the one that lets somebody adopt hardware that is not there.
+        fn register_modem(&mut self, imei: &str, note: Option<&str>) -> Result<JsonValue, SendError> {
+            let result = Actions::register_modem(self, imei.to_string(), "cloud")
+                .map_err(action_failed)?;
+            if let Some(note) = note.filter(|value| !value.trim().is_empty()) {
+                log_line(format!("modem {imei} adopted from the cloud: {note}"));
+            }
+            json_details(&result)
+        }
+
+        fn unregister_modem(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result = Actions::unregister_modem(self, imei.to_string())
+                .map_err(action_failed)?;
+            json_details(&result)
+        }
+
         fn read_logs(
             &mut self,
             after: Option<u64>,
@@ -3483,7 +3503,11 @@ mod linux {
         /// IMEI would let an operator adopt hardware that is not there and
         /// then wonder why it is permanently offline -- and it would put a row
         /// in the registry no probe can ever satisfy.
-        fn register_modem(&self, imei: String) -> Result<RegistrationResult, PanelError> {
+        fn register_modem(
+            &self,
+            imei: String,
+            source: &str,
+        ) -> Result<RegistrationResult, PanelError> {
             let store = self.store.0.lock().expect("store");
             let seen = store
                 .list_local_modem_discoveries()
@@ -3503,7 +3527,12 @@ mod linux {
                 .register_modem(&edge_store::RegisteredModem {
                     imei: imei.clone(),
                     registered_at: unix_ms(),
-                    registered_by: "panel".into(),
+                    // 🔴 Who adopted it, not where the code runs. Both entry
+                    // points share this implementation, and hard-coding
+                    // "panel" made a cloud-issued adoption claim to have been
+                    // done on the LAN panel -- which is the one question this
+                    // column exists to answer.
+                    registered_by: source.to_owned(),
                     usb_device: observed.usb_device.clone(),
                     family: None,
                     note: None,

@@ -473,6 +473,26 @@ pub struct DeleteEsimProfileCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RegisterModemCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "note", default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnregisterModemCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimModemCandidateCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -1133,6 +1153,17 @@ pub enum Command {
     ClaimModemCandidate {
         #[serde(rename = "candidate_key")]
         candidate_key: String,
+    },
+    RegisterModem {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "note")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    UnregisterModem {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
     },
     RenameEsimProfile {
         #[serde(rename = "modem_imei")]

@@ -119,7 +119,11 @@ pub trait Actions: Send + Sync {
     /// actually seen. Accepting a free-form IMEI from the panel would let an
     /// operator adopt hardware that is not there and then wonder why it is
     /// permanently offline.
-    fn register_modem(&self, _imei: String) -> Result<RegistrationResult, PanelError> {
+    fn register_modem(
+        &self,
+        _imei: String,
+        _source: &str,
+    ) -> Result<RegistrationResult, PanelError> {
         Err(PanelError::Action(
             "local modem registration is not configured".into(),
         ))
@@ -520,7 +524,7 @@ async fn registration(state: Arc<PanelState>, imei: String, adopt: bool) -> Resp
         return json_error(StatusCode::BAD_REQUEST, "imei is required");
     }
     let outcome = if adopt {
-        actions.register_modem(imei)
+        actions.register_modem(imei, "panel")
     } else {
         actions.unregister_modem(imei)
     };

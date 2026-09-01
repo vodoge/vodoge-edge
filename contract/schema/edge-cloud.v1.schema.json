@@ -803,6 +803,35 @@
         }
       }
     },
+    "RegisterModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "RegisterModem" },
+        "modem_imei": {
+          "description": "The module to start managing. It must be one the agent has already identified: adopting an IMEI nobody has seen would put a row in the registry that no probe can ever satisfy, and the operator would be left wondering why it is permanently offline.",
+          "$ref": "#/$defs/Imei"
+        },
+        "note": {
+          "description": "Free text kept with the adoption, for whoever asks later why this module is being managed.",
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    },
+    "UnregisterModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "UnregisterModem" },
+        "modem_imei": {
+          "description": "The module to stop managing. History it produced is deliberately kept: unmanaging is a statement about the future, not a retraction of what the module did.",
+          "$ref": "#/$defs/Imei"
+        }
+      }
+    },
     "ClaimModemCandidateCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -1016,6 +1045,8 @@
       { "$ref": "#/$defs/RefreshModemsCommand" },
       { "$ref": "#/$defs/ReadLogsCommand" },
       { "$ref": "#/$defs/ClaimModemCandidateCommand" },
+      { "$ref": "#/$defs/RegisterModemCommand" },
+      { "$ref": "#/$defs/UnregisterModemCommand" },
       { "$ref": "#/$defs/RenameEsimProfileCommand" },
       { "$ref": "#/$defs/DisableEsimProfileCommand" },
       { "$ref": "#/$defs/DeleteEsimProfileCommand" },
