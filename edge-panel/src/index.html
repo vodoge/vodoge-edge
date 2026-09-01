@@ -1039,8 +1039,8 @@
         </template>
         <template x-if="!activeManageable()">
           <div>
-            <span class="danger-title">仅识别 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
-            <p class="danger-note">该设备由 AT 识别，基础查询仍可用；需要 QMI 的射频、eSIM 与 USB 恢复操作不可用。</p>
+            <span class="danger-title">AT 通道 · <span class="mono" x-text="shortImei(activeImei)"></span></span>
+            <p class="danger-note">该设备经 AT 控制口管理。查询与短信收发都走这条路；需要 QMI 的射频开关、eSIM 操作与 USB 恢复不可用。</p>
           </div>
         </template>
       </div>
@@ -2565,8 +2565,15 @@
         discoveryTone(discovery) {
           return { qmi: "ok", at: "warn", serial: "idle" }[this.discoveryKey(discovery)] || "idle";
         },
-        manageableLabel(modem) { return modem && modem.manageable === false ? "仅识别" : "可管理"; },
-        manageableTone(modem) { return modem && modem.manageable === false ? "warn" : "ok"; },
+        /* Which control channel this module answers on, not a verdict on what
+           it can do. "仅识别" read as "nothing works here", and for the
+           EC200U-CN that is wrong: it has no QMI interface by construction and
+           sends SMS over AT. What the label should say is which channel is
+           available, and the capability matrix says what that channel can do. */
+        manageableLabel(modem) { return modem && modem.manageable === false ? "AT 通道" : "QMI 通道"; },
+        /* Not a warning. An AT-only module is a normal, supported shape here,
+           and colouring it amber taught operators to read it as a fault. */
+        manageableTone(modem) { return modem && modem.manageable === false ? "info" : "ok"; },
         // What to add to the capability matrix, spelled the way the matrix
         // keys it. "Unmeasured" is not a fault to clear on this screen: the
         // fix is to measure the combination on real hardware and add the rule,
@@ -3410,17 +3417,26 @@
 
         /* ══ SMS ══════════════════════════════════════════════════════════ */
 
-        /** The record saying why this stick must not send, or null. */
+        /* The record saying why this stick must not send, or null.
+
+           🔴 There used to be a blanket rule here: `manageable === false` was
+           refused with "AT-only, sending needs the QMI management channel".
+           That stopped being true. The EC200U-CN has no QMI interface at all
+           -- its USB composition (2c7c:0901) carries no cdc-wdm -- so it can
+           never be `manageable`, and an AT send path was built and measured
+           for exactly that reason: it sent a real message to China Telecom
+           over AT+CMGS. The daemon falls back to it whenever no QMI modem
+           matches. The panel was refusing, in front of the operator, something
+           the daemon two layers below it could do.
+
+           Nothing replaces it, deliberately. The capability matrix is the
+           authority on what a (family, carrier) pair can do, the daemon
+           already refuses against it with a reason naming which layer said no,
+           and a second copy of that judgement in the browser is a second
+           thing to keep in step. What stays here is per-IMEI measured facts,
+           which is what SMS_BLOCKED is. */
         smsBlock(imei) {
           if (!imei) return null;
-          const modem = this.modems.find((candidate) => candidate.imei === imei);
-          if (modem && modem.manageable === false) {
-            return {
-              why: "该设备仅通过 AT 识别，短信发送需要 QMI 管理通道。",
-              also: "可在控制台运行只读 AT 查询；恢复 QMI 后再发送。",
-              source: "发现状态：AT-only",
-            };
-          }
           return SMS_BLOCKED[imei] || null;
         },
 

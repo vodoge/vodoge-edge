@@ -2141,10 +2141,25 @@ async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
         gate.contains("!!this.activeImei") && gate.contains("!this.smsBlock(this.activeImei)"),
         "the send controls are enabled without both checks: {gate}"
     );
+    // 🔴 What this used to assert was the opposite: that `smsBlock` refused
+    // every `manageable === false` module, because an AT-only stick "can still
+    // reach the QMI SMS send path". That stopped being true. The EC200U-CN has
+    // no QMI interface by construction -- its USB composition carries no
+    // cdc-wdm -- and an AT send path was built and measured for it, sending a
+    // real message to China Telecom over AT+CMGS. The daemon falls back to it
+    // whenever no QMI modem matches, so the panel was refusing, in front of
+    // the operator, something two layers below it could do.
+    //
+    // The invariant worth pinning is what remains: the block list holds
+    // per-IMEI facts somebody measured, and nothing guesses from a channel.
     let policy = body_of(&panel.code, "smsBlock(imei) {", "\n        },");
     assert!(
-        policy.contains("modem.manageable === false"),
-        "an AT-only modem can still reach the QMI SMS send path: {policy}"
+        policy.contains("SMS_BLOCKED[imei]"),
+        "the block list is no longer what decides: {policy}"
+    );
+    assert!(
+        !policy.contains("manageable"),
+        "a channel is being read as a verdict on what a module can do: {policy}"
     );
 }
 
