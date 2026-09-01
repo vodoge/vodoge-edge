@@ -38,8 +38,7 @@ mod linux {
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, Inbox, PanelError, ProfileBody, ProfilesResult, ReportResult,
-        CandidateClaimResult, RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
-    };
+        CandidateClaimResult, RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult, RegistrationResult};
     use edge_store::{
         CardPolicy as StoredCardPolicy, DurableOutbox, LocalMessage, LocalModem,
         LocalModemDiscovery, ManualModemProfile, QueueError, Store,
@@ -142,11 +141,14 @@ mod linux {
                 .list_local_messages()
                 .map_err(PanelError::Store)
         }
+        /// What the panel lists: the modules somebody adopted, not every
+        /// module ever seen. Reading `list_local_modems` here is what kept
+        /// showing hardware that had been unplugged and unregistered.
         fn list_modems(&self) -> Result<Vec<LocalModem>, PanelError> {
             self.0
                 .lock()
                 .expect("store")
-                .list_local_modems()
+                .list_managed_modems()
                 .map_err(PanelError::Store)
         }
         fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
@@ -3475,6 +3477,57 @@ mod linux {
             })
         }
 
+        /// Adopt a module the agent has actually seen.
+        ///
+        /// 🔴 The IMEI must belong to something observed. Taking a free-form
+        /// IMEI would let an operator adopt hardware that is not there and
+        /// then wonder why it is permanently offline -- and it would put a row
+        /// in the registry no probe can ever satisfy.
+        fn register_modem(&self, imei: String) -> Result<RegistrationResult, PanelError> {
+            let store = self.store.0.lock().expect("store");
+            let seen = store
+                .list_local_modem_discoveries()
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            let Some(observed) = seen
+                .iter()
+                .find(|candidate| candidate.imei.as_deref() == Some(imei.as_str()))
+            else {
+                return Err(PanelError::Action(format!(
+                    "{imei} has not been seen by this agent; only an identified module can be adopted"
+                )));
+            };
+            let already = store
+                .is_registered(&imei)
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            store
+                .register_modem(&edge_store::RegisteredModem {
+                    imei: imei.clone(),
+                    registered_at: unix_ms(),
+                    registered_by: "panel".into(),
+                    usb_device: observed.usb_device.clone(),
+                    family: None,
+                    note: None,
+                })
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            Ok(RegistrationResult {
+                imei,
+                registered: true,
+                changed: !already,
+            })
+        }
+
+        fn unregister_modem(&self, imei: String) -> Result<RegistrationResult, PanelError> {
+            let store = self.store.0.lock().expect("store");
+            let changed = store
+                .unregister_modem(&imei)
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            Ok(RegistrationResult {
+                imei,
+                registered: false,
+                changed,
+            })
+        }
+
         fn claim_modem_candidate(
             &self,
             candidate_key: String,
@@ -4272,10 +4325,37 @@ mod linux {
         for path in &qmi_paths {
             match probe_one(path, shared, outbox, radio) {
                 Ok(snapshot) => {
-                    log_line(format!("poll {} imei={} ok", path.display(), snapshot.imei));
                     if let Some(usb) = edge_modem::usb_device_of_qmi(path) {
                         claimed.insert(usb);
                     }
+                    // 🔴 Identifying a module is not adopting it. An operator
+                    // has to choose, on the panel or from the cloud, and until
+                    // they do this is a candidate: shown, never acted on, and
+                    // gone from the list when it is unplugged.
+                    //
+                    // Kept out of `snapshots` as well as out of the inventory,
+                    // because `snapshots` is what `DeviceState` carries -- an
+                    // unadopted module reaching the cloud would have the
+                    // console create a row for it, which is the same accretion
+                    // one layer up.
+                    if !is_managed(shared, &snapshot.imei) {
+                        log_line(format!(
+                            "poll {} imei={} identified, not managed",
+                            path.display(),
+                            snapshot.imei
+                        ));
+                        record_discovery(
+                            shared,
+                            DiscoveryTransport::Qmi,
+                            path,
+                            DiscoveryState::Found,
+                            Some(&snapshot.imei),
+                            "identified and awaiting adoption",
+                            now,
+                        );
+                        continue;
+                    }
+                    log_line(format!("poll {} imei={} ok", path.display(), snapshot.imei));
                     record_discovery(
                         shared,
                         DiscoveryTransport::Qmi,
@@ -4347,6 +4427,22 @@ mod linux {
                         claimed.insert(usb);
                     }
                     upsert_at_only_local_modem(shared, &snapshot, &at_path, now)?;
+                    // Same rule as the QMI pass: identified is not adopted,
+                    // and an unadopted module stays out of `DeviceState` so
+                    // the cloud does not create a row the operator never asked
+                    // for.
+                    if !is_managed(shared, &snapshot.imei) {
+                        record_discovery(
+                            shared,
+                            DiscoveryTransport::At,
+                            &at_path,
+                            DiscoveryState::Found,
+                            Some(&snapshot.imei),
+                            "identified over AT and awaiting adoption",
+                            now,
+                        );
+                        continue;
+                    }
                     record_discovery(
                         shared,
                         DiscoveryTransport::At,
@@ -4498,6 +4594,32 @@ mod linux {
         Ok(())
     }
 
+    /// Whether this module is one the agent has been told to manage.
+    ///
+    /// 🔴 The gate that separates "seen" from "managed". A probe that
+    /// identifies a module no longer makes it part of the inventory: an
+    /// operator has to have adopted it, on the panel or from the cloud.
+    ///
+    /// Unregistered modules are recorded as candidates instead -- visible,
+    /// adoptable, and gone from the list when they are unplugged. That is the
+    /// whole point: `local_modems` used to accumulate every stick that had
+    /// ever been plugged in, and there was no way to tell one somebody chose
+    /// from one that happened to be there once.
+    ///
+    /// A store that cannot be read answers **false**. Managing a module the
+    /// agent cannot confirm was adopted is the error worth avoiding; the cost
+    /// of the other direction is a poll that does nothing for one cycle.
+    fn is_managed(shared: &Arc<SharedStore>, imei: &str) -> bool {
+        let store = shared.0.lock().expect("store");
+        match store.is_registered(imei) {
+            Ok(registered) => registered,
+            Err(error) => {
+                log_error(format!("registry unreadable for {imei}: {error}"));
+                false
+            }
+        }
+    }
+
     /// Persist the inventory row for a module that only answered over AT.
     /// It is deliberately kept separate from `probe_one`: AT-only is useful
     /// evidence but it must not claim that QMI-only actions are safe.
@@ -4507,6 +4629,10 @@ mod linux {
         at_path: &Path,
         now: i64,
     ) -> Result<(), String> {
+        // Same gate as the QMI path: identified is not adopted.
+        if !is_managed(shared, &snapshot.imei) {
+            return Ok(());
+        }
         let store = shared.0.lock().expect("store");
         store
             .upsert_local_modem(&LocalModem {
@@ -5986,7 +6112,11 @@ mod linux {
             }
             enqueue_status_report(outbox, &imei, report, now)?;
         }
-        {
+        // The inventory row is written only for a module somebody adopted.
+        // Probing is how identity is learned, and it happens before adoption
+        // by necessity -- you cannot adopt an IMEI you have not read -- so the
+        // gate belongs here rather than earlier.
+        if is_managed(shared, &imei) {
             let store = shared.0.lock().expect("store");
             store
                 .upsert_local_modem(&LocalModem {

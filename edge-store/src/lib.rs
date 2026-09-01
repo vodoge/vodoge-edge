@@ -530,6 +530,30 @@ impl Store {
         Ok(rows)
     }
 
+    /// The modules this agent manages, with their latest observation.
+    ///
+    /// 🔴 This is what a list of modems means now, and it is a join rather
+    /// than a filter for a reason: `local_modems` accumulates every module
+    /// ever seen and never forgets one, so reading it directly shows hardware
+    /// that was unplugged weeks ago beside hardware somebody chose. The
+    /// registry decides membership; the observation only fills in the detail.
+    ///
+    /// A registered module with no observation yet is absent here rather than
+    /// half-populated -- the caller that wants "adopted but never seen" should
+    /// read the registry, which is the table that knows.
+    pub fn list_managed_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
+        let all = self.list_local_modems()?;
+        let managed: std::collections::BTreeSet<String> = self
+            .registered_modems()?
+            .into_iter()
+            .map(|row| row.imei)
+            .collect();
+        Ok(all
+            .into_iter()
+            .filter(|modem| managed.contains(&modem.imei))
+            .collect())
+    }
+
     pub fn list_local_modems(&self) -> Result<Vec<LocalModem>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT imei, family, firmware, msisdn, msisdn_iccid, apn_contexts,

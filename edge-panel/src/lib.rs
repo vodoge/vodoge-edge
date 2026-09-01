@@ -113,6 +113,25 @@ pub trait Actions: Send + Sync {
             "local modem candidate claim is not configured".into(),
         ))
     }
+    /// Adopt an identified module, so the agent starts managing it.
+    ///
+    /// Implementations must confirm the IMEI belongs to a module the agent has
+    /// actually seen. Accepting a free-form IMEI from the panel would let an
+    /// operator adopt hardware that is not there and then wonder why it is
+    /// permanently offline.
+    fn register_modem(&self, _imei: String) -> Result<RegistrationResult, PanelError> {
+        Err(PanelError::Action(
+            "local modem registration is not configured".into(),
+        ))
+    }
+
+    /// Stop managing a module. History it produced is deliberately kept.
+    fn unregister_modem(&self, _imei: String) -> Result<RegistrationResult, PanelError> {
+        Err(PanelError::Action(
+            "local modem registration is not configured".into(),
+        ))
+    }
+
     /// Modems currently executing an operator-initiated command.
     ///
     /// Such a modem stops answering the poll loop, and a long command outlasts
@@ -163,6 +182,18 @@ pub struct RescanResult {
 #[derive(Clone, Debug, Serialize)]
 pub struct CandidateClaimResult {
     pub candidate_key: String,
+}
+
+/// What an adoption or a removal changed.
+///
+/// `changed` is false when the module was already in that state, which is not
+/// an error: the panel and a cloud command can both do this, and the second
+/// one arriving is not a fault.
+#[derive(Clone, Debug, Serialize)]
+pub struct RegistrationResult {
+    pub imei: String,
+    pub registered: bool,
+    pub changed: bool,
 }
 
 /// One eUICC profile as the panel reports it.
@@ -290,7 +321,7 @@ impl Inbox for StoreInbox {
 
     fn list_modems(&self) -> Result<Vec<LocalModem>, PanelError> {
         let store = self.store.lock().expect("panel store lock");
-        Ok(store.list_local_modems()?)
+        Ok(store.list_managed_modems()?)
     }
 
     fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
@@ -377,6 +408,8 @@ fn build_router(
         .route("/api/radio", post(set_radio))
         .route("/api/rescan", post(rescan_modems))
         .route("/api/discoveries/claim", post(claim_modem_candidate))
+        .route("/api/modems/register", post(register_modem))
+        .route("/api/modems/unregister", post(unregister_modem))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
@@ -459,6 +492,44 @@ async fn rescan_modems(State(state): State<Arc<PanelState>>) -> Response {
 /// Save an explicit approval for an endpoint the ordinary discovery pass has
 /// already shown. The poller, not this HTTP request, owns the eventual AT
 /// probe so the radio lock and durable observation stay in one place.
+async fn register_modem(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<RegistrationBody>,
+) -> Response {
+    registration(state, body.imei, true).await
+}
+
+async fn unregister_modem(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<RegistrationBody>,
+) -> Response {
+    registration(state, body.imei, false).await
+}
+
+/// Both directions, because they differ only in which action is called and a
+/// second copy of the validation is a second place for it to drift.
+async fn registration(state: Arc<PanelState>, imei: String, adopt: bool) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local modem registration is not configured",
+        );
+    };
+    let imei = imei.trim().to_string();
+    if imei.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "imei is required");
+    }
+    let outcome = if adopt {
+        actions.register_modem(imei)
+    } else {
+        actions.unregister_modem(imei)
+    };
+    match outcome {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
 async fn claim_modem_candidate(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<ClaimCandidateBody>,
@@ -750,6 +821,11 @@ struct RestartBody {
 #[derive(Deserialize)]
 struct ClaimCandidateBody {
     candidate_key: String,
+}
+
+#[derive(Deserialize)]
+struct RegistrationBody {
+    imei: String,
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
