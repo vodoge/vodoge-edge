@@ -123,6 +123,45 @@ impl RefusedBy {
 /// return the same object where the driving is identical. What they must not
 /// share is *identity* -- the ledger records each family separately, so a
 /// combination tested on one is not claimed for the other.
+/// A USB (vendor, product) pair a strategy claims to drive.
+///
+/// 🔴 This is what decides whether the agent opens a device node at all, and
+/// it is deliberately declared by the strategy rather than kept in a list of
+/// its own. A module with no strategy cannot be driven, so probing it can only
+/// produce a candidate nobody can adopt -- and on this bench it produced worse
+/// than nothing: two Qualcomm sticks that answered enough to be listed, never
+/// enough to be identified, and re-enumerated every few minutes for hours.
+///
+/// One consequence worth stating: adding hardware support is one change, not
+/// two. Write the strategy, declare what it drives, and the enumerator follows.
+/// There is no second list to forget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct UsbIdentity {
+    pub vendor: u16,
+    pub product: u16,
+}
+
+impl UsbIdentity {
+    pub const fn new(vendor: u16, product: u16) -> Self {
+        Self { vendor, product }
+    }
+
+    /// Parse the lowercase four-hex-digit strings sysfs holds in `idVendor`
+    /// and `idProduct`. Anything else is `None` rather than a guess.
+    pub fn parse(vendor: &str, product: &str) -> Option<Self> {
+        Some(Self {
+            vendor: u16::from_str_radix(vendor.trim(), 16).ok()?,
+            product: u16::from_str_radix(product.trim(), 16).ok()?,
+        })
+    }
+}
+
+impl std::fmt::Display for UsbIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:04x}:{:04x}", self.vendor, self.product)
+    }
+}
+
 pub trait ModemStrategy: Send + Sync {
     /// Stable name for logs, receipts and the ledger.
     fn id(&self) -> &'static str;
@@ -130,6 +169,15 @@ pub trait ModemStrategy: Send + Sync {
     /// Every family this strategy is claimed to drive. Used to build the
     /// registry, and to make the sharing visible rather than implicit.
     fn families(&self) -> Vec<ModemFamily>;
+
+    /// Every USB identity this strategy drives.
+    ///
+    /// Returning an empty list means "this strategy is not reached by
+    /// enumeration", which is a legitimate thing for a strategy that is only
+    /// ever selected by a family name already known from elsewhere.
+    fn usb_identities(&self) -> Vec<UsbIdentity> {
+        Vec::new()
+    }
 
     /// The ceiling this hardware imposes, before any network is considered.
     ///
@@ -312,6 +360,28 @@ impl StrategyRegistry {
             carriers: HashMap::new(),
             ledger,
         }
+    }
+
+    /// Whether any registered strategy drives this USB identity.
+    ///
+    /// The question the enumerator asks before opening a device node.
+    pub fn drives(&self, identity: UsbIdentity) -> bool {
+        self.modems
+            .values()
+            .any(|strategy| strategy.usb_identities().contains(&identity))
+    }
+
+    /// Every USB identity the build can drive, sorted, for logging what the
+    /// enumerator will and will not touch.
+    pub fn driven_usb_identities(&self) -> Vec<UsbIdentity> {
+        let mut all: Vec<UsbIdentity> = self
+            .modems
+            .values()
+            .flat_map(|strategy| strategy.usb_identities())
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
     }
 
     /// Register one modem strategy for every family it claims.

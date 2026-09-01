@@ -43,8 +43,7 @@ pub use settle::{
 pub use at_policy::{classify as classify_at_command, AtRisk, DisruptiveKind};
 pub use strategy::{
     CarrierStrategy, ModemStrategy, OperatingContext, Operation, RefusedBy, Resolution, StrategyError,
-    StrategyRegistry, SubscriptionCapability, Support, SupportLedger,
-};
+    StrategyRegistry, SubscriptionCapability, Support, SupportLedger, UsbIdentity};
 pub use strategies::{
     registry as builtin_strategy_registry, CnMobileStrategy, CnTelecomStrategy, CnUnicomStrategy,
     Ec200uStrategy, InternationalStrategy, QuectelEcStrategy,

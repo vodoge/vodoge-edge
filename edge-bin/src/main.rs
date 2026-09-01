@@ -4044,9 +4044,76 @@ mod linux {
                     .map(|n| n.starts_with("cdc-wdm"))
                     .unwrap_or(false)
             })
+            .filter(|p| driven_by_a_strategy(p))
             .collect::<Vec<_>>();
         paths.sort();
         Ok(paths)
+    }
+
+    /// The registry used only to ask what hardware this build drives.
+    ///
+    /// Built once with an empty ledger and kept, because the set of USB
+    /// identities a build can drive is a compile-time fact -- the strategies
+    /// are `Arc`s of unit structs. Capability *decisions* build their own
+    /// registry from the live matrix each time, and must keep doing so: this
+    /// one would answer them with a ledger that has measured nothing.
+    fn strategy_registry() -> &'static edge_core::StrategyRegistry {
+        static REGISTRY: OnceLock<edge_core::StrategyRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            edge_core::builtin_strategy_registry(edge_core::SupportLedger::default())
+                .expect("the shipped strategy registry must build")
+        })
+    }
+
+    /// The USB identity behind a `cdc-wdm` node, read from sysfs.
+    ///
+    /// `/sys/class/usbmisc/<name>/device` is the USB *interface*; the vendor
+    /// and product live on its parent, the device. Walking up one level is the
+    /// whole of it, and a node whose parent cannot be read is treated as
+    /// unknown rather than assumed to be ours.
+    fn usb_identity_of(path: &Path) -> Option<edge_core::UsbIdentity> {
+        let name = path.file_name()?.to_str()?;
+        let interface = std::fs::canonicalize(
+            PathBuf::from("/sys/class/usbmisc").join(name).join("device"),
+        )
+        .ok()?;
+        let device = interface.parent()?;
+        let read = |field: &str| -> Option<String> {
+            std::fs::read_to_string(device.join(field))
+                .ok()
+                .map(|value| value.trim().to_owned())
+        };
+        edge_core::UsbIdentity::parse(&read("idVendor")?, &read("idProduct")?)
+    }
+
+    /// 🔴 Whether any strategy in this build drives the hardware behind a node.
+    ///
+    /// The gate that decides what the agent opens at all. Before it existed the
+    /// enumerator probed every `cdc-wdm` on the box, and on this bench that
+    /// meant two Qualcomm MSM8916 sticks nothing here can drive: they answered
+    /// enough to be listed, never enough to be identified, re-enumerated every
+    /// few minutes for hours, and filled the candidate list with rows no
+    /// operator could act on.
+    ///
+    /// A node whose identity cannot be read is **refused**, not admitted. The
+    /// alternative fails open, and failing open here is how the gate quietly
+    /// stops being a gate.
+    fn driven_by_a_strategy(path: &Path) -> bool {
+        let Some(identity) = usb_identity_of(path) else {
+            log_line(format!(
+                "skipping {}: its USB identity could not be read",
+                path.display()
+            ));
+            return false;
+        };
+        if strategy_registry().drives(identity) {
+            return true;
+        }
+        log_line(format!(
+            "skipping {} ({identity}): no strategy in this build drives it",
+            path.display()
+        ));
+        false
     }
 
     /// Every endpoint the agent can currently use to identify a modem. QMI
@@ -4145,7 +4212,29 @@ mod linux {
             .iter()
             .filter_map(|path| edge_modem::usb_device_of_qmi(path))
             .collect();
-        let serial_candidates = edge_modem::at_port_candidates();
+        // The same gate the QMI enumerator uses, for the same reason: a serial
+        // endpoint on hardware no strategy drives is a candidate no operator
+        // can adopt. `Manual` policy already stops the agent writing to it,
+        // but the row was still shown, and a list of rows that cannot be acted
+        // on is what made the panel unreadable on this bench.
+        //
+        // A candidate with no USB identity at all is kept: platform-attached
+        // serial has none, and refusing it here would drop hardware this gate
+        // was never about.
+        let serial_candidates: Vec<_> = edge_modem::at_port_candidates()
+            .into_iter()
+            .filter(|candidate| {
+                match (candidate.vendor_id.as_deref(), candidate.product_id.as_deref()) {
+                    (Some(vendor), Some(product)) => {
+                        match edge_core::UsbIdentity::parse(vendor, product) {
+                            Some(identity) => strategy_registry().drives(identity),
+                            None => true,
+                        }
+                    }
+                    _ => true,
+                }
+            })
+            .collect();
         let automatic_serial_usb: std::collections::BTreeSet<String> = serial_candidates
             .iter()
             .filter(|candidate| candidate.policy == edge_modem::AtProbePolicy::Automatic)

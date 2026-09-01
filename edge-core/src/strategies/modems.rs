@@ -5,7 +5,7 @@
 //! stay separate identities in the ledger regardless, so a pair tested on one
 //! is never claimed for the other.
 
-use crate::{Bearer, ModemFamily, ModemStrategy, Operation};
+use crate::{Bearer, ModemFamily, ModemStrategy, Operation, UsbIdentity};
 
 /// Quectel's EC-series LTE Cat-4 modules: EC20, EC25-CN, EG25-G.
 ///
@@ -27,6 +27,14 @@ impl ModemStrategy for QuectelEcStrategy {
             ModemFamily::EC25_CN,
             ModemFamily::EG25_G,
         ]
+    }
+
+    /// All three families ship the same USB composition. The descriptor
+    /// string says "EC25 LTE modem" on an EC20 as well, which is why the
+    /// family is settled by `ModemFamily::detect` on the firmware revision
+    /// and not by this pair -- this pair only decides whether to look.
+    fn usb_identities(&self) -> Vec<UsbIdentity> {
+        vec![UsbIdentity::new(0x2c7c, 0x0125)]
     }
 
     fn preferred_bearer(&self, operation: Operation) -> Option<Bearer> {
@@ -56,6 +64,12 @@ impl ModemStrategy for Ec200uStrategy {
 
     fn families(&self) -> Vec<ModemFamily> {
         vec![ModemFamily::EC200U_CN]
+    }
+
+    /// The composition the ceiling note below is about: no `cdc-wdm`, so this
+    /// module is reached over AT and never over QMI.
+    fn usb_identities(&self) -> Vec<UsbIdentity> {
+        vec![UsbIdentity::new(0x2c7c, 0x0901)]
     }
 
     /// What this agent can and cannot ask of an EC200U.
