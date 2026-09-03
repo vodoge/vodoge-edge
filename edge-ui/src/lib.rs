@@ -30,6 +30,7 @@
 mod api;
 mod candidates;
 mod console;
+mod esim;
 mod health;
 mod logs;
 mod scan;
@@ -41,6 +42,7 @@ use thaw::*;
 
 use candidates::{CandidatesPage, ClaimState};
 use console::{ConsolePage, ConsoleState};
+use esim::{EsimPage, EsimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use scan::{ScanPage, ScanState};
@@ -77,6 +79,7 @@ pub fn Panel() -> impl IntoView {
     let claims = ClaimState::new();
     let scan = ScanState::new();
     let console = ConsoleState::new();
+    let esim = EsimState::new();
     // 本地短信：10 秒一轮，跟状态页同频。
     let sms = SmsState::new();
     {
@@ -135,12 +138,29 @@ pub fn Panel() -> impl IntoView {
             <StatusPage state=state />
             <HealthPage active=state.active state=health />
             <ScanPage active=state.active state=scan />
+            <EsimPage active=state.active state=esim />
             <SmsPage state=sms status=state />
             <CandidatesPage state=state claims=claims />
             <ConsolePage active=state.active state=console />
             <LogsPage state=logs />
         </ConfigProvider>
     }
+}
+
+/// 等一会儿。
+///
+/// ⚠️ 有一处非等不可：切换 eSIM profile 之后要给卡片 REFRESH 留 8 秒，然后才
+/// 去问它。读得更早，问到的是还没走完的那个状态 —— 而这一栏的全部意义就是
+/// **以回读为准**。
+pub async fn sleep(ms: u64) {
+    // 直接用浏览器的 setTimeout 包一个 Promise，不为这一处引 `futures`。
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        if let Some(window) = web_sys::window() {
+            let _ =
+                window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 /// trunk's entry point.

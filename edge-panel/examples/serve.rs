@@ -20,7 +20,7 @@
 //! one.
 use std::sync::Arc;
 use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult,
-                 MemoryInbox, ScannedOperatorBody, PanelError,
+                 MemoryInbox, ProfileBody, ScannedOperatorBody, PanelError,
                  ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 
@@ -201,8 +201,39 @@ async fn main() {
             Err(PanelError::Action("控制口没有应答".into()))
         }
         fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn list_profiles(&self, _: Option<String>) -> Result<ProfilesResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        /// ⚠️ 这里演的是**假成功**：`switch_profile` 回 `Ok(())`，而卡上的
+        /// 状态一动不动。这个端点在真实硬件上就这么干过 —— 屏幕上必须写出
+        /// 「这是一次假成功，不要当它做过」。
+        fn list_profiles(&self, imei: Option<String>) -> Result<ProfilesResult, PanelError> {
+            Ok(ProfilesResult {
+                imei,
+                profiles: vec![
+                    ProfileBody {
+                        iccid: "89860112345678901234".into(),
+                        label: "主卡".into(),
+                        enabled: true,
+                        provider: Some("CMCC".into()),
+                        name: Some("China Mobile".into()),
+                        nickname: Some("主卡".into()),
+                        class: Some(2),
+                        isdp_aid: None,
+                    },
+                    ProfileBody {
+                        iccid: "89860199999999999999".into(),
+                        label: String::new(),
+                        enabled: false,
+                        provider: None,
+                        name: None,
+                        nickname: None,
+                        class: Some(0),
+                        isdp_aid: None,
+                    },
+                ],
+            })
+        }
+        fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> {
+            Ok(())
+        }
         /// 故意慢：睡 8 秒再回。进度条、「已 N 秒」、「这一根此刻不服务」那句
         /// 话，都只有在请求真的挂着的时候才看得出来在不在动。
         fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
