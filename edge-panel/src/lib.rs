@@ -42,13 +42,19 @@ const INDEX: &str = include_str!("index.html");
 /// "and these three files next to it" would be a regression in the one property
 /// that makes this panel usable when everything else is broken.
 ///
-/// The file names carry trunk's content hash, so this block changes whenever
-/// the bundle does — which is the intended coupling: a stale `.js` referencing
-/// a `.wasm` that is no longer there fails loudly at build time here rather
-/// than as a blank page in a browser during an outage.
+/// 🔴 Built with `--filehash false`, so the names are stable and this block
+/// never needs editing. The first version kept trunk's content hash, which
+/// meant **every rebuild of `edge-ui` renamed the files and left the router
+/// pointing at names that no longer existed** — a trap that would have sprung
+/// on the very first feature area of the migration.
+///
+/// Dropping the hash drops cache-busting, so the two handlers answer
+/// `no-cache` instead. That is the right trade here: half a megabyte over a
+/// LAN, for a diagnostic tool whose whole job is to be current at the moment
+/// something is wrong.
 const NEXT_INDEX: &str = include_str!("../../edge-ui/dist/index.html");
-const NEXT_JS: &str = include_str!("../../edge-ui/dist/edge-ui-77993700ff287f14.js");
-const NEXT_WASM: &[u8] = include_bytes!("../../edge-ui/dist/edge-ui-77993700ff287f14_bg.wasm");
+const NEXT_JS: &str = include_str!("../../edge-ui/dist/edge-ui.js");
+const NEXT_WASM: &[u8] = include_bytes!("../../edge-ui/dist/edge-ui_bg.wasm");
 
 /// How long a modem row stays trustworthy after its last successful poll.
 ///
@@ -321,8 +327,8 @@ fn build_router(
         // panel is the last visible window during a failure and a half-migrated
         // rewrite in its place is worse than the thing it replaces.
         .route("/next", get(next_index))
-        .route("/next/edge-ui-77993700ff287f14.js", get(next_js))
-        .route("/next/edge-ui-77993700ff287f14_bg.wasm", get(next_wasm))
+        .route("/next/edge-ui.js", get(next_js))
+        .route("/next/edge-ui_bg.wasm", get(next_wasm))
         .route("/api/status", get(status))
         .route("/api/logs", get(read_logs))
         .route("/api/messages", get(messages))
@@ -374,11 +380,25 @@ async fn next_index() -> Html<&'static str> {
 }
 
 async fn next_js() -> Response {
-    ([(header::CONTENT_TYPE, "text/javascript")], NEXT_JS).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        NEXT_JS,
+    )
+        .into_response()
 }
 
 async fn next_wasm() -> Response {
-    ([(header::CONTENT_TYPE, "application/wasm")], NEXT_WASM).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "application/wasm"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        NEXT_WASM,
+    )
+        .into_response()
 }
 
 async fn status(State(state): State<Arc<PanelState>>) -> Response {
