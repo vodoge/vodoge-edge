@@ -8,6 +8,7 @@ mod network;
 mod alert;
 mod apn;
 mod at_policy;
+mod at_guard;
 mod log_line;
 mod sms_draft;
 mod sms_block;
@@ -44,6 +45,7 @@ pub use settle::{
     settle_inbound, InboundFragment, InboundSettlement, SettledMessage,
 };
 pub use at_policy::{classify as classify_at_command, AtRisk, DisruptiveKind};
+pub use at_guard::{ask, guarded, Channel, GuardRow, Guarded, GUARDS};
 pub use log_line::{classify, Classified, Level, Topic, TOPIC_ORDER};
 pub use sms_block::{blocked_imeis, sms_block, SmsBlock};
 pub use sms_draft::{

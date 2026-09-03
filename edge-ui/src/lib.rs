@@ -29,6 +29,7 @@
 
 mod api;
 mod candidates;
+mod console;
 mod health;
 mod logs;
 mod scan;
@@ -39,6 +40,7 @@ use leptos::prelude::*;
 use thaw::*;
 
 use candidates::{CandidatesPage, ClaimState};
+use console::{ConsolePage, ConsoleState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use scan::{ScanPage, ScanState};
@@ -74,6 +76,7 @@ pub fn Panel() -> impl IntoView {
     // 每 2 秒问一次是在给一台边缘小机器找麻烦。
     let claims = ClaimState::new();
     let scan = ScanState::new();
+    let console = ConsoleState::new();
     // 本地短信：10 秒一轮，跟状态页同频。
     let sms = SmsState::new();
     {
@@ -134,6 +137,7 @@ pub fn Panel() -> impl IntoView {
             <ScanPage active=state.active state=scan />
             <SmsPage state=sms status=state />
             <CandidatesPage state=state claims=claims />
+            <ConsolePage active=state.active state=console />
             <LogsPage state=logs />
         </ConfigProvider>
     }

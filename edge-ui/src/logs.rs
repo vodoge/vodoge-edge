@@ -35,9 +35,21 @@ use crate::api::{self, Load};
 /// 轮询间隔。和状态页的 10 秒分开：日志要跟得上手上的操作，10 秒太钝。
 pub const LOGS_EVERY_MS: u64 = 2_000;
 
-/// 客户端保留的行数上限。服务端那个环是 500 行；这里留得下它的全部，再多留一些
-/// 好让暂停期间攒下的行不至于一边收一边掉。
-const KEEP: usize = 2_000;
+/// 客户端**保留**多少行。
+///
+/// ⚠️ 和 [`RENDER`] 是两件事，分开是有理由的，原版的注释说得很清楚：
+///
+/// - 一条保留的行是一个小对象（连推断出来的字段约 250 B），5000 条约 1.2 MB ——
+///   这个流的四小时四十五分钟，浏览器根本不会在意的内存。
+/// - 一条**画出来**的行是四个 DOM 节点加上排版，那才是让标签页变卡的东西。
+///
+/// 分开的好处是实的：筛选跑遍全部 5000 条保留行，所以它够得到比这一栏能滚动
+/// 的 2000 行**更早**的时间。
+const KEEP: usize = 5_000;
+
+/// 实际画出来多少行。超出的部分不画，但状态行里要说清楚少画了多少 ——
+/// 屏幕上少了东西而不说，比少了东西更糟。
+const RENDER: usize = 2_000;
 
 /// 多久没读到就算「迟了」。两倍轮询间隔——一次丢包不该让屏幕开始喊。
 const LATE_MS: f64 = (LOGS_EVERY_MS * 2) as f64;
@@ -258,6 +270,7 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
         n
     });
 
+    // 筛选跑遍**全部**保留的行，不只是画出来的那些。
     let shown = Memo::new(move |_| {
         let query = state.query.get().trim().to_lowercase();
         state
@@ -267,6 +280,13 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
             .filter(|row| keeps(&state, row, &query))
             .cloned()
             .collect::<Vec<_>>()
+    });
+
+    // 只画最新的 RENDER 行。⚠️ 少画的那些要在状态行里认。
+    let drawn = Memo::new(move |_| {
+        let rows = shown.get();
+        let from = rows.len().saturating_sub(RENDER);
+        rows[from..].to_vec()
     });
 
     // 有哪些模组在已收到的行里出现过——下拉框只列真出现过的，不列一堆空选项。
@@ -372,7 +392,7 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
             <Tally state=state shown=shown />
 
             {move || {
-                let rows = shown.get();
+                let rows = drawn.get();
                 if rows.is_empty() {
                     let total = state.rows.get().len();
                     let say = if total == 0 {
@@ -485,6 +505,20 @@ fn Tally(state: LogState, shown: Memo<Vec<Row>>) -> impl IntoView {
                     .then(|| {
                         view! { <Caption1>{format!("筛掉 {hidden} 条")}</Caption1> }
                     })}
+                // ⚠️ 画不下的那些也要认。筛选仍然覆盖全部保留的行 —— 少的只是
+                // 画出来的部分，不是被搜索的部分。
+                {(visible > RENDER)
+                    .then(|| {
+                        view! {
+                            <Caption1>
+                                {format!(
+                                    "只画了最新的 {RENDER} 行，另有 {} 行没画（筛选仍覆盖全部 {} 行）",
+                                    visible - RENDER,
+                                    kept,
+                                )}
+                            </Caption1>
+                        }
+                    })}
                 // 少了东西要认，而且要显眼。
                 {(dropped > 0)
                     .then(|| {
@@ -496,5 +530,67 @@ fn Tally(state: LogState, shown: Memo<Vec<Row>>) -> impl IntoView {
                     })}
             </Flex>
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(text: &str, seq: u64) -> Row {
+        let c = edge_core::classify(text);
+        Row {
+            line: LogLine {
+                seq,
+                at: 0,
+                text: text.to_string(),
+            },
+            level: c.level,
+            topic: c.topic,
+            beat: c.beat,
+            imei: c.imei,
+        }
+    }
+
+    /// 环满时丢的是**最旧**的，而且丢了多少要记下来。
+    ///
+    /// 屏幕上少了东西而不说，比少了东西更糟。
+    #[test]
+    fn trimming_drops_the_oldest_and_admits_how_many() {
+        let dropped = RwSignal::new(0usize);
+        let mut rows: Vec<Row> = (0..KEEP as u64 + 5).map(|i| row("poll: x", i)).collect();
+        trim(&mut rows, &dropped);
+        assert_eq!(rows.len(), KEEP);
+        assert_eq!(dropped.get_untracked(), 5, "丢了 5 条就要认 5 条");
+        assert_eq!(rows[0].line.seq, 5, "留下的是新的那一头");
+
+        // 再砍一次，计数是累加的。
+        rows.extend((0..3).map(|i| row("poll: x", 9000 + i)));
+        trim(&mut rows, &dropped);
+        assert_eq!(dropped.get_untracked(), 8, "计数要累加，不是覆盖");
+    }
+
+    /// 没超过上限时一条都不该丢。
+    #[test]
+    fn a_short_column_loses_nothing() {
+        let dropped = RwSignal::new(0usize);
+        let mut rows: Vec<Row> = (0..10).map(|i| row("poll: x", i)).collect();
+        trim(&mut rows, &dropped);
+        assert_eq!(rows.len(), 10);
+        assert_eq!(dropped.get_untracked(), 0);
+    }
+
+    /// 🔴 保留和绘制是两个数，而且保留的那个要更大。
+    ///
+    /// 分开的好处是实的：筛选跑遍全部保留行，所以它够得到比这一栏能滚动的范围
+    /// 更早的时间。两个数并成一个，就等于把搜索的射程砍到和滚动条一样长。
+    #[test]
+    fn what_is_kept_reaches_further_back_than_what_is_drawn() {
+        assert!(
+            KEEP > RENDER,
+            "保留 {KEEP} 不比绘制 {RENDER} 多，那分开就没有意义了"
+        );
+        assert_eq!(KEEP, 5_000, "和原版一致");
+        assert_eq!(RENDER, 2_000, "和原版一致");
     }
 }

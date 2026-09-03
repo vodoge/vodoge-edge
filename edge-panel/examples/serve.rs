@@ -171,8 +171,34 @@ async fn main() {
             Err(PanelError::Action("这个 example 只回答体检".into()))
         }
         fn restart_modem(&self, _: String) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn at_command(&self, _: Option<String>, _: String, _: bool) -> Result<AtResult, PanelError> {
-            Err(PanelError::Action("这个 example 只回答体检".into()))
+        /// ⚠️ 三种结局都能演出来，因为它们在屏幕上必须长得不一样：
+        ///
+        /// - `AT+CSQ` → 正常应答
+        /// - 带 `CPIN` 的 → `+CME ERROR: 13`，**模组答了**，只是拒绝了这一条
+        /// - 其余 → 连口都没够到
+        fn at_command(&self, _: Option<String>, command: String, _: bool) -> Result<AtResult, PanelError> {
+            let upper = command.to_uppercase();
+            if upper.contains("CPIN") {
+                return Ok(AtResult {
+                    port: "/dev/ttyUSB2".into(),
+                    command,
+                    lines: vec!["+CME ERROR: 13".into()],
+                    terminator: "+CME ERROR: 13".into(),
+                    ok: false,
+                    elapsed_ms: 34,
+                });
+            }
+            if upper.starts_with("AT+CSQ") {
+                return Ok(AtResult {
+                    port: "/dev/ttyUSB2".into(),
+                    command,
+                    lines: vec!["+CSQ: 10,99".into(), "OK".into()],
+                    terminator: "OK".into(),
+                    ok: true,
+                    elapsed_ms: 12,
+                });
+            }
+            Err(PanelError::Action("控制口没有应答".into()))
         }
         fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn list_profiles(&self, _: Option<String>) -> Result<ProfilesResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }

@@ -1,0 +1,501 @@
+[
+ {
+  "command": "  AT+CSQ",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CCHC",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CCHC"
+  ]
+ },
+ {
+  "command": "AT+CCHC = 1",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CCHC"
+  ]
+ },
+ {
+  "command": "AT+CCHC=1",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CCHC"
+  ]
+ },
+ {
+  "command": "AT+CCHO",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CCHO"
+  ]
+ },
+ {
+  "command": "AT+CCHO=\"A0000000871002\"",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CCHO"
+  ]
+ },
+ {
+  "command": "AT+CCHOX=1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CCID",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN = 1 , 1",
+  "label": "AT+CFUN=N,1",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+CFUN = 7",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "7"
+  ]
+ },
+ {
+  "command": "AT+CFUN=,1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN=0",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "AT+CFUN=0,0",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "AT+CFUN=0,1",
+  "label": "AT+CFUN=N,1",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "AT+CFUN=0,1x",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN=1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN=1,0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN=1,1",
+  "label": "AT+CFUN=N,1",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+CFUN=1,1 ",
+  "label": "AT+CFUN=N,1",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+CFUN=4",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "4"
+  ]
+ },
+ {
+  "command": "AT+CFUN=4,0",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "4"
+  ]
+ },
+ {
+  "command": "AT+CFUN=6",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN=7",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "7"
+  ]
+ },
+ {
+  "command": "AT+CFUN==0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CFUN?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CGLA",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CGLA"
+  ]
+ },
+ {
+  "command": "AT+CGLA=1,10,\"00\"",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "CGLA"
+  ]
+ },
+ {
+  "command": "AT+CGLAX",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CGSN",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CIMI",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CMGF=1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CNUM",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS = 2",
+  "label": "AT+COPS=1,… / =2",
+  "captured": [
+   "2"
+  ]
+ },
+ {
+  "command": "AT+COPS=0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS=1",
+  "label": "AT+COPS=1,… / =2",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+COPS=1,2,\"46000\"",
+  "label": "AT+COPS=1,… / =2",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+COPS=12",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS=2",
+  "label": "AT+COPS=1,… / =2",
+  "captured": [
+   "2"
+  ]
+ },
+ {
+  "command": "AT+COPS=3,0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CPIN?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CREG?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=176,28589,0,0,4",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=178,1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=21,1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=214,28589,0,0,4",
+  "label": "AT+CRSM=214/219/220,…",
+  "captured": [
+   "214"
+  ]
+ },
+ {
+  "command": "AT+CRSM=2140,1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=214x,1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CRSM=219,1,2,3",
+  "label": "AT+CRSM=214/219/220,…",
+  "captured": [
+   "219"
+  ]
+ },
+ {
+  "command": "AT+CRSM=220,1",
+  "label": "AT+CRSM=214/219/220,…",
+  "captured": [
+   "220"
+  ]
+ },
+ {
+  "command": "AT+CSIM",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CSIM = 8,\"00\"",
+  "label": "AT+CSIM=…",
+  "captured": []
+ },
+ {
+  "command": "AT+CSIM=10,\"A0A40000\"",
+  "label": "AT+CSIM=…",
+  "captured": []
+ },
+ {
+  "command": "AT+CSIM?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CSIMX=1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+CSQ",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QCFG = \"usbnet\" , 2",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "2"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"band\",1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QCFG=\"nwscanmode\",0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\"",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\" ,1",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\",0",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\",1",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\",2",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "2"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\",3",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "3"
+  ]
+ },
+ {
+  "command": "AT+QCFG=\"usbnet\",9",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "9"
+  ]
+ },
+ {
+  "command": "AT+QPRTPARA",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QPRTPARA = 3",
+  "label": "AT+QPRTPARA=…",
+  "captured": []
+ },
+ {
+  "command": "AT+QPRTPARA=1",
+  "label": "AT+QPRTPARA=…",
+  "captured": []
+ },
+ {
+  "command": "AT+QPRTPARA?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QPRTPARAX=1",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+QSIMSTAT?",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "ATI",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "at+ccho=\"A0\"",
+  "label": "AT+CCHO / +CGLA / +CCHC",
+  "captured": [
+   "ccho"
+  ]
+ },
+ {
+  "command": "at+cfun=0",
+  "label": "AT+CFUN=0 / =4 / =7",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "at+cfun=1,1",
+  "label": "AT+CFUN=N,1",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "at+cops=1",
+  "label": "AT+COPS=1,… / =2",
+  "captured": [
+   "1"
+  ]
+ },
+ {
+  "command": "at+crsm=214,1",
+  "label": "AT+CRSM=214/219/220,…",
+  "captured": [
+   "214"
+  ]
+ },
+ {
+  "command": "at+csim=4,\"00A4\"",
+  "label": "AT+CSIM=…",
+  "captured": []
+ },
+ {
+  "command": "at+qcfg=\"usbnet\",0",
+  "label": "AT+QCFG=\"usbnet\",N",
+  "captured": [
+   "0"
+  ]
+ },
+ {
+  "command": "at+qprtpara=2",
+  "label": "AT+QPRTPARA=…",
+  "captured": []
+ }
+]

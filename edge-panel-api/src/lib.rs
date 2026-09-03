@@ -281,7 +281,7 @@ pub struct UsbResetResult {
 }
 
 /// One AT exchange as the panel reports it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AtResult {
     pub port: String,
     pub command: String,
