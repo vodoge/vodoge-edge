@@ -13,8 +13,21 @@ use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
     DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode, StatusBody,
 };
+
+/// The `Actions` trait below returns these, so whoever implements it reaches
+/// for them here — re-exported rather than made a second import.
+///
+/// ⚠️ They are **defined** in `edge-panel-api` so the browser half can
+/// deserialise into the same types; this crate is where they are *used*, and
+/// `edge-bin` implements `Actions` against it. Sending an implementor to a
+/// second crate for the return types of a trait it found here would be worse
+/// ergonomics for no gain — there is still exactly one definition.
+pub use edge_panel_api::{
+    AtResult, CandidateClaimResult, ProfileBody, ProfilesResult, RegistrationResult, ReportResult,
+    RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
+};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 mod logs;
 pub use logs::{log_error, log_line, LogLine, LogRing};
@@ -163,118 +176,6 @@ pub trait Actions: Send + Sync {
     fn busy_modems(&self) -> Vec<String> {
         Vec::new()
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ScannedOperatorBody {
-    pub numeric: String,
-    pub long_name: String,
-    pub short_name: String,
-    pub status: String,
-    pub access_technology: Option<String>,
-}
-
-/// One USSD exchange as the panel reports it.
-#[derive(Clone, Debug, Serialize)]
-pub struct UssdResult {
-    pub code: String,
-    pub stage: String,
-    pub text: String,
-    pub dcs: Option<u8>,
-    /// True when the network is waiting for a follow-up on the same session.
-    pub expects_reply: bool,
-    pub elapsed_ms: u64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ScanResult {
-    pub imei: Option<String>,
-    pub elapsed_ms: u64,
-    pub operators: Vec<ScannedOperatorBody>,
-}
-
-/// Immediate acknowledgement for a requested hardware rescan.
-#[derive(Clone, Debug, Serialize)]
-pub struct RescanResult {
-    pub found: usize,
-    pub control_ports: Vec<String>,
-}
-
-/// Acknowledgement that one observed serial endpoint was approved for a
-/// later AT identity probe. It intentionally has no port or IMEI input.
-#[derive(Clone, Debug, Serialize)]
-pub struct CandidateClaimResult {
-    pub candidate_key: String,
-}
-
-/// What an adoption or a removal changed.
-///
-/// `changed` is false when the module was already in that state, which is not
-/// an error: the panel and a cloud command can both do this, and the second
-/// one arriving is not a fault.
-#[derive(Clone, Debug, Serialize)]
-pub struct RegistrationResult {
-    pub imei: String,
-    pub registered: bool,
-    pub changed: bool,
-}
-
-/// One eUICC profile as the panel reports it.
-#[derive(Clone, Debug, Serialize)]
-pub struct ProfileBody {
-    pub iccid: String,
-    pub label: String,
-    pub enabled: bool,
-    pub provider: Option<String>,
-    pub name: Option<String>,
-    pub nickname: Option<String>,
-    pub class: Option<u8>,
-    pub isdp_aid: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ProfilesResult {
-    pub imei: Option<String>,
-    pub profiles: Vec<ProfileBody>,
-}
-
-/// Structured answers to the diagnostic batch.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ReportResult {
-    pub imei: Option<String>,
-    pub port: String,
-    pub signal_dbm: Option<i16>,
-    pub signal_index: Option<u8>,
-    pub cs_registration: Option<String>,
-    pub ps_registration: Option<String>,
-    pub operator: Option<String>,
-    pub access_technology: Option<String>,
-    pub imsi: Option<String>,
-    pub iccid: Option<String>,
-    pub msisdn: Option<String>,
-    pub firmware: Option<String>,
-    pub sms_centre: Option<String>,
-    /// Commands the module refused, so an empty field can be told apart from a
-    /// field the module declined to report.
-    pub refused: Vec<String>,
-}
-
-/// Where a USB reset landed.
-#[derive(Clone, Debug, Serialize)]
-pub struct UsbResetResult {
-    pub device: String,
-    pub node: String,
-}
-
-/// One AT exchange as the panel reports it.
-#[derive(Clone, Debug, Serialize)]
-pub struct AtResult {
-    pub port: String,
-    pub command: String,
-    pub lines: Vec<String>,
-    pub terminator: String,
-    pub ok: bool,
-    pub elapsed_ms: u64,
 }
 
 /// Errors from the local panel store or a local action.
