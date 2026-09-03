@@ -33,7 +33,16 @@ async fn page_at(path: &str) -> String {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    String::from_utf8(response.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+    String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
 }
 
 /// Where a marker has to be found for its presence to mean anything.
@@ -98,7 +107,13 @@ impl Panel {
             body_of(&page, "<style id=\"panel-style\">", "</style>"),
         );
         let (tags, text) = split_tags(&markup_only(&page));
-        Panel { page, code, tags, text, styles }
+        Panel {
+            page,
+            code,
+            tags,
+            text,
+            styles,
+        }
     }
 
     fn region(&self, place: In) -> &str {
@@ -171,7 +186,8 @@ fn split_tags(markup: &str) -> (String, String) {
     let mut rest = markup;
     while let Some(at) = rest.find('<') {
         let after = rest[at + 1..].chars().next();
-        let opens_a_tag = matches!(after, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!');
+        let opens_a_tag =
+            matches!(after, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!');
         if !opens_a_tag {
             text.push_str(&rest[..at + 1]);
             rest = &rest[at + 1..];
@@ -323,7 +339,26 @@ fn blank(out: &mut String, c: char) {
 fn opens_a_regex(previous: char) -> bool {
     matches!(
         previous,
-        ' ' | '(' | ',' | '=' | ':' | '[' | '!' | '&' | '|' | '?' | '{' | '}' | ';' | '+' | '-' | '*' | '%' | '^' | '~' | '<' | '>'
+        ' ' | '('
+            | ','
+            | '='
+            | ':'
+            | '['
+            | '!'
+            | '&'
+            | '|'
+            | '?'
+            | '{'
+            | '}'
+            | ';'
+            | '+'
+            | '-'
+            | '*'
+            | '%'
+            | '^'
+            | '~'
+            | '<'
+            | '>'
     )
 }
 
@@ -375,7 +410,10 @@ async fn the_regions_this_file_asserts_in_are_actually_cut_apart() {
     let panel = Panel::load().await;
 
     // Code survives; both comment forms do not.
-    assert!(panel.code.contains("const CONSOLE_KEEP = 200;"), "the stripper ate the code");
+    assert!(
+        panel.code.contains("const CONSOLE_KEEP = 200;"),
+        "the stripper ate the code"
+    );
     assert!(
         !panel.code.contains("Where the corpus disagreed"),
         "a block comment is still in the code region"
@@ -386,12 +424,17 @@ async fn the_regions_this_file_asserts_in_are_actually_cut_apart() {
     );
     // The endpoint names that appear only as prose stay out of the code.
     assert!(
-        !panel.code.contains("`/api/esim` still showed the profile disabled"),
+        !panel
+            .code
+            .contains("`/api/esim` still showed the profile disabled"),
         "the code region still carries the comment that names an endpoint"
     );
 
     // Attributes and copy are on opposite sides.
-    assert!(panel.tags.contains("x-data=\"panel\""), "the tag scanner found no tags");
+    assert!(
+        panel.tags.contains("x-data=\"panel\""),
+        "the tag scanner found no tags"
+    );
     assert!(
         panel.tags.contains("x-show=\"logHits > logHitsDrawn\""),
         "the tag scanner stopped at a `>` written inside an attribute"
@@ -400,9 +443,18 @@ async fn the_regions_this_file_asserts_in_are_actually_cut_apart() {
         panel.tags.contains("x-show=\"index < 3\""),
         "the tag scanner stopped at a `<` written inside an attribute"
     );
-    assert!(!panel.tags.contains("只读探针"), "a text node leaked into the tags");
-    assert!(panel.text.contains("只读探针"), "the text region lost the copy");
-    assert!(!panel.text.contains("x-text="), "an attribute leaked into the text");
+    assert!(
+        !panel.tags.contains("只读探针"),
+        "a text node leaked into the tags"
+    );
+    assert!(
+        panel.text.contains("只读探针"),
+        "the text region lost the copy"
+    );
+    assert!(
+        !panel.text.contains("x-text="),
+        "an attribute leaked into the text"
+    );
     assert!(
         !panel.text.contains("const CONSOLE_KEEP"),
         "the script block leaked into the text"
@@ -413,8 +465,14 @@ async fn the_regions_this_file_asserts_in_are_actually_cut_apart() {
     );
 
     // The stylesheets are their own region.
-    assert!(panel.styles.contains(".con-entry.is-fail"), "the panel's own sheet is missing");
-    assert!(panel.styles.contains("--pico-background-color"), "Pico's sheet is missing");
+    assert!(
+        panel.styles.contains(".con-entry.is-fail"),
+        "the panel's own sheet is missing"
+    );
+    assert!(
+        panel.styles.contains("--pico-background-color"),
+        "Pico's sheet is missing"
+    );
 }
 
 /// Command controls acknowledge a press before their request returns. Selection
@@ -543,9 +601,20 @@ async fn the_panel_asks_the_browser_for_nothing_outside_the_page() {
         body_of(&panel.page, "<script id=\"vendor-alpine\">", "</script>"),
     );
     for shape in [
-        "fetch(\"http", "fetch('http", "fetch(`http", "src=\"http", "src='http",
-        ".src = \"http", ".src=\"http", "url(http", "url(\"http", "url('http",
-        "importScripts(", "new WebSocket(", "new EventSource(", "sendBeacon(",
+        "fetch(\"http",
+        "fetch('http",
+        "fetch(`http",
+        "src=\"http",
+        "src='http",
+        ".src = \"http",
+        ".src=\"http",
+        "url(http",
+        "url(\"http",
+        "url('http",
+        "importScripts(",
+        "new WebSocket(",
+        "new EventSource(",
+        "sendBeacon(",
     ] {
         assert!(
             !vendor.contains(shape),
@@ -561,8 +630,19 @@ async fn the_panel_asks_the_browser_for_nothing_outside_the_page() {
 /// the same. The two `content` attributes this page already has carry a
 /// viewport and a colour, and neither has a host in it.
 const LOADING_ATTRIBUTES: [&str; 13] = [
-    "src", "srcset", "imagesrcset", "href", "poster", "data", "action", "formaction",
-    "background", "ping", "manifest", "xlink:href", "content",
+    "src",
+    "srcset",
+    "imagesrcset",
+    "href",
+    "poster",
+    "data",
+    "action",
+    "formaction",
+    "background",
+    "ping",
+    "manifest",
+    "xlink:href",
+    "content",
 ];
 
 /// Whether a URL stays on the page it was written in.
@@ -578,7 +658,10 @@ fn is_local(value: &str) -> bool {
                 && scheme
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-                && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) =>
+                && scheme
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic()) =>
         {
             scheme.eq_ignore_ascii_case("data")
         }
@@ -756,8 +839,14 @@ async fn the_next_panel_loads_nothing_from_another_machine() {
     }
 
     assert!(!markup.contains("@import"), "css imports another sheet");
-    assert!(!markup.contains("src=\"//"), "protocol-relative script source");
-    assert!(!markup.contains("href=\"//"), "protocol-relative link target");
+    assert!(
+        !markup.contains("src=\"//"),
+        "protocol-relative script source"
+    );
+    assert!(
+        !markup.contains("href=\"//"),
+        "protocol-relative link target"
+    );
 
     let mut rest = markup.as_str();
     while let Some(at) = rest.find("url(") {
@@ -817,11 +906,7 @@ async fn the_next_panel_asks_for_its_own_bundle() {
             .await
             .unwrap()
             .status();
-        assert_eq!(
-            status,
-            200,
-            "/next 引用了 {url}，这个进程却给不出来"
-        );
+        assert_eq!(status, 200, "/next 引用了 {url}，这个进程却给不出来");
     }
 }
 
@@ -851,7 +936,10 @@ async fn the_panel_loads_nothing_from_outside_itself() {
     let markup = markup_without_comments(&page).to_lowercase();
 
     for tag in opening_tags(&markup, "script") {
-        assert!(!tag.contains("src="), "script loads something external: {tag}");
+        assert!(
+            !tag.contains("src="),
+            "script loads something external: {tag}"
+        );
     }
     for tag in opening_tags(&markup, "link") {
         assert!(
@@ -860,8 +948,14 @@ async fn the_panel_loads_nothing_from_outside_itself() {
         );
     }
     assert!(!markup.contains("@import"), "css imports another sheet");
-    assert!(!markup.contains("src=\"//"), "protocol-relative script source");
-    assert!(!markup.contains("href=\"//"), "protocol-relative link target");
+    assert!(
+        !markup.contains("src=\"//"),
+        "protocol-relative script source"
+    );
+    assert!(
+        !markup.contains("href=\"//"),
+        "protocol-relative link target"
+    );
 
     // Fonts, icons and images all have to be inline too, so every url() in the
     // stylesheets has to resolve to a data: uri.
@@ -877,7 +971,10 @@ async fn the_panel_loads_nothing_from_outside_itself() {
         scanned += 1;
         rest = &rest[at + 4..];
     }
-    assert!(scanned > 0, "no url() found at all, so this check measured nothing");
+    assert!(
+        scanned > 0,
+        "no url() found at all, so this check measured nothing"
+    );
 }
 
 /// The rule above is trivially satisfiable by shipping no framework, so this
@@ -887,14 +984,26 @@ async fn the_panel_carries_its_framework_inline() {
     let page = panel_page().await;
     assert!(page.contains("id=\"vendor-pico\""), "no inline Pico block");
     assert!(page.contains("Pico CSS"), "Pico's own banner is missing");
-    assert!(page.contains("--pico-background-color"), "Pico's variables are missing");
-    assert!(page.contains("id=\"vendor-alpine\""), "no inline Alpine block");
+    assert!(
+        page.contains("--pico-background-color"),
+        "Pico's variables are missing"
+    );
+    assert!(
+        page.contains("id=\"vendor-alpine\""),
+        "no inline Alpine block"
+    );
     assert!(page.contains("_x_dataStack"), "Alpine's runtime is missing");
-    assert!(page.contains("alpine:init"), "the panel never registers its component");
+    assert!(
+        page.contains("alpine:init"),
+        "the panel never registers its component"
+    );
     // Alpine self-starts, so the component has to be registered before it runs.
     let component = page.find("id=\"panel-script\"").expect("panel script");
     let alpine = page.find("id=\"vendor-alpine\"").expect("alpine script");
-    assert!(component < alpine, "Alpine starts before the panel registers its component");
+    assert!(
+        component < alpine,
+        "Alpine starts before the panel registers its component"
+    );
 }
 
 /// Every `/api` path the panel's code actually asks the browser for.
@@ -923,6 +1032,104 @@ fn api_call_sites(code: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// 所有 `edge-ui`（`/next` 那个 Leptos 面板）的源文件。⚠️ `include_str!`
+/// 是编译期常量，新增一个会调 `/api/*` 的模块却忘了加进这张表，这条测试量
+/// 到的东西不会变多——所以每加一个新页面模块，先把它加进这张表。
+const NEXT_PANEL_SOURCES: &[&str] = &[
+    include_str!("../../edge-ui/src/lib.rs"),
+    include_str!("../../edge-ui/src/api.rs"),
+    include_str!("../../edge-ui/src/status.rs"),
+    include_str!("../../edge-ui/src/health.rs"),
+    include_str!("../../edge-ui/src/logs.rs"),
+    include_str!("../../edge-ui/src/candidates.rs"),
+    include_str!("../../edge-ui/src/sms.rs"),
+    include_str!("../../edge-ui/src/scan.rs"),
+    include_str!("../../edge-ui/src/console.rs"),
+    include_str!("../../edge-ui/src/esim.rs"),
+    include_str!("../../edge-ui/src/danger.rs"),
+];
+
+/// 在一份 Rust 源码里找 `"/api/...` 这个形状的字符串字面量，问号之前那一段。
+/// 覆盖两种写法：`api::get("/api/x", ...)` 和 `api::get(&format!("/api/x?...`。
+fn next_panel_call_sites(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = code;
+    while let Some(at) = rest.find("\"/api/") {
+        let tail = &rest[at + 1..];
+        let end = tail.find(['"', '{']).unwrap_or(tail.len());
+        found.push(tail[..end].split('?').next().unwrap_or("").to_string());
+        rest = &tail[end.max(1)..];
+    }
+    found
+}
+
+/// `/next` 那个 Leptos 面板版本的端点覆盖审计。
+///
+/// 和下面那条 `every_endpoint_the_panel_used_is_still_reachable_from_the_page`
+/// 是同一件事的两份：旧面板扫 HTML/JS 源码字符串，这一条扫 Rust 源码字符串。
+/// `/next` 完全覆盖旧面板的功能之后，旧那一条会连同 `index.html` 一起删掉，
+/// 到时这一条是唯一还在守「页面调用的每个端点，daemon 都必须提供」这件事的。
+///
+/// 这条测试曾经因为 `/api/rescan` 被漏搬而应该红——写这条测试的时候顺手把
+/// 那个缺口也补上了，所以现在看到的是绿。
+#[tokio::test]
+async fn every_endpoint_the_next_panel_calls_is_registered_on_the_router() {
+    let sites: Vec<String> = NEXT_PANEL_SOURCES
+        .iter()
+        .flat_map(|code| next_panel_call_sites(code))
+        .collect();
+    assert!(
+        sites.len() >= 15,
+        "只扫到 {} 处调用，比端点数还少——扫描已经失效",
+        sites.len()
+    );
+
+    const KNOWN: &[&str] = &[
+        "/api/status",
+        "/api/logs",
+        "/api/messages",
+        "/api/send",
+        "/api/at",
+        "/api/report",
+        "/api/esim",
+        "/api/esim/switch",
+        "/api/scan",
+        "/api/ussd",
+        "/api/ussd/cancel",
+        "/api/radio",
+        "/api/usb-reset",
+        "/api/rescan",
+        "/api/discoveries/claim",
+        "/api/modems/register",
+        "/api/modems/unregister",
+    ];
+    for endpoint in KNOWN {
+        assert!(
+            sites.iter().any(|path| path == endpoint),
+            "/next 面板没有一处调用 {endpoint}：扫到的 {} 处是 {sites:?}",
+            sites.len()
+        );
+    }
+
+    // 反过来也要查：扫到的每一处调用都得是路由表上真的有的路径，否则某个
+    // 操作员按下按钮的那一刻，答案是 404。
+    for site in &sites {
+        assert!(
+            KNOWN.contains(&site.as_str()),
+            "/next 面板调用了 {site}，但它不在已知端点表里——要么路由表没有\
+             这一条，要么是上面 KNOWN 那张表没跟上"
+        );
+    }
+
+    // 🔴 `/api/restart` 必须缺席——它在 `Actions` trait 上存在，但没有一个
+    // `/next` 页面调用它。理由和旧面板那条一样：`panel.rs` 有测试钉住它不许
+    // 在旧面板出现，`/next` 完全接管之后这一条守的是同一件事。
+    assert!(
+        !sites.iter().any(|s| s == "/api/restart"),
+        "/next 面板出现了对 /api/restart 的调用——这个端点是刻意缺席的"
+    );
 }
 
 /// Reshaping the page must not quietly orphan an endpoint.
@@ -970,14 +1177,27 @@ async fn every_endpoint_the_panel_used_is_still_reachable_from_the_page() {
     for site in &sites {
         assert!(
             [
-                "/api/status", "/api/logs", "/api/messages", "/api/send", "/api/at",
-                "/api/report", "/api/esim", "/api/esim/switch", "/api/scan", "/api/ussd",
-                "/api/ussd/cancel", "/api/radio", "/api/usb-reset", "/api/rescan",
-                "/api/discoveries/claim", "/api/restart",
+                "/api/status",
+                "/api/logs",
+                "/api/messages",
+                "/api/send",
+                "/api/at",
+                "/api/report",
+                "/api/esim",
+                "/api/esim/switch",
+                "/api/scan",
+                "/api/ussd",
+                "/api/ussd/cancel",
+                "/api/radio",
+                "/api/usb-reset",
+                "/api/rescan",
+                "/api/discoveries/claim",
+                "/api/restart",
                 // Adoption and its reversal. Both are served by `lib.rs`; this
                 // list is a copy of that router and has to be kept in step,
                 // which is exactly what this assertion is for.
-                "/api/modems/register", "/api/modems/unregister",
+                "/api/modems/register",
+                "/api/modems/unregister",
             ]
             .contains(&site.as_str()),
             "the panel calls {site}, which the daemon does not serve"
@@ -1030,7 +1250,9 @@ async fn panel_requests_a_real_usb_rescan_and_keeps_raw_candidates_visible() {
         "x-for=\"d in discoveries\"",
     );
     assert!(
-        panel.code.contains("this.discoveries = Array.isArray(status.discoveries) ? status.discoveries : [];"),
+        panel.code.contains(
+            "this.discoveries = Array.isArray(status.discoveries) ? status.discoveries : [];"
+        ),
         "the status response never reaches the USB candidate list"
     );
     assert!(
@@ -1062,16 +1284,32 @@ async fn panel_claims_only_found_serial_candidates_for_later_at_identification()
         "this.post(\"/api/discoveries/claim\", { candidate_key: candidateKey })",
     );
 
-    let predicate = body_of(&panel.code, "candidateCanClaim(candidate) {", "\n        },");
+    let predicate = body_of(
+        &panel.code,
+        "candidateCanClaim(candidate) {",
+        "\n        },",
+    );
     assert!(
         predicate.contains("candidate.transport === \"serial\"")
             && predicate.contains("candidate.state === \"found\""),
         "the claim action is available outside an exact serial/found candidate: {predicate}"
     );
 
-    let claim = body_of(&panel.code, "async claimDiscovery(candidate) {", "\n        },");
-    for required in ["confirm(", "下一轮轮询", "AT+CGSN", "setTimeout(() => this.load().catch(() => {}), STATUS_EVERY)"] {
-        assert!(claim.contains(required), "the controlled claim flow omits {required}: {claim}");
+    let claim = body_of(
+        &panel.code,
+        "async claimDiscovery(candidate) {",
+        "\n        },",
+    );
+    for required in [
+        "confirm(",
+        "下一轮轮询",
+        "AT+CGSN",
+        "setTimeout(() => this.load().catch(() => {}), STATUS_EVERY)",
+    ] {
+        assert!(
+            claim.contains(required),
+            "the controlled claim flow omits {required}: {claim}"
+        );
     }
     for forbidden in ["prompt(", "control_port", "imei"] {
         assert!(
@@ -1127,20 +1365,64 @@ async fn the_console_has_what_a_debugging_console_needs() {
     // defined, and is asserted in the region that wiring has to live in.
     for (feature, place, marker) in [
         ("one block per command", In::Tags, "class=\"con-entry\""),
-        ("each block carries its own clock", In::Tags, "x-text=\"clock(entry.at)\""),
-        ("a failed exchange is marked as one", In::Styles, ".con-entry.is-fail"),
-        ("the tone is actually set on a failure", In::Code, "entry.tone = \"is-fail\""),
-        ("command history", In::Tags, "@keydown.arrow-up.prevent=\"historyBack()\""),
-        ("history keeps the half-written line", In::Code, "this.consoleDraft = this.consoleInput;"),
-        ("a past command can be put back in the box", In::Tags, "@click=\"recall(entry)\""),
-        ("copy one exchange", In::Tags, "@click=\"copyEntry(entry, $event.currentTarget)\""),
-        ("copy the whole transcript", In::Tags, "@click=\"copyConsole($event.currentTarget)\""),
+        (
+            "each block carries its own clock",
+            In::Tags,
+            "x-text=\"clock(entry.at)\"",
+        ),
+        (
+            "a failed exchange is marked as one",
+            In::Styles,
+            ".con-entry.is-fail",
+        ),
+        (
+            "the tone is actually set on a failure",
+            In::Code,
+            "entry.tone = \"is-fail\"",
+        ),
+        (
+            "command history",
+            In::Tags,
+            "@keydown.arrow-up.prevent=\"historyBack()\"",
+        ),
+        (
+            "history keeps the half-written line",
+            In::Code,
+            "this.consoleDraft = this.consoleInput;",
+        ),
+        (
+            "a past command can be put back in the box",
+            In::Tags,
+            "@click=\"recall(entry)\"",
+        ),
+        (
+            "copy one exchange",
+            In::Tags,
+            "@click=\"copyEntry(entry, $event.currentTarget)\"",
+        ),
+        (
+            "copy the whole transcript",
+            In::Tags,
+            "@click=\"copyConsole($event.currentTarget)\"",
+        ),
         // The panel is opened at http://<lan-ip>:8743 far more often than at
         // localhost, and that is not a secure context, so this is the path
         // that actually runs on site rather than a courtesy to old browsers.
-        ("copy without a secure context", In::Code, "execCommand(\"copy\")"),
-        ("the quick probes are labelled read-only", In::Text, "只读探针"),
-        ("an open USSD session is visible", In::Tags, "class=\"con-ussd\""),
+        (
+            "copy without a secure context",
+            In::Code,
+            "execCommand(\"copy\")",
+        ),
+        (
+            "the quick probes are labelled read-only",
+            In::Text,
+            "只读探针",
+        ),
+        (
+            "an open USSD session is visible",
+            In::Tags,
+            "class=\"con-ussd\"",
+        ),
     ] {
         panel.wired(place, feature, marker);
     }
@@ -1154,13 +1436,21 @@ async fn the_console_has_what_a_debugging_console_needs() {
         "the / key does not focus the command box: `recall()` calls focusCommand too, \
          so the bare name stayed green with this binding deleted"
     );
-    let escape = body_of(&panel.code, "if (event.key === \"Escape\") {", "\n          }");
+    let escape = body_of(
+        &panel.code,
+        "if (event.key === \"Escape\") {",
+        "\n          }",
+    );
     assert!(
         escape.contains("this.cancelInput();"),
         "Esc does not cancel what is being typed"
     );
 
-    let new_entry = body_of(&panel.code, "newEntry(kind, title, titleCls) {", "\n        },");
+    let new_entry = body_of(
+        &panel.code,
+        "newEntry(kind, title, titleCls) {",
+        "\n        },",
+    );
     assert!(
         new_entry.contains("const over = this.consoleLog.length - CONSOLE_KEEP;"),
         "the transcript is not measured against its cap: `const CONSOLE_KEEP` is a \
@@ -1268,15 +1558,31 @@ async fn the_usbnet_guard_fires_on_the_write_not_the_read() {
 async fn every_action_that_takes_the_module_off_the_air_asks_first() {
     let panel = Panel::load().await;
     for (action, opening, ask) in [
-        ("the radio switch", "async toggleRadio(button) {", "confirm(radioAsk("),
+        (
+            "the radio switch",
+            "async toggleRadio(button) {",
+            "confirm(radioAsk(",
+        ),
         (
             "a profile switch",
             "async switchProfile(iccid, enable, button) {",
             "confirm(esimAsk(",
         ),
-        ("a full-band scan", "async runScan(button) {", "confirm(scanAsk("),
-        ("a USB re-enumeration", "async usbReset(button) {", "confirm("),
-        ("a guarded typed command", "async runAt(command) {", "confirm(tripped.guard.ask("),
+        (
+            "a full-band scan",
+            "async runScan(button) {",
+            "confirm(scanAsk(",
+        ),
+        (
+            "a USB re-enumeration",
+            "async usbReset(button) {",
+            "confirm(",
+        ),
+        (
+            "a guarded typed command",
+            "async runAt(command) {",
+            "confirm(tripped.guard.ask(",
+        ),
     ] {
         let body = body_of(&panel.code, opening, "\n        },");
         let asked = body
@@ -1302,7 +1608,11 @@ async fn every_action_that_takes_the_module_off_the_air_asks_first() {
 #[tokio::test]
 async fn taking_the_radio_down_says_what_it_costs() {
     let panel = Panel::load().await;
-    let dialog = body_of(&panel.code, "function radioAsk(imei, goOnline) {", "\n    }");
+    let dialog = body_of(
+        &panel.code,
+        "function radioAsk(imei, goOnline) {",
+        "\n    }",
+    );
     for consequence in [
         // The mechanism, because the operator will read `+CFUN` in the status
         // bar and conclude the panel sent one.
@@ -1353,7 +1663,10 @@ async fn the_console_issues_no_command_the_panel_did_not_issue_before() {
     // and the count below is what proves no probe writes anything.
     let head = "const QUICK = [";
     let start = panel.code.find(head).expect("no quick probe list") + head.len();
-    let end = start + panel.code[start..].find("];").expect("unterminated quick probe list");
+    let end = start
+        + panel.code[start..]
+            .find("];")
+            .expect("unterminated quick probe list");
     let quick = &panel.code[start..end];
 
     for command in [
@@ -1435,7 +1748,11 @@ async fn the_console_says_what_esc_does_not_do() {
 #[tokio::test]
 async fn an_open_ussd_session_survives_a_change_of_command_mode() {
     let panel = Panel::load().await;
-    panel.wired(In::Tags, "nothing cancels a USSD session", "@click=\"cancelUssd()\"");
+    panel.wired(
+        In::Tags,
+        "nothing cancels a USSD session",
+        "@click=\"cancelUssd()\"",
+    );
     assert!(
         panel.code.contains("this.post(\"/api/ussd/cancel\""),
         "the cancel control is bound to nothing that cancels"
@@ -1568,7 +1885,11 @@ async fn the_esim_tab_has_what_switching_a_profile_needs() {
 async fn switching_a_profile_asks_before_it_sends() {
     let panel = Panel::load().await;
     let page = &panel.page;
-    let dialog = body_of(&panel.code, "function esimAsk(profile, enable, profiles, imei) {", "\n    }");
+    let dialog = body_of(
+        &panel.code,
+        "function esimAsk(profile, enable, profiles, imei) {",
+        "\n    }",
+    );
     for consequence in [
         "摘下来",
         "REFRESH",
@@ -1629,7 +1950,10 @@ async fn a_switch_is_reported_from_the_card_and_not_from_the_endpoint() {
         .find("judgeSwitch(s, await this.readProfiles());")
         .expect("the switch never reads the card back");
 
-    assert!(sent < read_back, "the card is read before the switch is sent");
+    assert!(
+        sent < read_back,
+        "the card is read before the switch is sent"
+    );
     assert!(
         claimed_ok < read_back,
         "the readback does not follow an ok answer"
@@ -1670,7 +1994,11 @@ async fn a_switch_is_reported_from_the_card_and_not_from_the_endpoint() {
 #[tokio::test]
 async fn the_verdict_is_computed_from_the_profile_list_alone() {
     let panel = Panel::load().await;
-    let judge = body_of(&panel.code, "function judgeSwitch(state, profiles) {", "\n    }");
+    let judge = body_of(
+        &panel.code,
+        "function judgeSwitch(state, profiles) {",
+        "\n    }",
+    );
 
     assert!(
         judge.contains("profiles.find((p) => p.iccid === state.iccid)"),
@@ -1683,7 +2011,10 @@ async fn the_verdict_is_computed_from_the_profile_list_alone() {
     // Three outcomes, because there are three: it matches, it does not, or the
     // profile is not in the list the card handed back at all.
     for outcome in ["\"match\"", "\"mismatch\"", "\"missing\""] {
-        assert!(judge.contains(outcome), "the verdict cannot come out {outcome}");
+        assert!(
+            judge.contains(outcome),
+            "the verdict cannot come out {outcome}"
+        );
     }
     assert!(
         !judge.contains("claim"),
@@ -1739,7 +2070,9 @@ fn guard_table(code: &str) -> Vec<Guard> {
         // typed in lower case is the same command. `/i,` is therefore the
         // terminator, and a pattern written without the flag fails here rather
         // than silently guarding only the shouted spelling.
-        let match_at = rest.find("        match: /").expect("a guard with no pattern");
+        let match_at = rest
+            .find("        match: /")
+            .expect("a guard with no pattern");
         let pattern_from = &rest[match_at + "        match: /".len()..];
         let pattern = pattern_from[..pattern_from
             .find("/i,")
@@ -1747,7 +2080,12 @@ fn guard_table(code: &str) -> Vec<Guard> {
             .to_string();
         let ask_at = rest.find("        ask(").expect("a guard with no dialog");
         let ask_body = body_of(&rest[ask_at..], "{", "\n        },").to_string();
-        guards.push(Guard { label, warn, pattern, ask: ask_body });
+        guards.push(Guard {
+            label,
+            warn,
+            pattern,
+            ask: ask_body,
+        });
     }
     guards
 }
@@ -1756,7 +2094,11 @@ fn guard_table(code: &str) -> Vec<Guard> {
 fn quoted(text: &str) -> String {
     let mut chars = text.chars();
     let opener = chars.next().expect("nothing to quote");
-    assert!(opener == '"' || opener == '\'', "not a string literal: {}", &text[..20.min(text.len())]);
+    assert!(
+        opener == '"' || opener == '\'',
+        "not a string literal: {}",
+        &text[..20.min(text.len())]
+    );
     let mut out = String::new();
     let mut escaped = false;
     for c in chars {
@@ -1806,7 +2148,10 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
     for (shape, consequences) in [
         // T004's original. Named here too so a rewrite of the table cannot
         // drop it while the rest of this test still passes.
-        ("usbnet", vec!["立即生效", "重新枚举", "cdc-wdm", "从机队里消失"]),
+        (
+            "usbnet",
+            vec!["立即生效", "重新枚举", "cdc-wdm", "从机队里消失"],
+        ),
         // `AT+CFUN=<n>,1`: the reset form. edge-panel/src/lib.rs refuses to put
         // it on a button; edge-modem/src/session.rs records it as the only
         // measured way out of `+CFUN: 7`, on one observation. Both halves have
@@ -1820,7 +2165,13 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
         // green until the shapes below carried the command name.
         (
             "cfun\\s*=\\s*(\\d+)\\s*,",
-            vec!["重新枚举", "没有人能物理接触", "+CFUN: 7", "唯一量到过的解药", "40 秒"],
+            vec![
+                "重新枚举",
+                "没有人能物理接触",
+                "+CFUN: 7",
+                "唯一量到过的解药",
+                "40 秒",
+            ],
         ),
         // `AT+CFUN=0/4/7`: off the air. The way back exists for 0 and 4 and is
         // named, because a dialog that implies otherwise is the kind operators
@@ -1840,7 +2191,10 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
         // dialog has to say which channel it runs on, because the entry below
         // is the one that opens channels and two rows claiming the same
         // consequence is how an operator learns neither of them.
-        ("csim", vec!["APDU", "基本通道", "AT+CCHO", "+CME ERROR: 13"]),
+        (
+            "csim",
+            vec!["APDU", "基本通道", "AT+CCHO", "+CME ERROR: 13"],
+        ),
         // `AT+CCHO` / `AT+CGLA` / `AT+CCHC`: the logical-channel trio, and the
         // only commands here that can exhaust a card-level resource for good.
         // vowifi T089 found them missing while running one on real hardware.
@@ -1891,7 +2245,11 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
     // live, or "UPDATE BINARY" could disappear with the dialog still full of
     // consequences and this test still green.
     let crsm_table = body_of(&panel.code, "const CRSM_WRITES = {", "};");
-    for (code, name) in [("214", "UPDATE BINARY"), ("219", "SET DATA"), ("220", "UPDATE RECORD")] {
+    for (code, name) in [
+        ("214", "UPDATE BINARY"),
+        ("219", "SET DATA"),
+        ("220", "UPDATE RECORD"),
+    ] {
         assert!(
             crsm_table.contains(code) && crsm_table.contains(name),
             "the CRSM dialog cannot name what {code} does: {crsm_table}"
@@ -1906,7 +2264,11 @@ async fn every_command_that_cannot_be_undone_is_guarded_and_says_why() {
         );
     }
     let cfun_table = body_of(&panel.code, "const CFUN_MEANING = {", "\n    };");
-    for (value, meaning) in [("0:", "射频与卡一起下电"), ("4:", "飞行模式"), ("7:", "离线")] {
+    for (value, meaning) in [
+        ("0:", "射频与卡一起下电"),
+        ("4:", "飞行模式"),
+        ("7:", "离线"),
+    ] {
         assert!(
             cfun_table.contains(value) && cfun_table.contains(meaning),
             "the radio-down dialog cannot say what {value} means: {cfun_table}"
@@ -1996,7 +2358,10 @@ async fn the_guards_fire_on_the_form_that_does_not_come_back() {
     // `AT+CRSM` on the update codes only.
     let crsm = pattern_for("crsm");
     for write in ["214", "219", "220"] {
-        assert!(crsm.contains(write), "the CRSM guard misses the write code {write}: {crsm}");
+        assert!(
+            crsm.contains(write),
+            "the CRSM guard misses the write code {write}: {crsm}"
+        );
     }
     for read in ["176", "178", "192", "242"] {
         assert!(
@@ -2089,7 +2454,10 @@ async fn the_guards_fire_on_the_form_that_does_not_come_back() {
 async fn the_sweep_is_not_guarded_and_the_manual_selection_still_is() {
     let panel = Panel::load().await;
     let guards = guard_table(&panel.code);
-    let cops: Vec<_> = guards.iter().filter(|g| g.pattern.contains("cops")).collect();
+    let cops: Vec<_> = guards
+        .iter()
+        .filter(|g| g.pattern.contains("cops"))
+        .collect();
     assert_eq!(
         cops.len(),
         1,
@@ -2137,7 +2505,11 @@ async fn the_sweep_is_not_guarded_and_the_manual_selection_still_is() {
 async fn every_guarded_command_is_named_before_anybody_types_one() {
     let panel = Panel::load().await;
     for (feature, place, marker) in [
-        ("the list is drawn from the guard table", In::Tags, "x-for=\"g in GUARDED\""),
+        (
+            "the list is drawn from the guard table",
+            In::Tags,
+            "x-for=\"g in GUARDED\"",
+        ),
         ("each row names the command", In::Tags, "x-text=\"g.label\""),
         ("each row says what it costs", In::Tags, "x-text=\"g.warn\""),
     ] {
@@ -2145,7 +2517,11 @@ async fn every_guarded_command_is_named_before_anybody_types_one() {
     }
     // The table has to be reachable from the component, or the loop above
     // renders nothing and the assertions are about dead markup.
-    let data = body_of(&panel.code, "Alpine.data(\"panel\", () => ({", "\n        boot() {");
+    let data = body_of(
+        &panel.code,
+        "Alpine.data(\"panel\", () => ({",
+        "\n        boot() {",
+    );
     assert!(
         data.contains("GUARDED, SCAN_LIMIT,"),
         "the guard table is not exposed to the component, so the on-screen list is empty"
@@ -2176,19 +2552,47 @@ async fn a_slow_sweep_shows_progress_rather_than_looking_hung() {
     );
 
     for (feature, place, marker) in [
-        ("the sweep is timed from when it started", In::Code, "this.scanStartedAt = Date.now();"),
+        (
+            "the sweep is timed from when it started",
+            In::Code,
+            "this.scanStartedAt = Date.now();",
+        ),
         (
             "elapsed is derived from the tick, not from the reply",
             In::Code,
             "return Math.max(0, Math.round((this.now - this.scanStartedAt) / 1000));",
         ),
         ("there is a bar", In::Tags, "class=\"scan-bar\""),
-        ("the bar is filled by the elapsed time", In::Tags, ":value=\"Math.min(scanElapsed, SCAN_LIMIT / 1000)\""),
-        ("the bar is sized by the daemon's own timeout", In::Tags, ":max=\"SCAN_LIMIT / 1000\""),
-        ("the progress is readable as a number too", In::Tags, "x-show=\"scanBusy\""),
-        ("the result carries when it was taken", In::Tags, "x-text=\"'扫于 ' + clock(scanAt)\""),
-        ("the current network is marked in the table", In::Tags, "op.status === 'current' ? 'is-current'"),
-        ("a sweep in flight says the stick is not serving", In::Text, "不注册、不收短信、没有数据"),
+        (
+            "the bar is filled by the elapsed time",
+            In::Tags,
+            ":value=\"Math.min(scanElapsed, SCAN_LIMIT / 1000)\"",
+        ),
+        (
+            "the bar is sized by the daemon's own timeout",
+            In::Tags,
+            ":max=\"SCAN_LIMIT / 1000\"",
+        ),
+        (
+            "the progress is readable as a number too",
+            In::Tags,
+            "x-show=\"scanBusy\"",
+        ),
+        (
+            "the result carries when it was taken",
+            In::Tags,
+            "x-text=\"'扫于 ' + clock(scanAt)\"",
+        ),
+        (
+            "the current network is marked in the table",
+            In::Tags,
+            "op.status === 'current' ? 'is-current'",
+        ),
+        (
+            "a sweep in flight says the stick is not serving",
+            In::Text,
+            "不注册、不收短信、没有数据",
+        ),
         ("and that it comes back by itself", In::Text, "扫完自己回来"),
     ] {
         panel.wired(place, feature, marker);
@@ -2240,12 +2644,36 @@ async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
         "the block list does not name {blocked}"
     );
     for (feature, place, marker) in [
-        ("the rail marks the stick", In::Tags, "x-show=\"smsBlock(m.imei)\""),
-        ("the mark is a badge, not only a tooltip", In::Text, "MO 短信禁发"),
-        ("the sms tab explains it in full", In::Tags, "x-text=\"smsBlock(activeImei).why\""),
-        ("and says the message probably went out anyway", In::Tags, "x-text=\"smsBlock(activeImei).also\""),
-        ("and where that was measured", In::Tags, "x-text=\"smsBlock(activeImei).source\""),
-        ("the controls are disabled", In::Tags, ":disabled=\"!canSend\""),
+        (
+            "the rail marks the stick",
+            In::Tags,
+            "x-show=\"smsBlock(m.imei)\"",
+        ),
+        (
+            "the mark is a badge, not only a tooltip",
+            In::Text,
+            "MO 短信禁发",
+        ),
+        (
+            "the sms tab explains it in full",
+            In::Tags,
+            "x-text=\"smsBlock(activeImei).why\"",
+        ),
+        (
+            "and says the message probably went out anyway",
+            In::Tags,
+            "x-text=\"smsBlock(activeImei).also\"",
+        ),
+        (
+            "and where that was measured",
+            In::Tags,
+            "x-text=\"smsBlock(activeImei).source\"",
+        ),
+        (
+            "the controls are disabled",
+            In::Tags,
+            ":disabled=\"!canSend\"",
+        ),
     ] {
         panel.wired(place, feature, marker);
     }
@@ -2260,7 +2688,10 @@ async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
     let sent = send
         .find("await this.post(\"/api/send\"")
         .expect("the send path no longer sends anything");
-    assert!(asked < sent, "the block list is consulted after the message has gone out");
+    assert!(
+        asked < sent,
+        "the block list is consulted after the message has gone out"
+    );
     assert!(
         send[asked..sent].contains("if (blocked) {"),
         "the block list is read and then ignored"
@@ -2272,7 +2703,10 @@ async fn the_panel_will_not_send_from_the_stick_that_leaves_the_bus() {
     let unaimed = send
         .find("if (!this.activeImei) {")
         .expect("an unaimed send is allowed, and the daemon picks the modem — including that one");
-    assert!(unaimed < sent, "the unaimed check happens after the message has gone out");
+    assert!(
+        unaimed < sent,
+        "the unaimed check happens after the message has gone out"
+    );
 
     // Each refusal has to return inside *its own* branch. Looking for a
     // `return;` anywhere between the first check and the request is not the
@@ -2335,12 +2769,32 @@ async fn the_sms_tab_has_what_sending_and_reading_messages_needs() {
     assert_eq!(constant(&panel.code, "UCS2_MAX_CHARS"), 70);
 
     for (feature, place, marker) in [
-        ("which way a message went", In::Tags, "x-text=\"m.direction === 'outbound' ? '发出'"),
-        ("which stick it belongs to", In::Tags, "x-text=\"m.modem_imei ? shortImei(m.modem_imei) : '—'\""),
-        ("the inbox can be narrowed to one stick", In::Tags, "x-model=\"inboxMine\""),
-        ("and says how much it is hiding", In::Tags, "x-text=\"inbox.length + ' / ' + messages.length + ' 条'\""),
+        (
+            "which way a message went",
+            In::Tags,
+            "x-text=\"m.direction === 'outbound' ? '发出'",
+        ),
+        (
+            "which stick it belongs to",
+            In::Tags,
+            "x-text=\"m.modem_imei ? shortImei(m.modem_imei) : '—'\"",
+        ),
+        (
+            "the inbox can be narrowed to one stick",
+            In::Tags,
+            "x-model=\"inboxMine\"",
+        ),
+        (
+            "and says how much it is hiding",
+            In::Tags,
+            "x-text=\"inbox.length + ' / ' + messages.length + ' 条'\"",
+        ),
         ("the draft is measured", In::Tags, "x-text=\"draftText\""),
-        ("and marked when it will be refused", In::Tags, ":class=\"draft.over ? 'is-over' : ''\""),
+        (
+            "and marked when it will be refused",
+            In::Tags,
+            ":class=\"draft.over ? 'is-over' : ''\"",
+        ),
     ] {
         panel.wired(place, feature, marker);
     }
@@ -2389,14 +2843,30 @@ async fn the_health_tab_says_whether_the_stick_can_carry_anything() {
     let panel = Panel::load().await;
     for (feature, place, marker) in [
         ("the read is timed", In::Code, "this.reportAt = Date.now();"),
-        ("and the time is shown", In::Tags, "x-text=\"'读于 ' + clock(reportAt)\""),
-        ("the verdict is drawn", In::Tags, "x-for=\"v in reportVerdict\""),
+        (
+            "and the time is shown",
+            In::Tags,
+            "x-text=\"'读于 ' + clock(reportAt)\"",
+        ),
+        (
+            "the verdict is drawn",
+            In::Tags,
+            "x-for=\"v in reportVerdict\"",
+        ),
         ("with its own tone", In::Tags, ":class=\"v.tone\""),
-        ("the facts are grouped by the question they answer", In::Tags, "x-for=\"group in reportGroups\""),
+        (
+            "the facts are grouped by the question they answer",
+            In::Tags,
+            "x-for=\"group in reportGroups\"",
+        ),
         // In the attribute rather than in a text node: the sentence only makes
         // sense when there is a refusal to explain, so it is drawn with the
         // list it explains.
-        ("a refusal is explained rather than left as a list", In::Tags, "'（拒绝也是回答"),
+        (
+            "a refusal is explained rather than left as a list",
+            In::Tags,
+            "'（拒绝也是回答",
+        ),
     ] {
         panel.wired(place, feature, marker);
     }
@@ -2464,7 +2934,9 @@ fn constant(page: &str, name: &str) -> u64 {
 /// rather than to leave two sources of truth disagreeing.
 #[tokio::test]
 async fn a_served_log_line_carries_no_level_module_or_endpoint() {
-    let _turn = LOG_RING_TURN.lock().unwrap_or_else(|held| held.into_inner());
+    let _turn = LOG_RING_TURN
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
     let marker = "panel-test-marker line for the shape assertion";
     LogRing::global().push(marker);
 
@@ -2500,7 +2972,9 @@ async fn a_served_log_line_carries_no_level_module_or_endpoint() {
 /// would make the buffer pointless.
 #[tokio::test]
 async fn the_column_retains_more_than_the_server_ring_does() {
-    let _turn = LOG_RING_TURN.lock().unwrap_or_else(|held| held.into_inner());
+    let _turn = LOG_RING_TURN
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
     let ring = LogRing::global();
     for index in 0..600 {
         ring.push(format!("ring capacity probe {index}"));
@@ -2561,11 +3035,17 @@ async fn the_column_retains_more_than_the_server_ring_does() {
 async fn the_log_column_admits_it_is_polling_rather_than_tailing() {
     let panel = Panel::load().await;
     assert!(
-        panel.code.contains("fetch(\"/api/logs?after=\" + LOG.cursor)"),
+        panel
+            .code
+            .contains("fetch(\"/api/logs?after=\" + LOG.cursor)"),
         "the column is not a cursor poll"
     );
     panel.wired(In::Tags, "the poll interval is not on screen", "s 轮询'");
-    panel.wired(In::Tags, "the last refresh time is not on screen", "'刷新于 '");
+    panel.wired(
+        In::Tags,
+        "the last refresh time is not on screen",
+        "'刷新于 '",
+    );
     panel.wired(In::Tags, "a failed poll is not reported", "logPollFailed");
     panel.wired(
         In::Tags,
@@ -2592,14 +3072,26 @@ async fn the_log_column_has_what_a_debugging_log_needs() {
         ("walking the hits", In::Tags, "stepMatch("),
         ("pause and resume", In::Tags, "togglePause()"),
         ("copy one line", In::Code, "className = \"log-copy\""),
-        ("copy without a secure context", In::Code, "execCommand(\"copy\")"),
+        (
+            "copy without a secure context",
+            In::Code,
+            "execCommand(\"copy\")",
+        ),
         ("arrival cue", In::Styles, "@keyframes log-arrive"),
-        ("arrival cue is applied to the new rows", In::Code, "classList.add(\"is-new\")"),
+        (
+            "arrival cue is applied to the new rows",
+            In::Code,
+            "classList.add(\"is-new\")",
+        ),
         ("arrival cue while scrolled away", In::Tags, "logNewErr"),
         ("quieting the heartbeat", In::Tags, "logQuiet = !logQuiet"),
         // Only the `ok` form: folding in the `at-only` sibling would let
         // "静音" hide a module that answered over serial after QMI did not.
-        ("the heartbeat is only the ok form", In::Code, "imei=\\d+ ok$/i"),
+        (
+            "the heartbeat is only the ok form",
+            In::Code,
+            "imei=\\d+ ok$/i",
+        ),
         ("eviction is reported", In::Tags, "已丢弃最旧"),
     ] {
         panel.wired(place, feature, marker);
@@ -2650,12 +3142,12 @@ async fn panel_serves_embedded_html_and_local_json() {
             last_seen: Some(1_700_000_000_000),
             mcc: Some(460),
             mnc: Some(0),
-        home_mcc: None,
-        home_mnc: None,
-        imsi: None,
-        discovery: "qmi".into(),
-        manageable: true,
-        control_port: Some("/dev/cdc-wdm0".into()),
+            home_mcc: None,
+            home_mnc: None,
+            imsi: None,
+            discovery: "qmi".into(),
+            manageable: true,
+            control_port: Some("/dev/cdc-wdm0".into()),
         }],
         discoveries: vec![LocalModemDiscovery {
             candidate_key: "qmi:usb:2-4.1".into(),
@@ -2683,15 +3175,29 @@ async fn panel_serves_embedded_html_and_local_json() {
         .await
         .unwrap();
     assert_eq!(html.status(), 200);
-    let page = String::from_utf8(html.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let page = String::from_utf8(
+        html.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     // What this test is for is that the router serves the embedded page at all
     // and answers the two local reads below. Which endpoints the page is wired
     // to is asserted by call site in
     // `every_endpoint_the_panel_used_is_still_reachable_from_the_page`; six
     // substring checks here only looked like a second opinion, because every
     // one of them was also satisfied by the copy on the page.
-    assert!(page.contains("<!DOCTYPE html>"), "the served page is not the panel");
-    assert!(page.contains("x-ref=\"cmd\""), "the command box is not mounted");
+    assert!(
+        page.contains("<!DOCTYPE html>"),
+        "the served page is not the panel"
+    );
+    assert!(
+        page.contains("x-ref=\"cmd\""),
+        "the command box is not mounted"
+    );
 
     let status = app
         .clone()
@@ -2760,7 +3266,13 @@ async fn the_page_labels_the_states_the_agent_writes_and_no_others() {
     // and must stay: `unidentified`, `silent` and `unavailable` classify log
     // lines by severity, and `mbim` is a USBNET mode. It is only their use as
     // a discovery state or transport that was invented.
-    for fiction in ["unidentified:", "unsupported:", "unavailable:", "silent:", "mbim:"] {
+    for fiction in [
+        "unidentified:",
+        "unsupported:",
+        "unavailable:",
+        "silent:",
+        "mbim:",
+    ] {
         assert!(
             !panel.code.contains(fiction),
             "the page still keys on {fiction:?}, which nothing writes",
@@ -2837,7 +3349,10 @@ async fn a_modem_says_whether_the_matrix_has_heard_of_its_combination() {
         body["modems"][1]["capability_origin"], "rule",
         "a rule that says probe is still a rule and must not raise a flag"
     );
-    assert_eq!(body["modems"][1]["carrier_profile"], "Generic-International");
+    assert_eq!(
+        body["modems"][1]["carrier_profile"],
+        "Generic-International"
+    );
 
     assert_eq!(
         body["modems"][2]["capability_origin"], "fallback",
@@ -2965,7 +3480,10 @@ impl Actions for RecordingActions {
         iccid: String,
         enable: bool,
     ) -> Result<(), PanelError> {
-        self.switched.lock().expect("switched").push((iccid, enable));
+        self.switched
+            .lock()
+            .expect("switched")
+            .push((iccid, enable));
         Ok(())
     }
 
@@ -3085,10 +3603,8 @@ async fn post_send(payload: &str) -> (u16, serde_json::Value) {
 #[tokio::test]
 async fn a_blocked_modem_cannot_be_made_to_send_by_curl() {
     let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
-    let (status, body) = post_send(&format!(
-        r#"{{"to":"12345","body":"hi","imei":"{imei}"}}"#
-    ))
-    .await;
+    let (status, body) =
+        post_send(&format!(r#"{{"to":"12345","body":"hi","imei":"{imei}"}}"#)).await;
     assert_eq!(status, 403, "被封禁的模组必须被拒");
     let error = body["error"].as_str().unwrap_or_default();
     assert!(error.contains(imei), "要指名是哪一根：{error}");
@@ -3211,12 +3727,12 @@ async fn panel_reports_a_rejected_at_command_as_a_reply() {
     struct Rejecting;
     impl Actions for Rejecting {
         fn send_sms(
-        &self,
-        _: String,
-        _: String,
-        _: Option<String>,
-        _commission: bool,
-    ) -> Result<(), PanelError> {
+            &self,
+            _: String,
+            _: String,
+            _: Option<String>,
+            _commission: bool,
+        ) -> Result<(), PanelError> {
             Ok(())
         }
         fn restart_modem(&self, _: String) -> Result<(), PanelError> {
@@ -3445,12 +3961,12 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
     struct Busy;
     impl Actions for Busy {
         fn send_sms(
-        &self,
-        _: String,
-        _: String,
-        _: Option<String>,
-        _commission: bool,
-    ) -> Result<(), PanelError> {
+            &self,
+            _: String,
+            _: String,
+            _: Option<String>,
+            _commission: bool,
+        ) -> Result<(), PanelError> {
             Ok(())
         }
         fn restart_modem(&self, _: String) -> Result<(), PanelError> {
@@ -3534,12 +4050,12 @@ async fn panel_reports_a_busy_modem_as_busy_not_offline() {
             last_seen: Some(1_700_000_000_000),
             mcc: None,
             mnc: None,
-        home_mcc: None,
-        home_mnc: None,
-        imsi: None,
-        discovery: "qmi".into(),
-        manageable: true,
-        control_port: Some("/dev/cdc-wdm0".into()),
+            home_mcc: None,
+            home_mnc: None,
+            imsi: None,
+            discovery: "qmi".into(),
+            manageable: true,
+            control_port: Some("/dev/cdc-wdm0".into()),
         }],
         discoveries: Vec::new(),
     });
