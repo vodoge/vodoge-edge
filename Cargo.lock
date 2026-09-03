@@ -239,12 +239,21 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "edge-core",
+ "edge-panel-api",
  "edge-store",
  "http-body-util",
  "serde",
  "serde_json",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "edge-panel-api"
+version = "0.1.0"
+dependencies = [
+ "edge-core",
+ "serde",
 ]
 
 [[package]]

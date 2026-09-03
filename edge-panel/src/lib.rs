@@ -9,7 +9,10 @@ use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use edge_core::{CapabilityMatrix, CapabilityOrigin, CarrierProfile, ModemFamily, Network};
+use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
+use edge_panel_api::{
+    DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode, StatusBody,
+};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -444,9 +447,9 @@ async fn index() -> Html<&'static str> {
 
 async fn status(State(state): State<Arc<PanelState>>) -> Response {
     let mode = if state.uplink_online.load(Ordering::Relaxed) {
-        "cloud"
+        PanelMode::Cloud
     } else {
-        "local"
+        PanelMode::Local
     };
     let now = now_ms();
     let busy = state
@@ -464,10 +467,10 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                 .into_iter()
                 .map(|modem| {
                     let is_busy = busy.iter().any(|imei| *imei == modem.imei);
-                    ModemBody::observed(modem, now, is_busy, &matrix)
+                    modem_body(modem, now, is_busy, &matrix)
                 })
                 .collect(),
-            discoveries: discoveries.into_iter().map(DiscoveryBody::from).collect(),
+            discoveries: discoveries.into_iter().map(discovery_body).collect(),
         })
         .into_response(),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
@@ -585,7 +588,7 @@ fn cursor_from_query(query: Option<&str>) -> u64 {
 async fn messages(State(state): State<Arc<PanelState>>) -> Response {
     match state.inbox.list_messages() {
         Ok(rows) => Json(MessagesBody {
-            messages: rows.into_iter().map(MessageBody::from).collect(),
+            messages: rows.into_iter().map(message_body).collect(),
         })
         .into_response(),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
@@ -842,59 +845,17 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     response
 }
 
-#[derive(Serialize)]
-struct StatusBody {
-    mode: &'static str,
-    modems: Vec<ModemBody>,
-    discoveries: Vec<DiscoveryBody>,
-}
-
-#[derive(Serialize)]
-struct ModemBody {
-    imei: String,
-    family: String,
-    iccid: Option<String>,
-    state: String,
-    last_seen: Option<i64>,
-    /// Whose subscription this is, from the card's IMSI. This is what tells
-    /// two similar sticks apart.
-    home: Option<String>,
-    home_numeric: Option<String>,
-    imsi: Option<String>,
-    /// Where the modem is currently registered. On a roaming card this is a
-    /// different operator, so it is shown separately rather than instead.
-    network: Option<String>,
-    network_numeric: Option<String>,
-    discovery: String,
-    manageable: bool,
-    control_port: Option<String>,
-    /// Firmware revision and the card's own number, both carried in the modem
-    /// row rather than fetched by a diagnostic so the panel can show them
-    /// without taking the radio away from the poll loop.
-    firmware: Option<String>,
-    msisdn: Option<String>,
-    /// The carrier half of the capability-matrix key, derived from the home
-    /// network. Shown because it is half of what a new rule must be written
-    /// against, and it is not readable off the operator name.
-    carrier_profile: String,
-    /// `rule` when the matrix has an entry for this (family, carrier) pair,
-    /// `fallback` when it has never heard of the combination.
-    ///
-    /// Deliberately not called "measured". A rule is free to say `probe`, and
-    /// several do -- that is a decision that this pair varies or was never
-    /// characterised, which is a different fact from nobody having considered
-    /// it. Only the second one is worth interrupting an operator about, and
-    /// only the second one is what a new rule would fix.
-    ///
-    /// Note that a recognised family is not enough on its own: `UFI103S` is a
-    /// known variant with no rules in the built-in matrix, so it lands here.
-    capability_origin: &'static str,
-}
-
-impl ModemBody {
-    /// Report a modem that has gone quiet as offline rather than repeating the
-    /// registration state it happened to have when it was last reachable.
-    fn observed(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix) -> Self {
+/// Report a modem that has gone quiet as offline rather than repeating the
+/// registration state it happened to have when it was last reachable.
+///
+/// ⚠️ A free function rather than `impl ModemBody`, and `From` below is a
+/// free function for the same reason: `ModemBody` lives in `edge-panel-api`
+/// now so that the browser can deserialise into it, and Rust's orphan rule
+/// will not let this crate hang inherent or foreign-trait impls on a foreign
+/// type. The conversion belongs on this side either way — it reads
+/// `edge-store` rows, and `edge-store` carries a bundled SQLite that must
+/// never reach the wasm bundle.
+fn modem_body(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix) -> ModemBody {
         let stale = value
             .last_seen
             .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
@@ -925,11 +886,10 @@ impl ModemBody {
                 .unwrap_or("Generic-International"),
         );
         let family = ModemFamily::from(value.family.as_str());
-        let capability_origin = match matrix.query(&family, &carrier).origin {
-            CapabilityOrigin::Rule => "rule",
-            CapabilityOrigin::Fallback => "fallback",
-        };
-        Self {
+        // The enum itself now, not a hand-written spelling of it: `serde` owns
+        // the wire names, and the browser deserialises into the same type.
+        let capability_origin = matrix.query(&family, &carrier).origin;
+        ModemBody {
             imei: value.imei,
             family: value.family,
             iccid: value.iccid,
@@ -949,25 +909,11 @@ impl ModemBody {
             capability_origin,
         }
     }
-}
 
-#[derive(Serialize)]
-struct DiscoveryBody {
-    candidate_key: String,
-    usb_device: Option<String>,
-    transport: String,
-    control_port: String,
-    vendor_id: Option<String>,
-    product_id: Option<String>,
-    state: String,
-    imei: Option<String>,
-    detail: String,
-    last_seen: i64,
-}
-
-impl From<LocalModemDiscovery> for DiscoveryBody {
-    fn from(value: LocalModemDiscovery) -> Self {
-        Self {
+/// See the note on `modem_body`: a free function because the type is foreign.
+fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {
+    {
+        DiscoveryBody {
             candidate_key: value.candidate_key,
             usb_device: value.usb_device,
             transport: value.transport,
@@ -982,25 +928,10 @@ impl From<LocalModemDiscovery> for DiscoveryBody {
     }
 }
 
-#[derive(Serialize)]
-struct MessagesBody {
-    messages: Vec<MessageBody>,
-}
-
-#[derive(Serialize)]
-struct MessageBody {
-    seq: u64,
-    peer: String,
-    body: String,
-    bearer: String,
-    direction: String,
-    received_at: i64,
-    modem_imei: Option<String>,
-}
-
-impl From<LocalMessage> for MessageBody {
-    fn from(value: LocalMessage) -> Self {
-        Self {
+/// See the note on `modem_body`: a free function because the type is foreign.
+fn message_body(value: LocalMessage) -> MessageBody {
+    {
+        MessageBody {
             seq: value.seq,
             peer: value.peer,
             body: value.body,

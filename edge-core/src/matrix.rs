@@ -4,7 +4,7 @@ use std::{
     fmt,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Bearer, BearerSupport, Capability, CarrierProfile, ModemFamily};
 
@@ -12,7 +12,17 @@ const BUILTIN_MATRIX: &str = include_str!("../capabilities/capability-matrix.tom
 
 /// Indicates whether a matrix query used a modem/carrier-specific rule or the
 /// deliberately configured fallback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// 🔴 Serialisable since 2026-09-03, and lowercase on the wire because that is
+/// what it has always been on the wire. `edge-panel` used to write the mapping
+/// out by hand where it built its status body — `Rule => "rule"`,
+/// `Fallback => "fallback"` — which is a second spelling of this enum living
+/// somewhere it cannot be checked against the first. The panel's browser half
+/// now deserialises into this type, so both ends read the same names and a
+/// third variant added here fails to compile in both places rather than
+/// silently serialising as something nobody handles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CapabilityOrigin {
     Rule,
     Fallback,

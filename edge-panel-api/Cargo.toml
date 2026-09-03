@@ -1,0 +1,8 @@
+[package]
+name = "edge-panel-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edge-core = { path = "../edge-core" }
+serde = { version = "1", features = ["derive"] }
