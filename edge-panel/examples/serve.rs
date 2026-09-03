@@ -18,44 +18,48 @@
 //! is why one row reads 回退) — because the thing being looked at here is the
 //! layout, and layout breaks on the widest real value rather than the average
 //! one.
-use std::sync::Arc;
-use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult,
-                 MemoryInbox, ProfileBody, ScannedOperatorBody, PanelError,
-                 ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
+use edge_panel::{
+    log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult, MemoryInbox,
+    PanelError, ProfileBody, ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody,
+    UsbResetResult, UssdResult,
+};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     let inbox = Arc::new(MemoryInbox {
-        messages: vec![LocalMessage {
-            seq: 1,
-            peer: "10086".into(),
-            body: "本月流量已使用 78%。".into(),
-            bearer: "cellular".into(),
-            direction: "inbound".into(),
-            received_at: 1_700_000_000_000,
-            modem_imei: Some("867018069509705".into()),
-        },
-        LocalMessage {
-            seq: 2,
-            peer: "8613800100500".into(),
-            body: "test from the bench".into(),
-            bearer: "cellular".into(),
-            direction: "outbound".into(),
-            received_at: 1_700_000_100_000,
-            modem_imei: Some("860000000000001".into()),
-        },
-        // ⚠️ 故意留一条**没记模组**的。这一条在「只看某一根」时也必须还在 ——
-        // 因为一个字段缺失就丢行，是收件箱悄悄丢信的方式。
-        LocalMessage {
-            seq: 3,
-            peer: "12520".into(),
-            body: "no modem recorded for this one".into(),
-            bearer: "cellular".into(),
-            direction: "inbound".into(),
-            received_at: 1_700_000_200_000,
-            modem_imei: None,
-        }],
+        messages: vec![
+            LocalMessage {
+                seq: 1,
+                peer: "10086".into(),
+                body: "本月流量已使用 78%。".into(),
+                bearer: "cellular".into(),
+                direction: "inbound".into(),
+                received_at: 1_700_000_000_000,
+                modem_imei: Some("867018069509705".into()),
+            },
+            LocalMessage {
+                seq: 2,
+                peer: "8613800100500".into(),
+                body: "test from the bench".into(),
+                bearer: "cellular".into(),
+                direction: "outbound".into(),
+                received_at: 1_700_000_100_000,
+                modem_imei: Some("860000000000001".into()),
+            },
+            // ⚠️ 故意留一条**没记模组**的。这一条在「只看某一根」时也必须还在 ——
+            // 因为一个字段缺失就丢行，是收件箱悄悄丢信的方式。
+            LocalMessage {
+                seq: 3,
+                peer: "12520".into(),
+                body: "no modem recorded for this one".into(),
+                bearer: "cellular".into(),
+                direction: "inbound".into(),
+                received_at: 1_700_000_200_000,
+                modem_imei: None,
+            },
+        ],
         modems: vec![
             LocalModem {
                 imei: "867018069509705".into(),
@@ -96,53 +100,58 @@ async fn main() {
                 control_port: Some("/dev/ttyUSB2".into()),
             },
         ],
-        discoveries: vec![LocalModemDiscovery {
-            candidate_key: "qmi:usb:2-4.1".into(),
-            usb_device: Some("2-4.1".into()),
-            transport: "qmi".into(),
-            control_port: "/dev/cdc-wdm1".into(),
-            vendor_id: Some("2c7c".into()),
-            product_id: Some("0125".into()),
-            state: "probe_failed".into(),
-            imei: None,
-            detail: "POLLERR".into(),
-            last_seen: 1_700_000_000_000,
-        },
-        // 三种候选各一个，好看清那两个按钮什么时候出现、什么时候不出现。
-        //
-        // 这个是**可认领**的：串口、状态 found、还没人跟它说过话。
-        LocalModemDiscovery {
-            candidate_key: "serial:usb:2-4.2:port:/dev/ttyUSB8".into(),
-            usb_device: Some("2-4.2".into()),
-            transport: "serial".into(),
-            control_port: "/dev/ttyUSB8".into(),
-            vendor_id: Some("1e0e".into()),
-            product_id: None,
-            state: "found".into(),
-            imei: None,
-            detail: String::new(),
-            last_seen: 1_700_000_000_000,
-        },
-        // 这个已经报过 IMEI 而且不在管理列表里，所以只该出现**纳管**。
-        LocalModemDiscovery {
-            candidate_key: "serial:usb:2-4.3:port:/dev/ttyUSB11".into(),
-            usb_device: Some("2-4.3".into()),
-            transport: "serial".into(),
-            control_port: "/dev/ttyUSB11".into(),
-            vendor_id: Some("2c7c".into()),
-            product_id: Some("0296".into()),
-            state: "atonly".into(),
-            imei: Some("869999000000123".into()),
-            detail: "answered AT+CGSN over serial only".into(),
-            last_seen: 1_700_000_000_000,
-        }],
+        discoveries: vec![
+            LocalModemDiscovery {
+                candidate_key: "qmi:usb:2-4.1".into(),
+                usb_device: Some("2-4.1".into()),
+                transport: "qmi".into(),
+                control_port: "/dev/cdc-wdm1".into(),
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0125".into()),
+                state: "probe_failed".into(),
+                imei: None,
+                detail: "POLLERR".into(),
+                last_seen: 1_700_000_000_000,
+            },
+            // 三种候选各一个，好看清那两个按钮什么时候出现、什么时候不出现。
+            //
+            // 这个是**可认领**的：串口、状态 found、还没人跟它说过话。
+            LocalModemDiscovery {
+                candidate_key: "serial:usb:2-4.2:port:/dev/ttyUSB8".into(),
+                usb_device: Some("2-4.2".into()),
+                transport: "serial".into(),
+                control_port: "/dev/ttyUSB8".into(),
+                vendor_id: Some("1e0e".into()),
+                product_id: None,
+                state: "found".into(),
+                imei: None,
+                detail: String::new(),
+                last_seen: 1_700_000_000_000,
+            },
+            // 这个已经报过 IMEI 而且不在管理列表里，所以只该出现**纳管**。
+            LocalModemDiscovery {
+                candidate_key: "serial:usb:2-4.3:port:/dev/ttyUSB11".into(),
+                usb_device: Some("2-4.3".into()),
+                transport: "serial".into(),
+                control_port: "/dev/ttyUSB11".into(),
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0296".into()),
+                state: "atonly".into(),
+                imei: Some("869999000000123".into()),
+                detail: "answered AT+CGSN over serial only".into(),
+                last_seen: 1_700_000_000_000,
+            },
+        ],
     });
     // 一个**只回答体检**的假 Actions：其余动作照实返回「没有配置」，因为这个
     // example 是给人看画面的，不是给人点硬件的。
     //
     // ⚠️ 体检回的这份数据是 867018069509705 的——**封禁表里那一根**。选它就能
     // 看到第四条判词，那正是这一页在发短信之前要说的话。
-    struct BenchActions;
+    struct BenchActions {
+        /// 演一个真的会打开、会被回复关掉、也能被「取消会话」关掉的 USSD 会话。
+        ussd_open: std::sync::atomic::AtomicBool,
+    }
     impl Actions for BenchActions {
         fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError> {
             Ok(ReportResult {
@@ -164,19 +173,35 @@ async fn main() {
         }
         /// 认领是回应答的（好让「已纳入探测」那一格能被看到），但它**什么硬件
         /// 都不碰** —— 和真实实现一样，认领只是给下一轮轮询上膛。
-        fn claim_modem_candidate(&self, candidate_key: String) -> Result<CandidateClaimResult, PanelError> {
+        fn claim_modem_candidate(
+            &self,
+            candidate_key: String,
+        ) -> Result<CandidateClaimResult, PanelError> {
             Ok(CandidateClaimResult { candidate_key })
         }
-        fn send_sms(&self, _: String, _: String, _: Option<String>, _: bool) -> Result<(), PanelError> {
+        fn send_sms(
+            &self,
+            _: String,
+            _: String,
+            _: Option<String>,
+            _: bool,
+        ) -> Result<(), PanelError> {
             Err(PanelError::Action("这个 example 只回答体检".into()))
         }
-        fn restart_modem(&self, _: String) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn restart_modem(&self, _: String) -> Result<(), PanelError> {
+            Err(PanelError::Action("这个 example 只回答体检".into()))
+        }
         /// ⚠️ 三种结局都能演出来，因为它们在屏幕上必须长得不一样：
         ///
         /// - `AT+CSQ` → 正常应答
         /// - 带 `CPIN` 的 → `+CME ERROR: 13`，**模组答了**，只是拒绝了这一条
         /// - 其余 → 连口都没够到
-        fn at_command(&self, _: Option<String>, command: String, _: bool) -> Result<AtResult, PanelError> {
+        fn at_command(
+            &self,
+            _: Option<String>,
+            command: String,
+            _: bool,
+        ) -> Result<AtResult, PanelError> {
             let upper = command.to_uppercase();
             if upper.contains("CPIN") {
                 return Ok(AtResult {
@@ -200,7 +225,9 @@ async fn main() {
             }
             Err(PanelError::Action("控制口没有应答".into()))
         }
-        fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> {
+            Err(PanelError::Action("这个 example 只回答体检".into()))
+        }
         /// ⚠️ 这里演的是**假成功**：`switch_profile` 回 `Ok(())`，而卡上的
         /// 状态一动不动。这个端点在真实硬件上就这么干过 —— 屏幕上必须写出
         /// 「这是一次假成功，不要当它做过」。
@@ -267,9 +294,45 @@ async fn main() {
                 ],
             })
         }
-        fn ussd(&self, _: Option<String>, _: String) -> Result<UssdResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        /// 第一次发码 → 打开会话（`expects_reply: true`）。
+        /// 再发一次 → 网络自己把会话结束了（`expects_reply: false`）。
+        /// 发 `*000#` → 演一次连不上运营商的失败。
+        fn ussd(&self, _: Option<String>, code: String) -> Result<UssdResult, PanelError> {
+            use std::sync::atomic::Ordering;
+            if code.trim() == "*000#" {
+                return Err(PanelError::Action("USSD 请求超时，运营商没有应答".into()));
+            }
+            let was_open = self
+                .ussd_open
+                .swap(!self.ussd_open.load(Ordering::SeqCst), Ordering::SeqCst);
+            if was_open {
+                Ok(UssdResult {
+                    code,
+                    stage: "USSD 会话结束".into(),
+                    text: "感谢使用，再见。".into(),
+                    dcs: Some(15),
+                    expects_reply: false,
+                    elapsed_ms: 900,
+                })
+            } else {
+                Ok(UssdResult {
+                    code,
+                    stage: "等待选择".into(),
+                    text: "话费余额 23.40 元。\n1. 查流量\n2. 查语音\n0. 退出".into(),
+                    dcs: Some(15),
+                    expects_reply: true,
+                    elapsed_ms: 1200,
+                })
+            }
+        }
+        fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> {
+            self.ussd_open
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> {
+            Err(PanelError::Action("这个 example 只回答体检".into()))
+        }
     }
 
     // 给日志栏灌一些真实形状的行：三种级别、几个话题、带 imei= 的和不带的，
@@ -311,8 +374,15 @@ async fn main() {
         }
     });
 
-    let app = router_with_actions(inbox, Some(Arc::new(BenchActions)));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8790").await.unwrap();
+    let app = router_with_actions(
+        inbox,
+        Some(Arc::new(BenchActions {
+            ussd_open: std::sync::atomic::AtomicBool::new(false),
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:8790")
+        .await
+        .unwrap();
     println!("panel on http://127.0.0.1:8790  (/ 老面板, /next 新面板)");
     axum::serve(listener, app).await.unwrap();
 }

@@ -29,7 +29,6 @@
 //! *from* the store's rows *into* these types stay on the server side, where
 //! the store already is.
 
-
 /// Re-exported so the browser half can match on it without depending on
 /// `edge-core` directly — the wire vocabulary arrives with the wire types.
 pub use edge_core::CapabilityOrigin;
@@ -162,7 +161,7 @@ pub struct ScannedOperatorBody {
 }
 
 /// One USSD exchange as the panel reports it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UssdResult {
     pub code: String,
     pub stage: String,
