@@ -11,7 +11,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
-    DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode, StatusBody,
+    AtBody, ClaimCandidateBody, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
+    RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, StatusBody, SwitchBody, UssdBody,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -27,7 +28,6 @@ pub use edge_panel_api::{
     RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
 };
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
-use serde::Deserialize;
 
 mod logs;
 pub use logs::{log_error, log_line, LogLine, LogRing};
@@ -724,71 +724,6 @@ async fn restart_modem(
         Ok(()) => Json(serde_json::json!({ "status": "restarted" })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
-}
-
-#[derive(Deserialize)]
-struct SendBody {
-    to: String,
-    body: String,
-    imei: Option<String>,
-    /// Send on a pairing the ledger has not measured, in order to find out
-    /// what it does. This is the commissioning path: "untested is
-    /// unsupported" would otherwise make the first test of anything
-    /// impossible. Absent is false, so nothing reaches it by accident, and
-    /// the result of the exercise belongs in the ledger rather than in
-    /// somebody's memory of having tried it once.
-    #[serde(default)]
-    commission: bool,
-}
-
-#[derive(Deserialize)]
-struct RadioBody {
-    online: bool,
-    imei: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UssdBody {
-    code: String,
-    imei: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SwitchBody {
-    iccid: String,
-    enable: bool,
-    imei: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ResetBody {
-    imei: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AtBody {
-    command: String,
-    imei: Option<String>,
-    /// Send a command the agent classifies as disruptive anyway. Absent is
-    /// false, so a page that predates the classifier can only ask for the
-    /// safe set rather than silently bypassing it.
-    #[serde(default)]
-    force: bool,
-}
-
-#[derive(Deserialize)]
-struct RestartBody {
-    imei: String,
-}
-
-#[derive(Deserialize)]
-struct ClaimCandidateBody {
-    candidate_key: String,
-}
-
-#[derive(Deserialize)]
-struct RegistrationBody {
-    imei: String,
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {

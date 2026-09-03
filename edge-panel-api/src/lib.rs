@@ -263,3 +263,78 @@ pub struct AtResult {
     pub ok: bool,
     pub elapsed_ms: u64,
 }
+
+/* ── 请求体 ─────────────────────────────────────────────────────────
+ *
+ * 服务端反序列化它们，浏览器**序列化**它们 —— 所以补的是 `Serialize`，
+ * 和上面响应类型补 `Deserialize` 正好相反。两个方向都补齐之后，请求和响应
+ * 各自只有一份定义，改一个字段两端一起编译不过。
+ *
+ * ⚠️ 字段改成 `pub` 是为了让浏览器那半边能构造它们；服务端只是反序列化，
+ * 从来不需要 `pub`，所以这不是原来漏了什么。
+ */
+
+#[derive(Serialize, Deserialize)]
+pub struct SendBody {
+    pub to: String,
+    pub body: String,
+    pub imei: Option<String>,
+    /// Send on a pairing the ledger has not measured, in order to find out
+    /// what it does. This is the commissioning path: "untested is
+    /// unsupported" would otherwise make the first test of anything
+    /// impossible. Absent is false, so nothing reaches it by accident, and
+    /// the result of the exercise belongs in the ledger rather than in
+    /// somebody's memory of having tried it once.
+    #[serde(default)]
+    pub commission: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RadioBody {
+    pub online: bool,
+    pub imei: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct UssdBody {
+    pub code: String,
+    pub imei: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SwitchBody {
+    pub iccid: String,
+    pub enable: bool,
+    pub imei: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ResetBody {
+    pub imei: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AtBody {
+    pub command: String,
+    pub imei: Option<String>,
+    /// Send a command the agent classifies as disruptive anyway. Absent is
+    /// false, so a page that predates the classifier can only ask for the
+    /// safe set rather than silently bypassing it.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RestartBody {
+    pub imei: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ClaimCandidateBody {
+    pub candidate_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RegistrationBody {
+    pub imei: String,
+}
