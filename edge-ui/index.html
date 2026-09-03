@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  trunk 的入口。产物（index.html + glue .js + .wasm）由 edge-panel 在构建时
+  用 include_str! / include_bytes! 嵌进二进制，所以这里不引用任何外部资源 ——
+  面板的既有性质是「零外部资源」，重建不该把它弄丢。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoDoge 边缘面板</title>
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+  </head>
+  <body></body>
+</html>

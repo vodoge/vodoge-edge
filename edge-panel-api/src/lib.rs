@@ -29,7 +29,10 @@
 //! *from* the store's rows *into* these types stay on the server side, where
 //! the store already is.
 
-use edge_core::CapabilityOrigin;
+
+/// Re-exported so the browser half can match on it without depending on
+/// `edge-core` directly — the wire vocabulary arrives with the wire types.
+pub use edge_core::CapabilityOrigin;
 use serde::{Deserialize, Serialize};
 
 /// Whether the agent currently has an uplink to the cloud.

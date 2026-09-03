@@ -21,6 +21,22 @@ pub use logs::{log_error, log_line, LogLine, LogRing};
 
 const INDEX: &str = include_str!("index.html");
 
+/// The Leptos panel's bundle, served at `/next` while the old panel keeps `/`.
+///
+/// 🔴 **Embedded, not read from disk.** The agent ships as one binary onto a
+/// machine that may have no filesystem layout we control, and the existing
+/// panel has always been a single `include_str!`. A rewrite that quietly added
+/// "and these three files next to it" would be a regression in the one property
+/// that makes this panel usable when everything else is broken.
+///
+/// The file names carry trunk's content hash, so this block changes whenever
+/// the bundle does — which is the intended coupling: a stale `.js` referencing
+/// a `.wasm` that is no longer there fails loudly at build time here rather
+/// than as a blank page in a browser during an outage.
+const NEXT_INDEX: &str = include_str!("../../edge-ui/dist/index.html");
+const NEXT_JS: &str = include_str!("../../edge-ui/dist/edge-ui-77993700ff287f14.js");
+const NEXT_WASM: &[u8] = include_bytes!("../../edge-ui/dist/edge-ui-77993700ff287f14_bg.wasm");
+
 /// How long a modem row stays trustworthy after its last successful poll.
 ///
 /// A modem that stops answering keeps its row in the store. Without an age check
@@ -399,6 +415,13 @@ fn build_router(
 ) -> Router {
     Router::new()
         .route("/", get(index))
+        // Stage 1 of the migration: both panels served at once. The old one
+        // stays at `/` until the new one covers every function, because this
+        // panel is the last visible window during a failure and a half-migrated
+        // rewrite in its place is worse than the thing it replaces.
+        .route("/next", get(next_index))
+        .route("/next/edge-ui-77993700ff287f14.js", get(next_js))
+        .route("/next/edge-ui-77993700ff287f14_bg.wasm", get(next_wasm))
         .route("/api/status", get(status))
         .route("/api/logs", get(read_logs))
         .route("/api/messages", get(messages))
@@ -443,6 +466,18 @@ pub async fn serve(
 
 async fn index() -> Html<&'static str> {
     Html(INDEX)
+}
+
+async fn next_index() -> Html<&'static str> {
+    Html(NEXT_INDEX)
+}
+
+async fn next_js() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript")], NEXT_JS).into_response()
+}
+
+async fn next_wasm() -> Response {
+    ([(header::CONTENT_TYPE, "application/wasm")], NEXT_WASM).into_response()
 }
 
 async fn status(State(state): State<Arc<PanelState>>) -> Response {
