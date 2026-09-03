@@ -30,12 +30,23 @@
 //! away, holding a fact measured on a bench that no longer has that stick in
 //! the same slot.
 //!
-//! 🔴 **And it is enforced only in the browser.** `POST /api/send` does not
-//! consult this table; a `curl` reaches the modem regardless. That is not
-//! changed here — the migration is not the place to alter what the daemon
-//! accepts — but it is worth writing down, because "the panel will not send
-//! from this stick" and "this stick cannot be sent from" are different
-//! statements and only the first one is true today.
+//! ## 在哪里生效
+//!
+//! 三个地方，各有各的理由：
+//!
+//! 1. **`POST /api/send` 的 handler**（`edge-panel`）。这是真正的那道门 —— 一个
+//!    `curl` 就是从这里进来的。不指名 `imei` 也拒，因为代理在没有 IMEI 时会取
+//!    modem map 里的第一条，那样按 IMEI 的检查绕一下就没了。
+//! 2. **发短信那一页**（`edge-ui`）。在按钮上就说清楚，而不是让人按下去之后
+//!    才吃一个 403。
+//! 3. **体检页的第四条判词**。那是发短信之前有人会看的地方。
+//!
+//! `commission=true` 是唯一的越过路径，语义是现成的：「在账本没量过的组合上
+//! 发一次，为了知道会怎样」。这张表本身就是这样量出来的，所以复测必须做得到 ——
+//! 只是要明确说出口，而不是默认发生。
+//!
+//! ⚠️ 云端下发的命令走的是另一条路（`edge-bin` 的 relay），**不经过这道门**。
+//! 那是一个单独的决定，不在这里。
 
 /// Why one module is not to be sent from, in the words an operator needs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

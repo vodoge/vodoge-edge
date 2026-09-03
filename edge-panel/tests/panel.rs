@@ -3015,7 +3015,14 @@ async fn panel_sends_sms_locally() {
                 .method("POST")
                 .uri("/api/send")
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"to":"10086","body":"hi"}"#))
+                // ⚠️ 指名了模组。这条测试原先不带 `imei`，而现在不指名模组是要
+                // 被拒的 —— 代理在没有 IMEI 时会取 modem map 里的第一条，本机有
+                // 模组在封禁表里（见 `an_unnamed_send_cannot_be_used_to_reach_a_
+                // blocked_modem`）。这条测试要问的是「面板会不会把发送转给本地
+                // actions」，指名一根没被封的模组之后，问的还是同一件事。
+                .body(axum::body::Body::from(
+                    r#"{"to":"10086","body":"hi","imei":"860000000000001"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -3048,6 +3055,84 @@ async fn panel_requests_an_immediate_modem_rescan() {
     assert_eq!(body["found"], 2);
     assert_eq!(body["control_ports"][1], "/dev/ttyUSB8");
     assert_eq!(*actions.rescans.lock().expect("rescans"), 1);
+}
+
+/// 发一条短信，返回 (状态码, 响应体)。
+async fn post_send(payload: &str) -> (u16, serde_json::Value) {
+    let actions = Arc::new(RecordingActions::new());
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/send")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// 🔴 封禁表必须在**服务端**生效，不能只在浏览器里。
+///
+/// 表里记的是实测出来的硬件事实：那一根每一次 MO 短信提交都会掉出 USB 总线
+/// 几十秒。一个只活在 JS/wasm 里的拦截，对一个 `curl` 毫无作用。
+#[tokio::test]
+async fn a_blocked_modem_cannot_be_made_to_send_by_curl() {
+    let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
+    let (status, body) = post_send(&format!(
+        r#"{{"to":"12345","body":"hi","imei":"{imei}"}}"#
+    ))
+    .await;
+    assert_eq!(status, 403, "被封禁的模组必须被拒");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains(imei), "要指名是哪一根：{error}");
+    assert!(
+        error.contains("bus") || error.contains("QMI"),
+        "要说清为什么，而不是只说不许：{error}"
+    );
+}
+
+/// 不指名模组同样要拒 —— 否则上面那条检查绕一下就没了。
+///
+/// 代理在没有 IMEI 时会取 modem map 里的第一条，本机只要有一根被封，
+/// `curl -d '{"to":"x","body":"y"}'` 就可能打中它。
+#[tokio::test]
+async fn an_unnamed_send_cannot_be_used_to_reach_a_blocked_modem() {
+    let (status, body) = post_send(r#"{"to":"12345","body":"hi"}"#).await;
+    assert_eq!(status, 403);
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("imei is required"),
+        "要说清缺的是什么：{error}"
+    );
+}
+
+/// `commission` 是唯一的越过路径，而且必须真的越得过 —— 封禁表本身就是这样
+/// 量出来的，复测做不到的话这张表就再也无法被修正。
+#[tokio::test]
+async fn commissioning_is_the_one_way_past_the_block() {
+    let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
+    let (status, _) = post_send(&format!(
+        r#"{{"to":"12345","body":"hi","imei":"{imei}","commission":true}}"#
+    ))
+    .await;
+    assert_eq!(status, 200, "明确写了 commission 就该放行");
+
+    let (status, _) = post_send(r#"{"to":"12345","body":"hi","commission":true}"#).await;
+    assert_eq!(status, 200, "commission 也越过「必须指名」这一条");
+}
+
+/// 没被封的模组照常能发 —— 别把拦截写成了拦所有人。
+#[tokio::test]
+async fn an_ordinary_modem_still_sends() {
+    let (status, _) = post_send(r#"{"to":"12345","body":"hi","imei":"860000000000001"}"#).await;
+    assert_eq!(status, 200);
 }
 
 #[tokio::test]

@@ -552,6 +552,45 @@ async fn messages(State(state): State<Arc<PanelState>>) -> Response {
     }
 }
 
+/// 面板对 MO 短信的硬拦截，`None` 表示放行。
+///
+/// 🔴 在此之前这张表**只在浏览器里生效**：`edge_core::sms_block` 只被面板的
+/// JS 和 wasm 查过,一个 `curl` 照样能让那一根发出去,然后掉出 USB 总线几十秒。
+/// 表里记的是实测出来的硬件事实,不是界面上的一个提示。
+///
+/// ## 为什么不带 `imei` 也要拦
+///
+/// 不指名模组时,代理会取它 modem map 里的**第一条**。本机只要有一根在封禁表
+/// 里,一个 `curl -d '{"to":"x","body":"y"}'` 就有可能打中它 —— 那样的话上面
+/// 那条按 IMEI 的检查等于没写。所以这里要求指名。
+///
+/// ## `commission` 是唯一的越过路径
+///
+/// 语义是现成的:「在账本没量过的组合上发一次,为了知道会怎样」。封禁表本身
+/// 就是这样量出来的,所以复测这件事必须做得到 —— 只是要明确说出口,而不是
+/// 默认发生。
+fn blocked_send(imei: Option<&str>, commission: bool) -> Option<String> {
+    if commission {
+        return None;
+    }
+    match imei {
+        Some(imei) => edge_core::sms_block(imei).map(|block| {
+            format!("{imei} is blocked from sending SMS by the panel: {}", block.why)
+        }),
+        None => {
+            let mut blocked = edge_core::blocked_imeis().peekable();
+            blocked.peek()?;
+            let list: Vec<&str> = blocked.collect();
+            Some(format!(
+                "imei is required to send: without it the agent takes the first modem in its \
+                 map, and this machine has modems blocked from sending SMS ({}). \
+                 Name the modem, or pass commission=true to send anyway.",
+                list.join(", ")
+            ))
+        }
+    }
+}
+
 async fn send_sms(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<SendBody>,
@@ -561,6 +600,9 @@ async fn send_sms(
     };
     if body.to.trim().is_empty() || body.body.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "to and body are required");
+    }
+    if let Some(refusal) = blocked_send(body.imei.as_deref(), body.commission) {
+        return json_error(StatusCode::FORBIDDEN, refusal);
     }
     match actions.send_sms(body.to, body.body, body.imei, body.commission) {
         Ok(()) => Json(SendReceipt::sent()).into_response(),
