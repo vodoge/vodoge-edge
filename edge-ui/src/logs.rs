@@ -580,6 +580,25 @@ mod tests {
         assert_eq!(dropped.get_untracked(), 0);
     }
 
+    /// 服务端那个环的容量。⚠️ 和 `edge-panel/src/logs.rs` 的 `CAPACITY` 是
+    /// 同一个数，写在两处——两个 crate 之间没有牵一条编译期的线（`edge-ui`
+    /// 编译到 wasm，不依赖服务端那个 crate）。这里的存在意义只是把「客户端
+    /// 必须比服务端环留得更久」这条要求钉在一处，改 `CAPACITY` 的时候要记得
+    /// 回来改这个数。
+    const SERVER_RING_CAPACITY: usize = 500;
+
+    /// 🔴 客户端保留必须比服务端那个环留得更久，否则一旦标签页开着的时间
+    /// 超过服务端环能覆盖的窗口，服务端那份 500 行的记录就是**唯一**还在的
+    /// 记录——而它比这个面板自己的缓冲区短。
+    #[test]
+    fn the_client_keeps_more_than_the_servers_own_ring() {
+        assert!(
+            KEEP > SERVER_RING_CAPACITY,
+            "客户端保留 {KEEP} 行，服务端环 {SERVER_RING_CAPACITY} 行——\
+             客户端应该留得比服务端更久，不能更短"
+        );
+    }
+
     /// 🔴 保留和绘制是两个数，而且保留的那个要更大。
     ///
     /// 分开的好处是实的：筛选跑遍全部保留行，所以它够得到比这一栏能滚动的范围

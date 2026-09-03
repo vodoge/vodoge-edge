@@ -33,29 +33,27 @@ use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreErro
 mod logs;
 pub use logs::{log_error, log_line, LogLine, LogRing};
 
-const INDEX: &str = include_str!("index.html");
-
-/// The Leptos panel's bundle, served at `/next` while the old panel keeps `/`.
+/// 面板的 Leptos + wasm 产物。阶段 3：这条路走完了，`/` 现在就是这个页面——
+/// 旧的 Alpine/Pico 那份 `index.html`（连同它 829 行手写 CSS 和 8 行内联的
+/// Pico 供应商块）已经删掉，不再是这个二进制的一部分。
 ///
-/// 🔴 **Embedded, not read from disk.** The agent ships as one binary onto a
-/// machine that may have no filesystem layout we control, and the existing
-/// panel has always been a single `include_str!`. A rewrite that quietly added
-/// "and these three files next to it" would be a regression in the one property
-/// that makes this panel usable when everything else is broken.
+/// 🔴 **嵌入进二进制，不是从磁盘读。** agent 作为单一二进制发到一台我们管不了
+/// 文件系统布局的机器上，这条路数没有变过。
 ///
-/// 🔴 Built with `--filehash false`, so the names are stable and this block
-/// never needs editing. The first version kept trunk's content hash, which
-/// meant **every rebuild of `edge-ui` renamed the files and left the router
-/// pointing at names that no longer existed** — a trap that would have sprung
-/// on the very first feature area of the migration.
+/// 🔴 用 `--filehash false` 编的，名字是固定的，这个常量块不用跟着每次构建改。
+/// 早期版本保留过 trunk 的内容哈希，后果是**每次重建 edge-ui 都会改文件名，
+/// 而路由表还指着一个已经不存在的名字**——这是阶段 0 就会踩到的坑。
 ///
-/// Dropping the hash drops cache-busting, so the two handlers answer
-/// `no-cache` instead. That is the right trade here: half a megabyte over a
-/// LAN, for a diagnostic tool whose whole job is to be current at the moment
-/// something is wrong.
-const NEXT_INDEX: &str = include_str!("../../edge-ui/dist/index.html");
-const NEXT_JS: &str = include_str!("../../edge-ui/dist/edge-ui.js");
-const NEXT_WASM: &[u8] = include_bytes!("../../edge-ui/dist/edge-ui_bg.wasm");
+/// 资源仍然挂在 `/next/` 前缀下（`edge-ui/Trunk.toml` 的 `public_url` 就是
+/// 这么配的），只是现在服务它们的页面在 `/` 而不是 `/next`。没有必要为了
+/// 一个纯粹的路径改名去动构建配置，冒着重新引入「构建方式退回默认就黑屏」
+/// 那类问题的风险。
+///
+/// 丢掉哈希也丢掉了缓存失效机制，所以两个 handler 都回 `no-cache`。这是
+/// 值得的取舍：几百 KB 走局域网，换一个诊断工具永远给出当下的最新版本。
+const PANEL_INDEX: &str = include_str!("../../edge-ui/dist/index.html");
+const PANEL_JS: &str = include_str!("../../edge-ui/dist/edge-ui.js");
+const PANEL_WASM: &[u8] = include_bytes!("../../edge-ui/dist/edge-ui_bg.wasm");
 
 /// How long a modem row stays trustworthy after its last successful poll.
 ///
@@ -327,7 +325,6 @@ fn build_router(
         // stays at `/` until the new one covers every function, because this
         // panel is the last visible window during a failure and a half-migrated
         // rewrite in its place is worse than the thing it replaces.
-        .route("/next", get(next_index))
         .route("/next/edge-ui.js", get(next_js))
         .route("/next/edge-ui_bg.wasm", get(next_wasm))
         .route("/api/status", get(status))
@@ -373,11 +370,7 @@ pub async fn serve(
 }
 
 async fn index() -> Html<&'static str> {
-    Html(INDEX)
-}
-
-async fn next_index() -> Html<&'static str> {
-    Html(NEXT_INDEX)
+    Html(PANEL_INDEX)
 }
 
 async fn next_js() -> Response {
@@ -386,7 +379,7 @@ async fn next_js() -> Response {
             (header::CONTENT_TYPE, "text/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        NEXT_JS,
+        PANEL_JS,
     )
         .into_response()
 }
@@ -397,7 +390,7 @@ async fn next_wasm() -> Response {
             (header::CONTENT_TYPE, "application/wasm"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        NEXT_WASM,
+        PANEL_WASM,
     )
         .into_response()
 }

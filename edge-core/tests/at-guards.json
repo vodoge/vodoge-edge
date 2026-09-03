@@ -216,6 +216,11 @@
   ]
  },
  {
+  "command": "AT+COPS = ?",
+  "label": null,
+  "captured": []
+ },
+ {
   "command": "AT+COPS=0",
   "label": null,
   "captured": []
@@ -248,6 +253,11 @@
  },
  {
   "command": "AT+COPS=3,0",
+  "label": null,
+  "captured": []
+ },
+ {
+  "command": "AT+COPS=?",
   "label": null,
   "captured": []
  },
@@ -473,6 +483,11 @@
   "captured": [
    "1"
   ]
+ },
+ {
+  "command": "at+cops=?",
+  "label": null,
+  "captured": []
  },
  {
   "command": "at+crsm=214,1",

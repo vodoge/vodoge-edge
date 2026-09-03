@@ -125,3 +125,15 @@ fn the_way_back_is_not_guarded_but_the_reset_is() {
     assert_eq!(guarded("AT+CFUN=1,1"), Some(Guarded::CfunReset(1)));
     assert_eq!(guarded("AT+COPS=0"), None, "自动选网是回程，不拦");
 }
+
+/// 🔴 全频段扫网发的是 `AT+COPS=?`（查询形式），手动锁网发的是
+/// `AT+COPS=1,…`（写形式）。表里守的必须是后者，不能连带前者一起拦——
+/// 扫网按钮自己已经有一个确认框了，AT 控制台不该再对同一条命令追加一个。
+#[test]
+fn the_sweep_form_of_cops_is_never_guarded_only_the_manual_selection_is() {
+    for sweep in ["AT+COPS=?", "at+cops=?", "AT+COPS = ?"] {
+        assert_eq!(guarded(sweep), None, "扫网的查询形式不该被拦：{sweep}");
+    }
+    assert_eq!(guarded("AT+COPS=1,2,\"46000\""), Some(Guarded::Cops(1)));
+    assert_eq!(guarded("AT+COPS=2"), Some(Guarded::Cops(2)));
+}

@@ -97,7 +97,6 @@ pub async fn get<T: DeserializeOwned>(path: &str, what: &str) -> Load<T> {
 /// whose body is empty — `/api/rescan` needs `{}` because the server asks for
 /// JSON. Callers pass the request type from `edge-panel-api`, so a field
 /// renamed on the server stops this crate compiling.
-#[allow(dead_code)] // 状态页只读；第一个写操作（认领候选）会用到它。
 pub async fn post<B: Serialize, T: DeserializeOwned>(path: &str, body: &B, what: &str) -> Load<T> {
     let request = match gloo_net::http::Request::post(path).json(body) {
         Ok(request) => request,

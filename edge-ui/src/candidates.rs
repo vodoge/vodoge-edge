@@ -46,6 +46,19 @@ fn state_label(key: &str) -> &'static str {
     }
 }
 
+/// 接口类型。⚠️ 只认 agent 真的会写的三种（`edge-bin` 的 `DiscoveryTransport::
+/// wire`）：`qmi` / `at` / `serial`。旧面板这里犯过错——给「serial」漏掉了
+/// 标签，又给一堆 agent 从没写过的拼法发明了标签。这里反过来：三种精确认领，
+/// 见到没见过的原样显示，绝不瞎编一个像是发明出来的标签。
+fn transport_label(transport: &str) -> &str {
+    match transport {
+        "qmi" => "QMI",
+        "at" => "AT",
+        "serial" => "串口",
+        other => other,
+    }
+}
+
 fn state_tone(key: &str) -> BadgeColor {
     match key {
         "manageable" => BadgeColor::Success,
@@ -305,6 +318,7 @@ fn List(body: StatusBody, claims: ClaimState, state: StatusState) -> impl IntoVi
             <TableHeader>
                 <TableRow>
                     <TableHeaderCell>"候选"</TableHeaderCell>
+                    <TableHeaderCell>"接口"</TableHeaderCell>
                     <TableHeaderCell>"状态"</TableHeaderCell>
                     <TableHeaderCell>"硬件"</TableHeaderCell>
                     <TableHeaderCell>"详情"</TableHeaderCell>
@@ -365,6 +379,9 @@ fn Row(
         <TableRow>
             <TableCell>
                 <Caption1>{port}</Caption1>
+            </TableCell>
+            <TableCell>
+                <Caption1>{transport_label(&c.transport).to_string()}</Caption1>
             </TableCell>
             <TableCell>
                 {move || {
@@ -534,6 +551,19 @@ mod tests {
         let note = requested_note(&receipt);
         assert!(!note.contains("· ·"), "{note}");
         assert!(!note.trim_end().ends_with('、'), "{note}");
+    }
+
+    /// 三种接口类型精确认领，见到没见过的原样显示——不瞎编。
+    #[test]
+    fn transport_labels_are_exact_and_never_invented() {
+        assert_eq!(transport_label("qmi"), "QMI");
+        assert_eq!(transport_label("at"), "AT");
+        assert_eq!(transport_label("serial"), "串口");
+        assert_eq!(
+            transport_label("mbim"),
+            "mbim",
+            "mbim 是 USBNET 模式，不是接口类型，这里没见过就原样显示，不套用别处的标签"
+        );
     }
 
     /// 状态键归一化：服务端这个字段是自由文本。
