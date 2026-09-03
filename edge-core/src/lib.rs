@@ -9,6 +9,7 @@ mod alert;
 mod apn;
 mod at_policy;
 mod log_line;
+mod sms_draft;
 mod sms_block;
 mod strategy;
 mod strategies;
@@ -45,6 +46,9 @@ pub use settle::{
 pub use at_policy::{classify as classify_at_command, AtRisk, DisruptiveKind};
 pub use log_line::{classify, Classified, Level, Topic, TOPIC_ORDER};
 pub use sms_block::{blocked_imeis, sms_block, SmsBlock};
+pub use sms_draft::{
+    draft, gsm7_value, is_gsm7, Draft, Encoding, GSM7_MAX_SEPTETS, UCS2_MAX_CHARS,
+};
 pub use strategy::{
     CarrierStrategy, ModemStrategy, OperatingContext, Operation, RefusedBy, Resolution, StrategyError,
     StrategyRegistry, SubscriptionCapability, Support, SupportLedger, UsbIdentity};

@@ -12,7 +12,8 @@ use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
     AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
-    LogsBody, RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, StatusBody, SwitchBody,
+    LogsBody, RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, SendReceipt,
+    StatusBody, SwitchBody,
     UssdBody,
 };
 
@@ -562,7 +563,7 @@ async fn send_sms(
         return json_error(StatusCode::BAD_REQUEST, "to and body are required");
     }
     match actions.send_sms(body.to, body.body, body.imei, body.commission) {
-        Ok(()) => Json(serde_json::json!({ "status": "sent" })).into_response(),
+        Ok(()) => Json(SendReceipt::sent()).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

@@ -31,6 +31,7 @@ mod api;
 mod candidates;
 mod health;
 mod logs;
+mod sms;
 mod status;
 
 use leptos::prelude::*;
@@ -39,6 +40,7 @@ use thaw::*;
 use candidates::{CandidatesPage, ClaimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
+use sms::{SmsPage, SmsState, INBOX_EVERY_MS};
 use status::{StatusPage, StatusState, STATUS_EVERY_MS};
 
 #[component]
@@ -69,6 +71,20 @@ pub fn Panel() -> impl IntoView {
     // **故意不一样**，也不合并 —— 日志要跟得上手上的操作，10 秒太钝；而状态
     // 每 2 秒问一次是在给一台边缘小机器找麻烦。
     let claims = ClaimState::new();
+    // 本地短信：10 秒一轮，跟状态页同频。
+    let sms = SmsState::new();
+    {
+        let sms = sms;
+        leptos::task::spawn_local(async move { sms::poll(sms).await });
+        set_interval(
+            move || {
+                let sms = sms;
+                leptos::task::spawn_local(async move { sms::poll(sms).await });
+            },
+            std::time::Duration::from_millis(INBOX_EVERY_MS),
+        );
+    }
+
     let logs = LogState::new();
     {
         let logs = logs;
@@ -110,6 +126,7 @@ pub fn Panel() -> impl IntoView {
         <ConfigProvider>
             <StatusPage state=state />
             <HealthPage active=state.active state=health />
+            <SmsPage state=sms status=state />
             <CandidatesPage state=state claims=claims />
             <LogsPage state=logs />
         </ConfigProvider>

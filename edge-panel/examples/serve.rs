@@ -35,6 +35,26 @@ async fn main() {
             direction: "inbound".into(),
             received_at: 1_700_000_000_000,
             modem_imei: Some("867018069509705".into()),
+        },
+        LocalMessage {
+            seq: 2,
+            peer: "8613800100500".into(),
+            body: "test from the bench".into(),
+            bearer: "cellular".into(),
+            direction: "outbound".into(),
+            received_at: 1_700_000_100_000,
+            modem_imei: Some("860000000000001".into()),
+        },
+        // ⚠️ 故意留一条**没记模组**的。这一条在「只看某一根」时也必须还在 ——
+        // 因为一个字段缺失就丢行，是收件箱悄悄丢信的方式。
+        LocalMessage {
+            seq: 3,
+            peer: "12520".into(),
+            body: "no modem recorded for this one".into(),
+            bearer: "cellular".into(),
+            direction: "inbound".into(),
+            received_at: 1_700_000_200_000,
+            modem_imei: None,
         }],
         modems: vec![
             LocalModem {

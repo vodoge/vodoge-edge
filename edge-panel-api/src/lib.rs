@@ -387,3 +387,24 @@ pub struct LogsBody {
     /// 服务端当前的游标。下一次带着它来问，就既不会重发也不会漏。
     pub cursor: u64,
 }
+
+/// `POST /api/send` 的应答。
+///
+/// ⚠️ 和 `ClaimReceipt` 同一个理由：在此之前是 handler 用 `serde_json::json!`
+/// 现拼的，`status` 这个字段在任何类型里都不存在。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SendReceipt {
+    /// 恒为 `"sent"`。
+    ///
+    /// 🔴 「sent」的意思是**代理接受了这次提交**，不是网络投递成功。投递回执
+    /// 是后来的事，走 SMS-STATUS-REPORT，不在这个应答里。
+    pub status: String,
+}
+
+impl SendReceipt {
+    pub fn sent() -> Self {
+        Self {
+            status: "sent".into(),
+        }
+    }
+}

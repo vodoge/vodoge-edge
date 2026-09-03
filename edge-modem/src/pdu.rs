@@ -3,8 +3,13 @@
 //! Wire shape is `00` (use the network SMSC) plus a 3GPP 23.040 SUBMIT TPDU.
 //! GSM-7 is used for a small ASCII subset; everything else is UCS2.
 
-const GSM7_MAX_SEPTETS: usize = 160;
-const UCS2_MAX_CHARS: usize = 70;
+/// 🔴 编码规则住在 `edge-core`，不在这里。
+///
+/// 面板要在按下发送**之前**告诉操作员这条会走哪种编码、会不会被拒，而这个
+/// 编码器不分片 —— 超了就是发不出去。规则有两份的时候，屏幕上说 70 而 daemon
+/// 接受 160 是随时会发生的事（面板那份自己留了一句话承认这一点）。现在两边
+/// 取的是同一个函数：给 `gsm7_value` 加一个字符，两边同时改变。
+use edge_core::{gsm7_value, GSM7_MAX_SEPTETS, UCS2_MAX_CHARS};
 
 /// Encode one SMS-SUBMIT PDU including a zero-length SMSC prefix.
 ///
@@ -154,15 +159,6 @@ fn pack_gsm7(body: &str) -> Option<Vec<u8>> {
         packed.push(acc as u8);
     }
     Some(packed)
-}
-
-fn gsm7_value(ch: char) -> Option<u8> {
-    match ch {
-        'A'..='Z' | 'a'..='z' | '0'..='9' | ' ' | '.' | ',' | '!' | '?' | ':' | '+' | '-' => {
-            Some(ch as u8)
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
