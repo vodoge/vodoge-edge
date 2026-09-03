@@ -20,8 +20,8 @@
 //! one.
 use edge_panel::{
     log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult, MemoryInbox,
-    PanelError, ProfileBody, ProfilesResult, ReportResult, ScanResult, ScannedOperatorBody,
-    UsbResetResult, UssdResult,
+    PanelError, ProfileBody, ProfilesResult, ReportResult, RescanResult, ScanResult,
+    ScannedOperatorBody, UsbResetResult, UssdResult,
 };
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 use std::sync::Arc;
@@ -178,6 +178,12 @@ async fn main() {
             candidate_key: String,
         ) -> Result<CandidateClaimResult, PanelError> {
             Ok(CandidateClaimResult { candidate_key })
+        }
+        fn rescan_modems(&self) -> Result<RescanResult, PanelError> {
+            Ok(RescanResult {
+                found: 2,
+                control_ports: vec!["/dev/cdc-wdm0".into(), "/dev/ttyUSB2".into()],
+            })
         }
         fn send_sms(
             &self,

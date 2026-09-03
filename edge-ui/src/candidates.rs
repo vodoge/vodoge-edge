@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use edge_panel_api::{ClaimReceipt, DiscoveryBody, RegistrationResult, StatusBody};
+use edge_panel_api::{ClaimReceipt, DiscoveryBody, RegistrationResult, RescanReceipt, StatusBody};
 use leptos::prelude::*;
 use thaw::*;
 
@@ -88,6 +88,74 @@ fn confirmed(message: &str) -> bool {
     web_sys::window()
         .and_then(|w| w.confirm_with_message(message).ok())
         .unwrap_or(false)
+}
+
+/// 主动重扫 USB 设备与控制口。
+///
+/// ⚠️ 这个按钮**不读取**任何东西——`POST /api/rescan` 只是把轮询循环的等待
+/// 打断，真正的探测在下一轮轮询里发生。原版的注释把这件事写得很清楚：立刻
+/// 回读会拿到打断前的旧缓存，所以诚实的做法是把这次请求的结果说成「已请求」，
+/// 让正常的状态刷新去带回新的发现记录——不在这次往返里假装已经看到了新结果。
+#[derive(Clone, Copy)]
+pub struct RescanState {
+    pub busy: RwSignal<bool>,
+    /// 上一次重扫完成（或失败）的时刻。
+    pub at: RwSignal<Option<f64>>,
+    pub note: RwSignal<Option<String>>,
+    pub failed: RwSignal<bool>,
+}
+
+impl RescanState {
+    pub fn new() -> Self {
+        Self {
+            busy: RwSignal::new(false),
+            at: RwSignal::new(None),
+            note: RwSignal::new(None),
+            failed: RwSignal::new(false),
+        }
+    }
+}
+
+pub async fn rescan(state: StatusState, rescan: RescanState) {
+    if rescan.busy.get_untracked() {
+        return;
+    }
+    rescan.busy.set(true);
+    rescan.note.set(Some("正在读取 USB 设备与控制口…".into()));
+    let got: Load<RescanReceipt> =
+        api::post("/api/rescan", &serde_json::json!({}), "重扫 USB").await;
+    rescan.busy.set(false);
+    rescan.at.set(Some(crate::status::now_ms()));
+    match got {
+        Load::Ready(receipt) => {
+            rescan.failed.set(false);
+            rescan.note.set(Some(requested_note(&receipt)));
+            // ⚠️ 探测在下一轮轮询里发生，不在这次请求里——给它一秒钟，再刷
+            // 一次状态，好让新的发现记录能被看到。原版用的也是这个数。
+            crate::sleep(1_000).await;
+            crate::status::poll(state).await;
+        }
+        Load::Failed(why) => {
+            rescan.failed.set(true);
+            rescan.note.set(Some(format!("重扫失败 · {why}")));
+        }
+        Load::Loading => {}
+    }
+}
+
+/// 「已请求重扫」这句话，抽成纯函数好测。
+///
+/// ⚠️ 说的是「已请求」不是「已完成」——见模块文档，这次往返里还没有新结果。
+fn requested_note(receipt: &RescanReceipt) -> String {
+    let ports = if receipt.control_ports.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", receipt.control_ports.join("、"))
+    };
+    format!(
+        "已请求重扫 · {} 个控制口{ports} · 等待下一轮探测结果",
+        receipt.found
+    )
 }
 
 /// 每个候选各自的认领笔记。键是 `candidate_key`。
@@ -161,12 +229,45 @@ async fn adopt(state: StatusState, claims: ClaimState, key: String, imei: String
 }
 
 #[component]
-pub fn CandidatesPage(state: StatusState, claims: ClaimState) -> impl IntoView {
+pub fn CandidatesPage(
+    state: StatusState,
+    claims: ClaimState,
+    rescan_state: RescanState,
+) -> impl IntoView {
     view! {
         <Card>
             <CardHeader>
                 <Body1><b>"USB 候选"</b></Body1>
+                <CardHeaderAction slot>
+                    <Button
+                        disabled=rescan_state.busy
+                        on_click=move |_| {
+                            leptos::task::spawn_local(async move {
+                                rescan(state, rescan_state).await
+                            });
+                        }
+                    >
+                        {move || if rescan_state.busy.get() { "重扫中…" } else { "重扫 USB" }}
+                    </Button>
+                </CardHeaderAction>
             </CardHeader>
+            {move || {
+                rescan_state
+                    .note
+                    .get()
+                    .map(|note| {
+                        let intent = if rescan_state.failed.get() {
+                            MessageBarIntent::Error
+                        } else {
+                            MessageBarIntent::Info
+                        };
+                        view! {
+                            <MessageBar intent=intent layout=MessageBarLayout::Multiline>
+                                <MessageBarBody>{note}</MessageBarBody>
+                            </MessageBar>
+                        }
+                    })
+            }}
             {move || match state.load.get() {
                 // 🔴 三态分开。读不到候选**不是**「没有候选」——后者会让操作员
                 // 以为线插错了，然后去拔一根好好的线。
@@ -403,6 +504,36 @@ mod tests {
             !can_adopt(&c, &["867018069509705".to_string()]),
             "已经在管的不该再出现纳管按钮"
         );
+    }
+
+    /// 说的是「已请求」不是「已完成」——这次往返没有新结果，只有一个被
+    /// 打断的等待。
+    #[test]
+    fn the_rescan_note_says_requested_not_done() {
+        let receipt = edge_panel_api::RescanReceipt {
+            status: "requested".into(),
+            found: 2,
+            control_ports: vec!["/dev/cdc-wdm0".into(), "/dev/ttyUSB2".into()],
+        };
+        let note = requested_note(&receipt);
+        assert!(note.contains("已请求"), "{note}");
+        assert!(!note.contains("已完成") && !note.contains("完成"), "{note}");
+        assert!(note.contains("2 个控制口"), "{note}");
+        assert!(note.contains("/dev/cdc-wdm0"), "端口要列出来：{note}");
+        assert!(note.contains("等待下一轮"), "要说清结果还没到：{note}");
+    }
+
+    /// 没有控制口时不留一个空的顿号。
+    #[test]
+    fn the_rescan_note_has_no_dangling_separator_with_no_ports() {
+        let receipt = edge_panel_api::RescanReceipt {
+            status: "requested".into(),
+            found: 0,
+            control_ports: Vec::new(),
+        };
+        let note = requested_note(&receipt);
+        assert!(!note.contains("· ·"), "{note}");
+        assert!(!note.trim_end().ends_with('、'), "{note}");
     }
 
     /// 状态键归一化：服务端这个字段是自由文本。

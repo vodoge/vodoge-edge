@@ -11,10 +11,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
-    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
-    LogsBody, RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, SendReceipt,
-    StatusBody, SwitchBody,
-    UssdBody,
+    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, LogsBody, MessageBody, MessagesBody,
+    ModemBody, PanelMode, RadioBody, RegistrationBody, RescanReceipt, ResetBody, RestartBody,
+    SendBody, SendReceipt, StatusBody, SwitchBody, UssdBody,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -140,7 +139,9 @@ pub trait Actions: Send + Sync {
     /// status appears on the next poll rather than claiming a synchronous
     /// hardware operation completed.
     fn rescan_modems(&self) -> Result<RescanResult, PanelError> {
-        Err(PanelError::Action("local modem rescan is not configured".into()))
+        Err(PanelError::Action(
+            "local modem rescan is not configured".into(),
+        ))
     }
     /// Persist an operator approval for one already discovered serial
     /// endpoint. Implementations must re-check the live endpoint rather than
@@ -308,11 +309,9 @@ pub fn router_with_uplink(
 ) -> Router {
     // The compiled-in matrix. A caller that can receive a pushed replacement
     // goes through `router_with_matrix` instead.
-    let matrix = Arc::new(Mutex::new(
-        CapabilityMatrix::builtin().unwrap_or_else(|error| {
-            panic!("built-in capability matrix does not parse: {error}")
-        }),
-    ));
+    let matrix = Arc::new(Mutex::new(CapabilityMatrix::builtin().unwrap_or_else(
+        |error| panic!("built-in capability matrix does not parse: {error}"),
+    )));
     build_router(inbox, actions, uplink_online, matrix)
 }
 
@@ -418,7 +417,10 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
     // Cloned out under its own lock rather than held across the loop: the
     // agent replaces this whole value when the cloud pushes a new matrix.
     let matrix = state.matrix.lock().expect("capability matrix").clone();
-    match (state.inbox.list_modems(), state.inbox.list_modem_discoveries()) {
+    match (
+        state.inbox.list_modems(),
+        state.inbox.list_modem_discoveries(),
+    ) {
         (Ok(modems), Ok(discoveries)) => Json(StatusBody {
             mode,
             modems: modems
@@ -441,15 +443,13 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
 /// its ordinary wait is cut short.
 async fn rescan_modems(State(state): State<Arc<PanelState>>) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local modem rescan is not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local modem rescan is not configured",
+        );
     };
     match actions.rescan_modems() {
-        Ok(result) => Json(serde_json::json!({
-            "status": "requested",
-            "found": result.found,
-            "control_ports": result.control_ports,
-        }))
-        .into_response(),
+        Ok(result) => Json(RescanReceipt::requested(result)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -575,7 +575,10 @@ fn blocked_send(imei: Option<&str>, commission: bool) -> Option<String> {
     }
     match imei {
         Some(imei) => edge_core::sms_block(imei).map(|block| {
-            format!("{imei} is blocked from sending SMS by the panel: {}", block.why)
+            format!(
+                "{imei} is blocked from sending SMS by the panel: {}",
+                block.why
+            )
         }),
         None => {
             let mut blocked = edge_core::blocked_imeis().peekable();
@@ -591,10 +594,7 @@ fn blocked_send(imei: Option<&str>, commission: bool) -> Option<String> {
     }
 }
 
-async fn send_sms(
-    State(state): State<Arc<PanelState>>,
-    Json(body): Json<SendBody>,
-) -> Response {
+async fn send_sms(State(state): State<Arc<PanelState>>, Json(body): Json<SendBody>) -> Response {
     let Some(actions) = state.actions.as_ref() else {
         return json_error(StatusCode::NOT_IMPLEMENTED, "local send is not configured");
     };
@@ -614,10 +614,7 @@ async fn send_sms(
 /// the reason the panel is bound to the LAN and never exposed to the cloud:
 /// `AT+CFUN=1,1` and friends can wedge a module, so the blast radius has to
 /// stay inside the site.
-async fn at_command(
-    State(state): State<Arc<PanelState>>,
-    Json(body): Json<AtBody>,
-) -> Response {
+async fn at_command(State(state): State<Arc<PanelState>>, Json(body): Json<AtBody>) -> Response {
     let Some(actions) = state.actions.as_ref() else {
         return json_error(StatusCode::NOT_IMPLEMENTED, "local AT is not configured");
     };
@@ -633,12 +630,12 @@ async fn at_command(
 
 /// Taking the radio down disconnects the modem from its network, so the caller
 /// states which way it should go rather than toggling blind.
-async fn set_radio(
-    State(state): State<Arc<PanelState>>,
-    Json(body): Json<RadioBody>,
-) -> Response {
+async fn set_radio(State(state): State<Arc<PanelState>>, Json(body): Json<RadioBody>) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local radio control is not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local radio control is not configured",
+        );
     };
     match actions.set_radio(body.imei, body.online) {
         Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
@@ -698,7 +695,10 @@ async fn list_profiles(
     Json(body): Json<ResetBody>,
 ) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local eSIM access is not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local eSIM access is not configured",
+        );
     };
     match actions.list_profiles(body.imei) {
         Ok(result) => Json(result).into_response(),
@@ -714,7 +714,10 @@ async fn switch_profile(
     Json(body): Json<SwitchBody>,
 ) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local eSIM access is not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local eSIM access is not configured",
+        );
     };
     if body.iccid.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "iccid is required");
@@ -730,7 +733,10 @@ async fn modem_report(
     Json(body): Json<ResetBody>,
 ) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local diagnostics are not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local diagnostics are not configured",
+        );
     };
     match actions.modem_report(body.imei) {
         Ok(result) => Json(result).into_response(),
@@ -740,10 +746,7 @@ async fn modem_report(
 
 /// The character device disappears while the module re-enumerates, so the
 /// caller should expect the modem list to be briefly incomplete afterwards.
-async fn usb_reset(
-    State(state): State<Arc<PanelState>>,
-    Json(body): Json<ResetBody>,
-) -> Response {
+async fn usb_reset(State(state): State<Arc<PanelState>>, Json(body): Json<ResetBody>) -> Response {
     let Some(actions) = state.actions.as_ref() else {
         return json_error(StatusCode::NOT_IMPLEMENTED, "local reset is not configured");
     };
@@ -758,7 +761,10 @@ async fn restart_modem(
     Json(body): Json<RestartBody>,
 ) -> Response {
     let Some(actions) = state.actions.as_ref() else {
-        return json_error(StatusCode::NOT_IMPLEMENTED, "local restart is not configured");
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local restart is not configured",
+        );
     };
     if body.imei.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "imei is required");
@@ -772,10 +778,9 @@ async fn restart_modem(
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     let message = message.into();
     let mut response = (status, Json(serde_json::json!({ "error": message }))).into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
 
@@ -790,59 +795,59 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 /// `edge-store` rows, and `edge-store` carries a bundled SQLite that must
 /// never reach the wasm bundle.
 fn modem_body(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix) -> ModemBody {
-        let stale = value
-            .last_seen
-            .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
-            .unwrap_or(true);
-        // Busy wins over stale: a modem mid-scan has stopped answering the poll
-        // loop on purpose, and reporting that as offline sends the operator
-        // looking for a fault that does not exist.
-        let state = if busy {
-            "Busy".to_string()
-        } else if stale {
-            "Offline".to_string()
-        } else {
-            value.state
-        };
-        let network = match (value.mcc, value.mnc) {
-            (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
-            _ => None,
-        };
-        let home = match (value.home_mcc, value.home_mnc) {
-            (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
-            _ => None,
-        };
-        // Keyed on the home carrier rather than the serving one, matching the
-        // agent's own lookup: what a card can do belongs to the subscription,
-        // and a roaming card keeps its own operator's rules.
-        let carrier = CarrierProfile::from(
-            home.map(|network| network.carrier_profile())
-                .unwrap_or("Generic-International"),
-        );
-        let family = ModemFamily::from(value.family.as_str());
-        // The enum itself now, not a hand-written spelling of it: `serde` owns
-        // the wire names, and the browser deserialises into the same type.
-        let capability_origin = matrix.query(&family, &carrier).origin;
-        ModemBody {
-            imei: value.imei,
-            family: value.family,
-            iccid: value.iccid,
-            state,
-            last_seen: value.last_seen,
-            home: home.map(|n| n.describe()),
-            home_numeric: home.map(|n| n.numeric()),
-            imsi: value.imsi,
-            network: network.map(|n| n.label()),
-            network_numeric: network.map(|n| n.numeric()),
-            discovery: value.discovery,
-            manageable: value.manageable,
-            control_port: value.control_port,
-            firmware: value.firmware,
-            msisdn: value.msisdn,
-            carrier_profile: carrier.as_str().to_string(),
-            capability_origin,
-        }
+    let stale = value
+        .last_seen
+        .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
+        .unwrap_or(true);
+    // Busy wins over stale: a modem mid-scan has stopped answering the poll
+    // loop on purpose, and reporting that as offline sends the operator
+    // looking for a fault that does not exist.
+    let state = if busy {
+        "Busy".to_string()
+    } else if stale {
+        "Offline".to_string()
+    } else {
+        value.state
+    };
+    let network = match (value.mcc, value.mnc) {
+        (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
+        _ => None,
+    };
+    let home = match (value.home_mcc, value.home_mnc) {
+        (Some(mcc), Some(mnc)) => Some(Network::new(mcc, mnc)),
+        _ => None,
+    };
+    // Keyed on the home carrier rather than the serving one, matching the
+    // agent's own lookup: what a card can do belongs to the subscription,
+    // and a roaming card keeps its own operator's rules.
+    let carrier = CarrierProfile::from(
+        home.map(|network| network.carrier_profile())
+            .unwrap_or("Generic-International"),
+    );
+    let family = ModemFamily::from(value.family.as_str());
+    // The enum itself now, not a hand-written spelling of it: `serde` owns
+    // the wire names, and the browser deserialises into the same type.
+    let capability_origin = matrix.query(&family, &carrier).origin;
+    ModemBody {
+        imei: value.imei,
+        family: value.family,
+        iccid: value.iccid,
+        state,
+        last_seen: value.last_seen,
+        home: home.map(|n| n.describe()),
+        home_numeric: home.map(|n| n.numeric()),
+        imsi: value.imsi,
+        network: network.map(|n| n.label()),
+        network_numeric: network.map(|n| n.numeric()),
+        discovery: value.discovery,
+        manageable: value.manageable,
+        control_port: value.control_port,
+        firmware: value.firmware,
+        msisdn: value.msisdn,
+        carrier_profile: carrier.as_str().to_string(),
+        capability_origin,
     }
+}
 
 /// See the note on `modem_body`: a free function because the type is foreign.
 fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {

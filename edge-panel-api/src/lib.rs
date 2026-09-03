@@ -220,6 +220,31 @@ impl ClaimReceipt {
     }
 }
 
+/// `POST /api/rescan` 的应答。
+///
+/// ⚠️ 这个端点**只是把轮询循环的等待打断**，不在这次 HTTP 请求里真的探测——
+/// `found` / `control_ports` 是打断前那一轮缓存的旧值，不是这次重扫的结果。
+/// `status` 恒为 `"requested"`，提醒的正是这件事：请求已经收到，结果还没有。
+///
+/// 🔴 在此之前是 handler 用 `serde_json::json!` 现拼的，`status` 这个字段在
+/// `RescanResult`（`Actions` 实现返回的类型）里根本不存在。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RescanReceipt {
+    pub status: String,
+    pub found: usize,
+    pub control_ports: Vec<String>,
+}
+
+impl RescanReceipt {
+    pub fn requested(result: RescanResult) -> Self {
+        Self {
+            status: "requested".into(),
+            found: result.found,
+            control_ports: result.control_ports,
+        }
+    }
+}
+
 /// What an adoption or a removal changed.
 ///
 /// `changed` is false when the module was already in that state, which is not

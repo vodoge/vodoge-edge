@@ -41,7 +41,7 @@ mod status;
 use leptos::prelude::*;
 use thaw::*;
 
-use candidates::{CandidatesPage, ClaimState};
+use candidates::{CandidatesPage, ClaimState, RescanState};
 use console::{ConsolePage, ConsoleState};
 use danger::{DangerState, DangerZone};
 use esim::{EsimPage, EsimState};
@@ -79,6 +79,7 @@ pub fn Panel() -> impl IntoView {
     // **故意不一样**，也不合并 —— 日志要跟得上手上的操作，10 秒太钝；而状态
     // 每 2 秒问一次是在给一台边缘小机器找麻烦。
     let claims = ClaimState::new();
+    let rescan_state = RescanState::new();
     let scan = ScanState::new();
     let console = ConsoleState::new();
     let danger = DangerState::new();
@@ -144,7 +145,7 @@ pub fn Panel() -> impl IntoView {
             <ScanPage active=state.active state=scan />
             <EsimPage active=state.active state=esim />
             <SmsPage state=sms status=state />
-            <CandidatesPage state=state claims=claims />
+            <CandidatesPage state=state claims=claims rescan_state=rescan_state />
             <ConsolePage active=state.active state=console />
             <LogsPage state=logs />
         </ConfigProvider>
