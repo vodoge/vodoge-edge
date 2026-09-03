@@ -11,13 +11,22 @@ use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+/// Fetch the Leptos panel at `/next` the way a browser would.
+async fn next_page() -> String {
+    page_at("/next").await
+}
+
 /// Fetch the panel page the way a browser would.
 async fn panel_page() -> String {
+    page_at("/").await
+}
+
+async fn page_at(path: &str) -> String {
     let app = router(Arc::new(MemoryInbox::default()));
     let response = app
         .oneshot(
             axum::http::Request::builder()
-                .uri("/")
+                .uri(path)
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -693,6 +702,94 @@ fn string_literals(code: &str) -> Vec<String> {
 /// get an unstyled page with no behaviour at exactly the moment the panel is
 /// the only tool they have. This is the assertion that keeps that true after
 /// somebody reaches for a charting library.
+/// The Leptos panel at `/next` loads nothing from another machine either.
+///
+/// 🔴 **This is the first guard the migration had to rewrite rather than keep,
+/// and what it gave up is written down here rather than discovered later.**
+///
+/// The rule next door — every `<link>` is a `data:` URI, no `src=` anywhere —
+/// fits a panel that is one file. It cannot fit a wasm panel: the bundle is
+/// 600 KB, and base64 in the HTML would make the page a megabyte of text the
+/// browser must parse before it can start. So `/next` fetches two things,
+/// `edge-ui.js` and `edge-ui_bg.wasm`.
+///
+/// ⚠️ **What that costs.** The old panel makes *zero* requests once its HTML
+/// arrives; this one makes two. They are same-origin, served by the very
+/// process that just served the HTML, so the window where they can fail is
+/// narrow — but it is not closed, and "narrow" is not "none". That is the
+/// trade, made deliberately.
+///
+/// What is preserved is the property the original rule existed for: **nothing
+/// comes from another host.** This panel is served over the site LAN to a
+/// machine that may have no route to the internet at all; a CDN script here is
+/// not a dependency, it is an outage at exactly the moment the panel is the
+/// only tool the operator has.
+///
+/// So the rule becomes: every reference is either a `data:` URI or an absolute
+/// same-origin path. A scheme, a host, or a protocol-relative `//` fails.
+#[tokio::test]
+async fn the_next_panel_loads_nothing_from_another_machine() {
+    let page = next_page().await;
+    let markup = page.to_lowercase();
+
+    // Not vacuous: this page really does carry the references being checked.
+    let links = opening_tags(&markup, "link");
+    assert!(
+        links.len() >= 2,
+        "no <link> tags found on /next, so the loop below is scanning air"
+    );
+
+    for tag in opening_tags(&markup, "script") {
+        if let Some(src) = attribute(&tag, "src") {
+            assert!(
+                same_machine(&src),
+                "script on /next loads from another host: {src}"
+            );
+        }
+    }
+    for tag in &links {
+        let href = attribute(tag, "href").unwrap_or_default();
+        assert!(
+            same_machine(&href),
+            "link on /next points at another host: {href}"
+        );
+    }
+
+    assert!(!markup.contains("@import"), "css imports another sheet");
+    assert!(!markup.contains("src=\"//"), "protocol-relative script source");
+    assert!(!markup.contains("href=\"//"), "protocol-relative link target");
+
+    let mut rest = markup.as_str();
+    while let Some(at) = rest.find("url(") {
+        let argument = rest[at + 4..].trim_start_matches(['"', '\'']);
+        assert!(
+            same_machine(argument),
+            "a stylesheet on /next pulls a resource from another host"
+        );
+        rest = &rest[at + 4..];
+    }
+}
+
+/// A reference that cannot leave this machine: an inline `data:` URI, or an
+/// absolute path served by the same process.
+///
+/// ⚠️ Deliberately rejects anything with a scheme and anything starting `//`.
+/// A relative path would also be same-origin, but nothing here emits one and
+/// accepting them would make the rule harder to read than the thing it guards.
+fn same_machine(reference: &str) -> bool {
+    let reference = reference.trim();
+    reference.starts_with("data:") || (reference.starts_with('/') && !reference.starts_with("//"))
+}
+
+/// One attribute's value out of an opening tag, if it has one.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let at = tag.find(&needle)? + needle.len();
+    let rest = &tag[at..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 #[tokio::test]
 async fn the_panel_loads_nothing_from_outside_itself() {
     let page = panel_page().await;
