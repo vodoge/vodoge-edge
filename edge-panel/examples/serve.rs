@@ -226,7 +226,10 @@ async fn main() {
             Err(PanelError::Action("控制口没有应答".into()))
         }
         fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> {
-            Err(PanelError::Action("这个 example 只回答体检".into()))
+            Ok(UsbResetResult {
+                device: "2-4.1".into(),
+                node: "/dev/cdc-wdm0".into(),
+            })
         }
         /// ⚠️ 这里演的是**假成功**：`switch_profile` 回 `Ok(())`，而卡上的
         /// 状态一动不动。这个端点在真实硬件上就这么干过 —— 屏幕上必须写出
@@ -331,7 +334,7 @@ async fn main() {
             Ok(())
         }
         fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> {
-            Err(PanelError::Action("这个 example 只回答体检".into()))
+            Ok(())
         }
     }
 

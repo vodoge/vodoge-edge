@@ -30,6 +30,7 @@
 mod api;
 mod candidates;
 mod console;
+mod danger;
 mod esim;
 mod health;
 mod logs;
@@ -42,6 +43,7 @@ use thaw::*;
 
 use candidates::{CandidatesPage, ClaimState};
 use console::{ConsolePage, ConsoleState};
+use danger::{DangerState, DangerZone};
 use esim::{EsimPage, EsimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
@@ -79,6 +81,7 @@ pub fn Panel() -> impl IntoView {
     let claims = ClaimState::new();
     let scan = ScanState::new();
     let console = ConsoleState::new();
+    let danger = DangerState::new();
     let esim = EsimState::new();
     // 本地短信：10 秒一轮，跟状态页同频。
     let sms = SmsState::new();
@@ -136,6 +139,7 @@ pub fn Panel() -> impl IntoView {
     view! {
         <ConfigProvider>
             <StatusPage state=state />
+            <DangerZone status=state state=danger />
             <HealthPage active=state.active state=health />
             <ScanPage active=state.active state=scan />
             <EsimPage active=state.active state=esim />
