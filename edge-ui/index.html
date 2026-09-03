@@ -10,6 +10,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>VoDoge 边缘面板</title>
     <link data-trunk rel="rust" data-wasm-opt="z" />
+
+    <!--
+      🔴 这是**唯一**一处改 Thaw 默认值的地方，而且必须保持唯一。
+
+      `docs/frontend-rebuild/README.md` 定的做法是「改库的默认尺寸，集中改一次，
+      不是逐个组件手写覆盖——那样等于又回到手写」。云端那半边照这条做完之后，
+      调用点对 h-/p- 的手写覆盖是 **0 处**；这一半要守住同样的数。
+
+      往下加规则之前先问一句：这是在改**库的默认**，还是在给某一个组件描边？
+      后者不属于这里，也不属于任何地方。
+    -->
+    <style>
+      /* ① 表格：table-layout 从 fixed 改回 auto。
+         Thaw 默认 fixed + 等宽列，于是六列各占 116px，而 IMEI 要 152px、
+         ICCID 要 166px —— 它们溢出单元格并和邻列视觉重叠。这不是密度问题，
+         是**内容读不出来**：15 位 IMEI 和 20 位 ICCID 是一位一位对着念的东西。 */
+      .thaw-table { table-layout: auto; }
+
+      /* ② 密度。Thaw 的单元格默认 44px 高，那是给触屏列表的尺寸；这是一块要在
+         一屏里塞下整个机队的运维面板。32px 是云端那半边量过之后落在的同一个数
+         （表头 h-12 → h-8）。 */
+      .thaw-table-cell { height: 32px; }
+      .thaw-table-header-cell { height: 28px; }
+
+      /* ③ 标识符用等宽。IMEI、ICCID、IMSI 都是一位一位对着读的，比例字体下
+         「0」和「O」、「1」和「l」要靠猜。 */
+      .thaw-table-cell { font-variant-numeric: tabular-nums; }
+    </style>
   </head>
   <body></body>
 </html>

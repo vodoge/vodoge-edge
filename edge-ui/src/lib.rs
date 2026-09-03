@@ -1,14 +1,13 @@
 //! The panel's browser half, in Leptos.
 //!
-//! 🔴 **What this crate is for, in one sentence:** it deserialises
-//! `/api/status` into `edge_panel_api::StatusBody` — the *same type the server
-//! serialises from* — so that renaming a field on the server stops this
-//! crate compiling instead of silently emptying a column in the browser.
+//! 🔴 **What this crate is for, in one sentence:** it deserialises the agent's
+//! answers into `edge_panel_api`'s types — *the same types the server
+//! serialises from* — so that renaming a field on the server stops this crate
+//! compiling instead of silently emptying a column in the browser.
 //!
 //! That guarantee is the whole reason the panel is being rewritten in Rust
-//! rather than in anything else, and it is the acceptance condition for this
-//! stage. The old panel parses the same JSON in hand-written Alpine.js, where
-//! a renamed field is a blank cell nobody notices.
+//! rather than in anything else. It is checked: renaming `ModemBody.network`
+//! fails both halves at compile time.
 //!
 //! ## Where this sits during the migration
 //!
@@ -17,131 +16,61 @@
 //! wholesale swap would leave it worse than it is for however long the
 //! migration takes — which is exactly when it is needed most. See
 //! `docs/frontend-rebuild/edge-leptos.md`.
+//!
+//! ## The defect this migration exists to fix, beyond types
+//!
+//! A survey of the panel being replaced found the same structural bug in five
+//! of its six areas: **a failed request renders as an empty result.** Inbox,
+//! health report, network scan, eSIM profile list and the modem list itself
+//! all draw "there is nothing here" when the truth is "I could not find out".
+//! `api::Load` makes that shape impossible to write by accident, and every
+//! area ported here must keep the four screens apart: loading, failed, empty,
+//! and data.
 
-use edge_panel_api::{PanelMode, StatusBody};
+mod api;
+mod status;
+
 use leptos::prelude::*;
 use thaw::*;
 
-/// How a finished fetch turned out.
-///
-/// 🔴 Three screens, not two, and they are kept apart on purpose: **loading**
-/// is `Suspense`'s fallback, **failed** says what failed, and **empty** is a
-/// fact about the machine said in its own words. None of them may be drawn as
-/// another. The cloud console carries a docblock about the day it drew
-/// "Nothing recorded yet" over a full audit log — this is that lesson arriving
-/// before the defect instead of after it.
-///
-/// There is no `Waiting` variant because there is nothing for it to mean: the
-/// value only exists once the future has resolved.
-#[derive(Clone, Debug)]
-enum Load {
-    Failed(String),
-    Ready(StatusBody),
-}
-
-/// Fetch the status once, with the shared types on both ends of the wire.
-async fn fetch_status() -> Load {
-    match gloo_net::http::Request::get("/api/status").send().await {
-        Err(error) => Load::Failed(format!("无法连接到 agent：{error}")),
-        Ok(response) if !response.ok() => {
-            Load::Failed(format!("agent 返回 {}", response.status()))
-        }
-        // The deserialise that carries the guarantee. `StatusBody` is
-        // `edge-panel-api`'s, not a shape declared here.
-        Ok(response) => match response.json::<StatusBody>().await {
-            Ok(body) => Load::Ready(body),
-            Err(error) => Load::Failed(format!("agent 的应答解析不了：{error}")),
-        },
-    }
-}
-
-#[component]
-fn ModemTable(body: StatusBody) -> impl IntoView {
-    let modems = body.modems;
-    if modems.is_empty() {
-        // Empty is a fact about the machine, not a failure — and it is said
-        // in its own words rather than by drawing nothing.
-        return view! { <Text>"这台机器上没有已纳管的模组。"</Text> }.into_any();
-    }
-    view! {
-        <Table>
-            <TableHeader>
-                <TableRow>
-                    <TableHeaderCell>"IMEI"</TableHeaderCell>
-                    <TableHeaderCell>"型号"</TableHeaderCell>
-                    <TableHeaderCell>"状态"</TableHeaderCell>
-                    <TableHeaderCell>"驻留网络"</TableHeaderCell>
-                    <TableHeaderCell>"能力来源"</TableHeaderCell>
-                </TableRow>
-            </TableHeader>
-            <TableBody>
-                {modems
-                    .into_iter()
-                    .map(|m| {
-                        // `capability_origin` is `edge_core::CapabilityOrigin`
-                        // itself. Adding a variant to that enum makes this
-                        // `match` non-exhaustive — which is the point.
-                        let origin = match m.capability_origin {
-                            edge_panel_api::CapabilityOrigin::Rule => "规则",
-                            edge_panel_api::CapabilityOrigin::Fallback => "回退",
-                        };
-                        view! {
-                            <TableRow>
-                                <TableCell>{m.imei}</TableCell>
-                                <TableCell>{m.family}</TableCell>
-                                <TableCell>{m.state}</TableCell>
-                                <TableCell>
-                                    {m.network.unwrap_or_else(|| "—".to_string())}
-                                </TableCell>
-                                <TableCell>{origin}</TableCell>
-                            </TableRow>
-                        }
-                    })
-                    .collect_view()}
-            </TableBody>
-        </Table>
-    }
-    .into_any()
-}
+use status::{StatusPage, StatusState, STATUS_EVERY_MS};
 
 #[component]
 pub fn Panel() -> impl IntoView {
-    let status = LocalResource::new(fetch_status);
+    let state = StatusState::new();
+
+    // 首次拉取。
+    {
+        let state = state;
+        leptos::task::spawn_local(async move { status::poll(state).await });
+    }
+
+    // 轮询。⚠️ 间隔是 10 秒，而且**不要**和别的定时器合并——原版里重扫后 +1s、
+    // 认领后 +10s 各有各的理由，注释写明了：立刻读会拿到旧缓存，而认领只是给下
+    // 一轮轮询上膛，HTTP 回执不是模组身份。
+    {
+        let state = state;
+        set_interval(
+            move || {
+                let state = state;
+                leptos::task::spawn_local(async move { status::poll(state).await });
+            },
+            std::time::Duration::from_millis(STATUS_EVERY_MS),
+        );
+    }
+
+    // 每秒一跳，只为让相对时间会走。不跳的话「N 秒前」会冻在数据到达那一刻。
+    {
+        let now = state.now;
+        set_interval(
+            move || now.set(status::now_ms()),
+            std::time::Duration::from_secs(1),
+        );
+    }
 
     view! {
         <ConfigProvider>
-            <Card>
-                <CardHeader>
-                    <Body1><b>"模组"</b></Body1>
-                </CardHeader>
-                <Suspense fallback=move || view! { <Text>"正在读取 agent…"</Text> }>
-                    {move || {
-                        status
-                            .get()
-                            .map(|load| match load.take() {
-                                Load::Failed(why) => {
-                                    // A failure says what failed. It does not
-                                    // render as an empty modem list.
-                                    view! { <MessageBar intent=MessageBarIntent::Error>
-                                        <MessageBarBody>{why}</MessageBarBody>
-                                    </MessageBar> }
-                                        .into_any()
-                                }
-                                Load::Ready(body) => {
-                                    let mode = match body.mode {
-                                        PanelMode::Cloud => "已连上云端",
-                                        PanelMode::Local => "本地模式（无上行）",
-                                    };
-                                    view! {
-                                        <Text>{mode}</Text>
-                                        <ModemTable body=body />
-                                    }
-                                        .into_any()
-                                }
-                            })
-                    }}
-                </Suspense>
-            </Card>
+            <StatusPage state=state />
         </ConfigProvider>
     }
 }
