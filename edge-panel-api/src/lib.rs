@@ -152,7 +152,7 @@ pub struct MessageBody {
  * ⚠️ 全部自包含：只用原始类型和彼此，不碰 `edge-store`。搬迁时确认过。
  */
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScannedOperatorBody {
     pub numeric: String,
     pub long_name: String,
@@ -173,7 +173,7 @@ pub struct UssdResult {
     pub elapsed_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScanResult {
     pub imei: Option<String>,
     pub elapsed_ms: u64,

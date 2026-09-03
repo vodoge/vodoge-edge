@@ -20,7 +20,7 @@
 //! one.
 use std::sync::Arc;
 use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult,
-                 MemoryInbox, PanelError,
+                 MemoryInbox, ScannedOperatorBody, PanelError,
                  ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 
@@ -177,7 +177,39 @@ async fn main() {
         fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn list_profiles(&self, _: Option<String>) -> Result<ProfilesResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
-        fn scan_operators(&self, _: Option<String>) -> Result<ScanResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        /// 故意慢：睡 8 秒再回。进度条、「已 N 秒」、「这一根此刻不服务」那句
+        /// 话，都只有在请求真的挂着的时候才看得出来在不在动。
+        fn scan_operators(&self, imei: Option<String>) -> Result<ScanResult, PanelError> {
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            Ok(ScanResult {
+                imei,
+                elapsed_ms: 8_000,
+                operators: vec![
+                    ScannedOperatorBody {
+                        numeric: "46000".into(),
+                        long_name: "CHINA MOBILE".into(),
+                        short_name: "CMCC".into(),
+                        status: "current".into(),
+                        access_technology: Some("LTE".into()),
+                    },
+                    ScannedOperatorBody {
+                        numeric: "46001".into(),
+                        long_name: "CHN-UNICOM".into(),
+                        short_name: "UNICOM".into(),
+                        status: "available".into(),
+                        access_technology: Some("LTE".into()),
+                    },
+                    // 两个名字都空的一行 —— 那一格必须落回 MCC/MNC，不能是空的。
+                    ScannedOperatorBody {
+                        numeric: "46011".into(),
+                        long_name: String::new(),
+                        short_name: String::new(),
+                        status: "forbidden".into(),
+                        access_technology: None,
+                    },
+                ],
+            })
+        }
         fn ussd(&self, _: Option<String>, _: String) -> Result<UssdResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }

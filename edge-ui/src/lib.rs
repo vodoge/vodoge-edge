@@ -31,6 +31,7 @@ mod api;
 mod candidates;
 mod health;
 mod logs;
+mod scan;
 mod sms;
 mod status;
 
@@ -40,6 +41,7 @@ use thaw::*;
 use candidates::{CandidatesPage, ClaimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
+use scan::{ScanPage, ScanState};
 use sms::{SmsPage, SmsState, INBOX_EVERY_MS};
 use status::{StatusPage, StatusState, STATUS_EVERY_MS};
 
@@ -71,6 +73,7 @@ pub fn Panel() -> impl IntoView {
     // **故意不一样**，也不合并 —— 日志要跟得上手上的操作，10 秒太钝；而状态
     // 每 2 秒问一次是在给一台边缘小机器找麻烦。
     let claims = ClaimState::new();
+    let scan = ScanState::new();
     // 本地短信：10 秒一轮，跟状态页同频。
     let sms = SmsState::new();
     {
@@ -107,6 +110,8 @@ pub fn Panel() -> impl IntoView {
                 let at = status::now_ms();
                 now.set(at);
                 log_now.set(at);
+                // 扫网的进度条靠这一跳走。三分钟里它是唯一还在动的东西。
+                scan.now.set(at);
             },
             std::time::Duration::from_secs(1),
         );
@@ -126,6 +131,7 @@ pub fn Panel() -> impl IntoView {
         <ConfigProvider>
             <StatusPage state=state />
             <HealthPage active=state.active state=health />
+            <ScanPage active=state.active state=scan />
             <SmsPage state=sms status=state />
             <CandidatesPage state=state claims=claims />
             <LogsPage state=logs />
