@@ -1,0 +1,2440 @@
+[
+ {
+  "text": "AT+CNMI=2,1 refused; delivery receipts stay off",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "AT+CSMS=1 refused; delivery receipts stay off",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "AT+CSQ -> +CSQ: 10,99",
+  "level": "info",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "EF_AD 8986…: QMI request rejected; assuming a 2-digit MNC",
+  "level": "warn",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "PANEL: LISTENING",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "Poll /dev/cdc-wdm0 IMEI=867018069509705 OK",
+  "level": "info",
+  "topic": "poll",
+  "beat": true,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "alert 7 not enqueued: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "alert 7 not enqueued: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "alert 7 not enqueued: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "alert battery not enqueued: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "alert battery not enqueued: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "alert battery not enqueued: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not read: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 860000000000001: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 860000000000001: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 860000000000001: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 867018069509705: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 867018069509705: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "apn cache not updated for 867018069509705: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "at inbox /dev/cdc-wdm0: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "at inbox /dev/cdc-wdm0: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "at inbox /dev/ttyUSB2: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "at inbox /dev/ttyUSB2: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "at inbox 867018069509705: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "at inbox 867018069509705: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "at lease listening on /dev/cdc-wdm0",
+  "level": "info",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "at lease listening on /dev/ttyUSB2",
+  "level": "info",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "at lease listening on 867018069509705",
+  "level": "info",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: QMI request rejected",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: device busy",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: invalid pdu",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: no such file or directory",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: permission denied",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease not started: timed out after 5s",
+  "level": "err",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "at lease renewed",
+  "level": "info",
+  "topic": "at",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "capability matrix restored from store version=3",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "capability matrix restored from store version=built-in",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command   : x",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command  : refused",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command accepted id=7",
+  "level": "info",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: QMI request rejected",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: device busy",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: invalid pdu",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: no such file or directory",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: permission denied",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: timed out after 5s",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "command: x",
+  "level": "err",
+  "topic": "command",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "degraded: at-only",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not pruned: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries not read: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discoveries pruned: 4",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: device busy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "discovery result not recorded: timed out after 5s",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "esim inventory: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "failing over to serial",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "family EC20 matched",
+  "level": "info",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "iccid /dev/cdc-wdm0 unavailable: QMI request rejected",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "iccid /dev/cdc-wdm0 unavailable: timed out after 5s",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "iccid /dev/ttyUSB2 unavailable: QMI request rejected",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "iccid /dev/ttyUSB2 unavailable: timed out after 5s",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "iccid 867018069509705 unavailable: QMI request rejected",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "iccid 867018069509705 unavailable: timed out after 5s",
+  "level": "err",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "iccid 89860112345678901234 read",
+  "level": "info",
+  "topic": "modem",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual modem approvals not read: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: device busy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "manual serial candidate not recorded: timed out after 5s",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "missing capability matrix",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "modem 860000000000001 adopted from the cloud: claimed by tenant 3",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "modem 867018069509705 adopted from the cloud: claimed by tenant 3",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn cache not read: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: device busy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "msisdn not recorded: timed out after 5s",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "never delivered to 867018069509705",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "no recipient for id=7",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "no stored capability matrix; using the built-in one",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: QMI request rejected",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: device busy",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: invalid pdu",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: no such file or directory",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: permission denied",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: timed out after 5s",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "panel: x",
+  "level": "err",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 FAIL QMI request rejected",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 FAIL timed out after 5s",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 imei=/dev/cdc-wdm0 ok",
+  "level": "info",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 imei=867018069509705 at-only",
+  "level": "warn",
+  "topic": "poll",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 imei=867018069509705 ok",
+  "level": "info",
+  "topic": "poll",
+  "beat": true,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/cdc-wdm0 silent, unidentified",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll /dev/ttyUSB2 FAIL QMI request rejected",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "poll /dev/ttyUSB2 FAIL timed out after 5s",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "poll /dev/ttyUSB2 imei=/dev/ttyUSB2 ok",
+  "level": "info",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "poll /dev/ttyUSB2 silent, unidentified",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "poll 867018069509705 FAIL QMI request rejected",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "poll 867018069509705 FAIL timed out after 5s",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "poll 867018069509705 imei=867018069509705 ok",
+  "level": "info",
+  "topic": "poll",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll 867018069509705 silent, unidentified",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "poll imei=860000000000001 absent from both enumerations",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "860000000000001",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll imei=867018069509705 absent from both enumerations",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: /dev/cdc-wdm0 went away",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/cdc-wdm0"
+ },
+ {
+  "text": "poll: QMI request rejected",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: device busy",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: invalid pdu",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: no such file or directory",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: permission denied",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: timed out after 5s",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "poll: x",
+  "level": "err",
+  "topic": "poll",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: 12 KiB",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: QMI request rejected",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: device busy",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: invalid pdu",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: no such file or directory",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: permission denied",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: timed out after 5s",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "proxy traffic: x",
+  "level": "err",
+  "topic": "proxy",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "qmi time out",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "qmi timed out",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "qmi timedout",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "qmi timeout",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: device busy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: invalid pdu",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: permission denied",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry not read: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 860000000000001: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 860000000000001: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 860000000000001: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 867018069509705: QMI request rejected",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 867018069509705: no such file or directory",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "registry unreadable for 867018069509705: timed out after 5s",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "replaced by /dev/ttyUSB3",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB3"
+ },
+ {
+  "text": "restart 860000000000001: QMI request rejected",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: at-only",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: no such file or directory",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: radio back",
+  "level": "info",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: radio back, card not: QMI request rejected",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: radio back, card not: no such file or directory",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: radio back, card not: timed out after 5s",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 860000000000001: timed out after 5s",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "860000000000001"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: QMI request rejected",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: at-only",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: no such file or directory",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: radio back",
+  "level": "info",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: radio back, card not: QMI request rejected",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: radio back, card not: no such file or directory",
+  "level": "err",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: radio back, card not: timed out",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: radio back, card not: timed out after 5s",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "restart 867018069509705: timed out after 5s",
+  "level": "warn",
+  "topic": "restart",
+  "beat": false,
+  "imei": "",
+  "bare": [
+   "867018069509705"
+  ],
+  "port": ""
+ },
+ {
+  "text": "scanner opened",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "skipped 3 discoveries",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "sms queued for 8613800100500",
+  "level": "info",
+  "topic": "sms",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "sms to 8670180695097 accepted",
+  "level": "info",
+  "topic": "sms",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "sms to 8670180695097051234 accepted",
+  "level": "info",
+  "topic": "sms",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "smsc address unchanged",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "status report 0 is not hex: 079168",
+  "level": "err",
+  "topic": "report",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "status report 0 is not hex: 079168…AB",
+  "level": "err",
+  "topic": "report",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "status report 0 undecodable: pdu=079168…AB",
+  "level": "err",
+  "topic": "report",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "status report 12 is not hex: 079168…AB",
+  "level": "err",
+  "topic": "report",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "status report 12 undecodable: pdu=079168…AB",
+  "level": "err",
+  "topic": "report",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "terror management",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink   : closed",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink : x",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink closed, reconnecting",
+  "level": "warn",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink connecting wss://cloud.example/edge",
+  "level": "info",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: QMI request rejected",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: device busy",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: invalid pdu",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: no such file or directory",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: permission denied",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: timed out after 5s",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "uplink: x",
+  "level": "err",
+  "topic": "uplink",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=860000000000001 not recorded: QMI request rejected",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "860000000000001",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=860000000000001 not recorded: no such file or directory",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "860000000000001",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=860000000000001 not recorded: timed out after 5s",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "860000000000001",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=867018069509705 not recorded: QMI request rejected",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=867018069509705 not recorded: no such file or directory",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb position for imei=867018069509705 not recorded: timed out after 5s",
+  "level": "err",
+  "topic": "usb",
+  "beat": false,
+  "imei": "867018069509705",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "usb recovery on /dev/ttyUSB2: re-enumerated",
+  "level": "warn",
+  "topic": "usb",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": "/dev/ttyUSB2"
+ },
+ {
+  "text": "usb recovery started",
+  "level": "warn",
+  "topic": "usb",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "vodoge-edge panel started",
+  "level": "info",
+  "topic": "panel",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "xusb recovery started",
+  "level": "info",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz absent yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz assuming yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz at-only yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz busy yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz cannot yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz degraded yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz denied yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz error yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz failed yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz falling back yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz invalid yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz missing yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz never delivered yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz no recipient yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz no such yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz not deleted yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz not hex yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz not numeric yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz not recorded yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz not started yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz panicked yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz reconnecting yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz refused yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz rejected yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz replaced by yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz retrying yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz silent yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz skipped yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz stale yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz time out yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz timed out yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz timedout yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz timeout yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz unavailable yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz undecodable yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz unidentified yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz unreachable yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz unrecognised yy",
+  "level": "err",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ },
+ {
+  "text": "zz warning yy",
+  "level": "warn",
+  "topic": "other",
+  "beat": false,
+  "imei": "",
+  "bare": [],
+  "port": ""
+ }
+]

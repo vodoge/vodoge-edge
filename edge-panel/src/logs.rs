@@ -21,14 +21,10 @@ const CAPACITY: usize = 500;
 static GLOBAL: OnceLock<Arc<LogRing>> = OnceLock::new();
 
 /// One captured line.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct LogLine {
-    /// Monotonic cursor. A reader passes the last one it saw to get only what
-    /// came after, so a poll never re-delivers or skips a line.
-    pub seq: u64,
-    pub at: i64,
-    pub text: String,
-}
+///
+/// 住在 `edge-panel-api` 里，好让浏览器那半边**反序列化的是同一个类型**：
+/// 在这里改个字段名，`edge-ui` 就编不过，而不是安静地空掉一栏。
+pub use edge_panel_api::LogLine;
 
 /// Bounded ring of recent log lines.
 pub struct LogRing {

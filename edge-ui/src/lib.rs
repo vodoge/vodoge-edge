@@ -29,12 +29,14 @@
 
 mod api;
 mod health;
+mod logs;
 mod status;
 
 use leptos::prelude::*;
 use thaw::*;
 
 use health::{Health, HealthPage};
+use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use status::{StatusPage, StatusState, STATUS_EVERY_MS};
 
 #[component]
@@ -61,11 +63,32 @@ pub fn Panel() -> impl IntoView {
         );
     }
 
+    // 日志有自己的一套：游标、2 秒一轮、暂停缓冲。⚠️ 间隔和状态页的 10 秒
+    // **故意不一样**，也不合并 —— 日志要跟得上手上的操作，10 秒太钝；而状态
+    // 每 2 秒问一次是在给一台边缘小机器找麻烦。
+    let logs = LogState::new();
+    {
+        let logs = logs;
+        leptos::task::spawn_local(async move { logs::poll(logs).await });
+        set_interval(
+            move || {
+                let logs = logs;
+                leptos::task::spawn_local(async move { logs::poll(logs).await });
+            },
+            std::time::Duration::from_millis(LOGS_EVERY_MS),
+        );
+    }
+
     // 每秒一跳，只为让相对时间会走。不跳的话「N 秒前」会冻在数据到达那一刻。
     {
         let now = state.now;
+        let log_now = logs.now;
         set_interval(
-            move || now.set(status::now_ms()),
+            move || {
+                let at = status::now_ms();
+                now.set(at);
+                log_now.set(at);
+            },
             std::time::Duration::from_secs(1),
         );
     }
@@ -84,6 +107,7 @@ pub fn Panel() -> impl IntoView {
         <ConfigProvider>
             <StatusPage state=state />
             <HealthPage active=state.active state=health />
+            <LogsPage state=logs />
         </ConfigProvider>
     }
 }

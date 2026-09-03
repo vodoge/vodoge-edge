@@ -338,3 +338,25 @@ pub struct ClaimCandidateBody {
 pub struct RegistrationBody {
     pub imei: String,
 }
+
+/// One captured log line.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LogLine {
+    /// Monotonic cursor. A reader passes the last one it saw to get only what
+    /// came after, so a poll never re-delivers or skips a line.
+    pub seq: u64,
+    pub at: i64,
+    pub text: String,
+}
+
+/// `GET /api/logs?after=<seq>`.
+///
+/// ⚠️ 只有 `seq / at / text` 三个字段。**没有级别、没有话题、没有模组** ——
+/// 面板上那些筛选是从行文推断出来的，见 `edge_core::classify`。这个类型存在的
+/// 意义之一就是让这件事在类型上看得见：服务端给不出的东西，这里也没有。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LogsBody {
+    pub lines: Vec<LogLine>,
+    /// 服务端当前的游标。下一次带着它来问，就既不会重发也不会漏。
+    pub cursor: u64,
+}

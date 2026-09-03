@@ -19,7 +19,7 @@
 //! layout, and layout breaks on the widest real value rather than the average
 //! one.
 use std::sync::Arc;
-use edge_panel::{router_with_actions, Actions, AtResult, MemoryInbox, PanelError,
+use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, MemoryInbox, PanelError,
                  ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 
@@ -128,6 +128,45 @@ async fn main() {
         fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
         fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
     }
+
+    // 给日志栏灌一些真实形状的行：三种级别、几个话题、带 imei= 的和不带的，
+    // 外加那条几乎占满整条流的心跳。心跳故意多来几条 —— 「静音心跳」那个开关
+    // 要是没东西可静音，就看不出它在做什么。
+    for line in [
+        "vodoge-edge panel listening on 0.0.0.0:8790",
+        "uplink connecting wss://cloud.example/edge",
+        "uplink closed, reconnecting",
+        "iccid 89860112345678901234 read",
+        "EF_AD 8986…: QMI request rejected; assuming a 2-digit MNC",
+        "restart 867018069509705: radio back, card not: timed out",
+        "status report 0 is not hex: 079168AB",
+        "sms queued for 8613800100500",
+        "at lease listening on /dev/ttyUSB2",
+        "usb recovery on /dev/ttyUSB2: re-enumerated",
+    ] {
+        log_line(line);
+    }
+    log_error("poll: /dev/cdc-wdm1 went away");
+    log_error("command: refused, no such modem");
+    for _ in 0..8 {
+        log_line("poll /dev/cdc-wdm0 imei=867018069509705 ok");
+        log_line("poll /dev/ttyUSB2 imei=860000000000001 at-only");
+    }
+
+    // 让这一栏活着：每秒一行。暂停缓冲、丢行计数、刷新徽章这些东西，静止的
+    // 数据是看不出来的。
+    std::thread::spawn(|| {
+        let mut n = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            n += 1;
+            match n % 7 {
+                0 => log_error(format!("poll: /dev/cdc-wdm1 vanished (#{n})")),
+                3 => log_line(format!("uplink closed, reconnecting (#{n})")),
+                _ => log_line("poll /dev/cdc-wdm0 imei=867018069509705 ok"),
+            }
+        }
+    });
 
     let app = router_with_actions(inbox, Some(Arc::new(BenchActions)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8790").await.unwrap();

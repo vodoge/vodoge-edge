@@ -12,7 +12,8 @@ use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
     AtBody, ClaimCandidateBody, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
-    RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, StatusBody, SwitchBody, UssdBody,
+    LogsBody, RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, StatusBody, SwitchBody,
+    UssdBody,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -524,8 +525,11 @@ async fn claim_modem_candidate(
 /// interval, not the session.
 async fn read_logs(uri: Uri) -> Response {
     let ring = LogRing::global();
-    let lines = ring.since(cursor_from_query(uri.query()));
-    Json(serde_json::json!({ "lines": lines, "cursor": ring.cursor() })).into_response()
+    Json(LogsBody {
+        lines: ring.since(cursor_from_query(uri.query())),
+        cursor: ring.cursor(),
+    })
+    .into_response()
 }
 
 /// Read `after=<n>` without pulling in a query-string extractor. The panel
