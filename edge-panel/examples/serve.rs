@@ -19,7 +19,8 @@
 //! layout, and layout breaks on the widest real value rather than the average
 //! one.
 use std::sync::Arc;
-use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, MemoryInbox, PanelError,
+use edge_panel::{log_error, log_line, router_with_actions, Actions, AtResult, CandidateClaimResult,
+                 MemoryInbox, PanelError,
                  ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 
@@ -86,6 +87,34 @@ async fn main() {
             imei: None,
             detail: "POLLERR".into(),
             last_seen: 1_700_000_000_000,
+        },
+        // 三种候选各一个，好看清那两个按钮什么时候出现、什么时候不出现。
+        //
+        // 这个是**可认领**的：串口、状态 found、还没人跟它说过话。
+        LocalModemDiscovery {
+            candidate_key: "serial:usb:2-4.2:port:/dev/ttyUSB8".into(),
+            usb_device: Some("2-4.2".into()),
+            transport: "serial".into(),
+            control_port: "/dev/ttyUSB8".into(),
+            vendor_id: Some("1e0e".into()),
+            product_id: None,
+            state: "found".into(),
+            imei: None,
+            detail: String::new(),
+            last_seen: 1_700_000_000_000,
+        },
+        // 这个已经报过 IMEI 而且不在管理列表里，所以只该出现**纳管**。
+        LocalModemDiscovery {
+            candidate_key: "serial:usb:2-4.3:port:/dev/ttyUSB11".into(),
+            usb_device: Some("2-4.3".into()),
+            transport: "serial".into(),
+            control_port: "/dev/ttyUSB11".into(),
+            vendor_id: Some("2c7c".into()),
+            product_id: Some("0296".into()),
+            state: "atonly".into(),
+            imei: Some("869999000000123".into()),
+            detail: "answered AT+CGSN over serial only".into(),
+            last_seen: 1_700_000_000_000,
         }],
     });
     // 一个**只回答体检**的假 Actions：其余动作照实返回「没有配置」，因为这个
@@ -112,6 +141,11 @@ async fn main() {
                 sms_centre: Some("+8613800100500".into()),
                 refused: vec!["AT+CNUM".into()],
             })
+        }
+        /// 认领是回应答的（好让「已纳入探测」那一格能被看到），但它**什么硬件
+        /// 都不碰** —— 和真实实现一样，认领只是给下一轮轮询上膛。
+        fn claim_modem_candidate(&self, candidate_key: String) -> Result<CandidateClaimResult, PanelError> {
+            Ok(CandidateClaimResult { candidate_key })
         }
         fn send_sms(&self, _: String, _: String, _: Option<String>, _: bool) -> Result<(), PanelError> {
             Err(PanelError::Action("这个 example 只回答体检".into()))

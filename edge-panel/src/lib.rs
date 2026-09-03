@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
-    AtBody, ClaimCandidateBody, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
+    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, MessageBody, MessagesBody, ModemBody, PanelMode,
     LogsBody, RadioBody, RegistrationBody, ResetBody, RestartBody, SendBody, StatusBody, SwitchBody,
     UssdBody,
 };
@@ -509,11 +509,7 @@ async fn claim_modem_candidate(
         );
     };
     match actions.claim_modem_candidate(candidate_key) {
-        Ok(result) => Json(serde_json::json!({
-            "status": "claimed",
-            "candidate_key": result.candidate_key,
-        }))
-        .into_response(),
+        Ok(result) => Json(ClaimReceipt::claimed(result.candidate_key)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

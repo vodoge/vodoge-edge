@@ -194,6 +194,33 @@ pub struct CandidateClaimResult {
     pub candidate_key: String,
 }
 
+/// `POST /api/discoveries/claim` 的应答。
+///
+/// ⚠️ 和 [`CandidateClaimResult`] 分开是有原因的：`status` 是**面板说的**，
+/// 不是 `Actions` 实现说的 —— 实现只回答「哪个候选被批准了」，「claimed」这个
+/// 字是这一层加上去的。
+///
+/// 🔴 在此之前这个应答是 handler 用 `serde_json::json!` 现拼的，`status` 这个
+/// 字段在任何类型里都不存在。旧面板靠它判断成败（`result.status !== "claimed"`
+/// 就报「认领回执与候选不一致」），而浏览器那半边一旦按 `CandidateClaimResult`
+/// 反序列化，就会**安静地丢掉它**。这正是这次迁移要堵的那类洞：线上有的字段，
+/// 类型里没有。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaimReceipt {
+    /// 恒为 `"claimed"`。旧面板拿它当成功标志，所以不能拿掉 —— 它还在 `/` 上跑。
+    pub status: String,
+    pub candidate_key: String,
+}
+
+impl ClaimReceipt {
+    pub fn claimed(candidate_key: String) -> Self {
+        Self {
+            status: "claimed".into(),
+            candidate_key,
+        }
+    }
+}
+
 /// What an adoption or a removal changed.
 ///
 /// `changed` is false when the module was already in that state, which is not

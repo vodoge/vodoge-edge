@@ -28,6 +28,7 @@
 //! and data.
 
 mod api;
+mod candidates;
 mod health;
 mod logs;
 mod status;
@@ -35,6 +36,7 @@ mod status;
 use leptos::prelude::*;
 use thaw::*;
 
+use candidates::{CandidatesPage, ClaimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use status::{StatusPage, StatusState, STATUS_EVERY_MS};
@@ -66,6 +68,7 @@ pub fn Panel() -> impl IntoView {
     // 日志有自己的一套：游标、2 秒一轮、暂停缓冲。⚠️ 间隔和状态页的 10 秒
     // **故意不一样**，也不合并 —— 日志要跟得上手上的操作，10 秒太钝；而状态
     // 每 2 秒问一次是在给一台边缘小机器找麻烦。
+    let claims = ClaimState::new();
     let logs = LogState::new();
     {
         let logs = logs;
@@ -107,6 +110,7 @@ pub fn Panel() -> impl IntoView {
         <ConfigProvider>
             <StatusPage state=state />
             <HealthPage active=state.active state=health />
+            <CandidatesPage state=state claims=claims />
             <LogsPage state=logs />
         </ConfigProvider>
     }
