@@ -770,6 +770,61 @@ async fn the_next_panel_loads_nothing_from_another_machine() {
     }
 }
 
+/// `/next` 引用的每一个 bundle 文件，这个进程都要真的能给出来。
+///
+/// 这条守的是一个**不出错误、只出黑屏**的失误：trunk 默认把 `/edge-ui.js`
+/// 写成根路径，而路由挂在 `/next/` 下面。HTML 照样 200，wasm 404，页面一片
+/// 漆黑，没有任何一处报错说明为什么。`edge-ui/Trunk.toml` 里的 `public_url`
+/// 是修法，这条测试是安全网：构建方式退回默认，这里红。
+#[tokio::test]
+async fn the_next_panel_asks_for_its_own_bundle() {
+    let page = next_page().await;
+    let markup = page.to_lowercase();
+
+    let mut asked: Vec<String> = Vec::new();
+    for tag in opening_tags(&markup, "script") {
+        if let Some(src) = attribute(&tag, "src") {
+            asked.push(src);
+        }
+    }
+    for tag in opening_tags(&markup, "link") {
+        let href = attribute(&tag, "href").unwrap_or_default();
+        if href.ends_with(".js") || href.ends_with(".wasm") {
+            asked.push(href);
+        }
+    }
+    asked.retain(|u| !u.starts_with("data:"));
+
+    // 非空地板：引用一个都没扫到的话，下面的循环是在检查空气。
+    assert!(
+        asked.len() >= 2,
+        "/next 上没找到 js/wasm 引用，这条测试什么也没量到"
+    );
+
+    for url in &asked {
+        assert!(
+            url.starts_with("/next/"),
+            "/next 去 {url} 取 bundle，可路由只挂在 /next/ 下面 —— \
+             页面会 200 但一片漆黑。八成是 trunk 构建时没读到 edge-ui/Trunk.toml"
+        );
+        let status = router(Arc::new(MemoryInbox::default()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(url.as_str())
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(
+            status,
+            200,
+            "/next 引用了 {url}，这个进程却给不出来"
+        );
+    }
+}
+
 /// A reference that cannot leave this machine: an inline `data:` URI, or an
 /// absolute path served by the same process.
 ///

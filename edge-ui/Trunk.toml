@@ -1,0 +1,18 @@
+# ⚠️ 这两项都不是口味问题，任缺一项都会让 `/next` 变成一块黑屏。
+#
+# `edge-panel` 把 `dist/` 里的三个文件 `include_bytes!` 进二进制，挂在 `/next/`
+# 下面（见 `edge-panel/src/lib.rs` 的 `/next/edge-ui.js` 与 `/next/edge-ui_bg.wasm`
+# 两条路由）。而 trunk 默认往 HTML 里写**根路径**的 `/edge-ui.js`，那个地址在
+# 面板上是 404 —— 页面照样返回 200，只是什么都不画。
+#
+# 所以：
+#   public_url  让 trunk 写 `/next/edge-ui.js`，对上路由。
+#   filehash    关掉内容哈希文件名。文件名是写死在上面那两条路由里的，一旦带上
+#               哈希，**第一次重新构建**就会对不上。
+#
+# 就位之后，`trunk build --release` 一句话是对的，不需要谁记住额外的参数。
+# `edge-panel/tests/panel.rs` 里的 `the_next_panel_asks_for_its_own_bundle`
+# 守着这件事：构建错了是测试红，不是运行时黑屏。
+[build]
+public_url = "/next/"
+filehash = false

@@ -28,11 +28,13 @@
 //! and data.
 
 mod api;
+mod health;
 mod status;
 
 use leptos::prelude::*;
 use thaw::*;
 
+use health::{Health, HealthPage};
 use status::{StatusPage, StatusState, STATUS_EVERY_MS};
 
 #[component]
@@ -68,9 +70,20 @@ pub fn Panel() -> impl IntoView {
         );
     }
 
+    // 体检的状态住在这里而不是页里：切换模组要清掉它（原版 select() 就是这么做的），
+    // 而「切换模组」是状态页的事。
+    let health = RwSignal::new(Health::Idle);
+    Effect::new(move |_| {
+        // 只要选中的模组变了，上一根的体检结果就必须清掉——否则屏幕上会是
+        // 一根模组的名字配另一根模组的信号。
+        let _ = state.active.get();
+        health.set(Health::Idle);
+    });
+
     view! {
         <ConfigProvider>
             <StatusPage state=state />
+            <HealthPage active=state.active state=health />
         </ConfigProvider>
     }
 }

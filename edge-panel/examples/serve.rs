@@ -19,7 +19,8 @@
 //! layout, and layout breaks on the widest real value rather than the average
 //! one.
 use std::sync::Arc;
-use edge_panel::{router, MemoryInbox};
+use edge_panel::{router_with_actions, Actions, AtResult, MemoryInbox, PanelError,
+                 ProfilesResult, ReportResult, ScanResult, UsbResetResult, UssdResult};
 use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery};
 
 #[tokio::main]
@@ -87,7 +88,48 @@ async fn main() {
             last_seen: 1_700_000_000_000,
         }],
     });
-    let app = router(inbox);
+    // 一个**只回答体检**的假 Actions：其余动作照实返回「没有配置」，因为这个
+    // example 是给人看画面的，不是给人点硬件的。
+    //
+    // ⚠️ 体检回的这份数据是 867018069509705 的——**封禁表里那一根**。选它就能
+    // 看到第四条判词，那正是这一页在发短信之前要说的话。
+    struct BenchActions;
+    impl Actions for BenchActions {
+        fn modem_report(&self, imei: Option<String>) -> Result<ReportResult, PanelError> {
+            Ok(ReportResult {
+                imei,
+                port: "/dev/cdc-wdm0".into(),
+                signal_dbm: Some(-93),
+                signal_index: Some(10),
+                cs_registration: Some("home".into()),
+                ps_registration: Some("home".into()),
+                operator: Some("CHINA MOBILE".into()),
+                access_technology: Some("LTE".into()),
+                imsi: Some("460001234567890".into()),
+                iccid: Some("89860112345678901234".into()),
+                msisdn: None,
+                firmware: Some("EC20CEHCLGR06A05M1G".into()),
+                sms_centre: Some("+8613800100500".into()),
+                refused: vec!["AT+CNUM".into()],
+            })
+        }
+        fn send_sms(&self, _: String, _: String, _: Option<String>, _: bool) -> Result<(), PanelError> {
+            Err(PanelError::Action("这个 example 只回答体检".into()))
+        }
+        fn restart_modem(&self, _: String) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn at_command(&self, _: Option<String>, _: String, _: bool) -> Result<AtResult, PanelError> {
+            Err(PanelError::Action("这个 example 只回答体检".into()))
+        }
+        fn usb_reset(&self, _: Option<String>) -> Result<UsbResetResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn list_profiles(&self, _: Option<String>) -> Result<ProfilesResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn switch_profile(&self, _: Option<String>, _: String, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn scan_operators(&self, _: Option<String>) -> Result<ScanResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn ussd(&self, _: Option<String>, _: String) -> Result<UssdResult, PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn ussd_cancel(&self, _: Option<String>) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+        fn set_radio(&self, _: Option<String>, _: bool) -> Result<(), PanelError> { Err(PanelError::Action("这个 example 只回答体检".into())) }
+    }
+
+    let app = router_with_actions(inbox, Some(Arc::new(BenchActions)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8790").await.unwrap();
     println!("panel on http://127.0.0.1:8790  (/ 老面板, /next 新面板)");
     axum::serve(listener, app).await.unwrap();

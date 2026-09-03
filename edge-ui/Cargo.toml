@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 edge-panel-api = { path = "../edge-panel-api" }
+edge-core = { path = "../edge-core" }
 # 🔴 Pinned to the 0.7 line on purpose. thaw 0.4.8 — the newest *stable* thaw —
 # requires `leptos ^0.7.7`, and leptos itself is already at 0.8.20. The trade
 # was made deliberately: a stable component library on an older framework,

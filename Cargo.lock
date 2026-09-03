@@ -542,6 +542,7 @@ name = "edge-ui"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "edge-core",
  "edge-panel-api",
  "gloo-net 0.7.0",
  "js-sys",
