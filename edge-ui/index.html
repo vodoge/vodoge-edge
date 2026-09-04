@@ -67,38 +67,45 @@
       .vd-brand { font-weight: 650; }
       .vd-top-end { margin-left: auto; }
 
-      /* ── 三栏怎么排 ─────────────────────────────────────────────────
-         🔴 **规则要挂在 `.vd-deck-flow` 上，不能挂在 `.vd-deck` 上。**
+      /* ── 外壳：顶栏钉住，三栏各滚各的 ──────────────────────────────
+         🔴 **规则挂在 `content_class` 上，不能挂在 `class` 上。**
 
-         `Layout has_sider=true` 并不把自己变成 flex 容器：它把
-             display:flex; flex-wrap:nowrap; flex-direction:row; width:100%
-         写成**行内样式**，写在内层滚动节点 `.thaw-scrollbar__content` 上。
-         外层那个带 `.vd-deck` 的 div 是 `display:block`。于是挂在 `.vd-deck`
-         上的 `gap` 和 `flex-direction` **一条都不生效**，而且不报错——最早
-         那版 900px 断点就是这么写的，屏幕上的后果是中栏被压成 0 宽、
-         短信/eSIM/控制台三个标签整个跑到视口外面被裁掉，点不到。
+         `Layout` 的 `class` 落到外层一个 `display:block` 的 div；真正能排布
+         的是内层滚动节点 `.thaw-scrollbar__content`，`content_class` 才够得到
+         它。挂错了不报错、不警告，只是**安静地不生效**——2026-09-04 就是这么
+         让三个标签跑到视口外面去的。`shell.rs` 的 `layout_wiring` 守着这条。
 
-         `content_class` 是 Thaw 给的正经出口，正好落在那个滚动节点上。
-
-         ⚠️ 两条随之而来的规矩：
-           ① 改方向必须 `!important` —— 行内样式否则赢不了。
-           ② 选择器必须比**单个类**更重（这里用 `.vd-deck-flow > .x`）。
-              Thaw 的样式是运行时 `mount_style` 追加到 `<head>` 末尾的，
-              排在这张表**后面**；同为 (0,1,0) 时后来者胜。`.thaw-layout-sider`
-              自带 `min-width: 240px`，`.vd-rail { min-width: … }` 平局即落败，
-              媒体查询里的 `min-width: 0` 同样落败（媒体查询不加权重）。
-
-         1px 的缝隙是**分隔线**，不是留白：背景色从缝里透出来，正好画出两条
-         栏界。给它一个间距档位反而会变成一条 4px 的灰带。 */
-      .vd-deck-flow {
-        gap: 1px;
-        background: var(--colorNeutralStroke2);
+         高度这条链一环都不能断，断哪一环都会退回「整块一起滚」：
+           .vd-shell  height:100%  →  .vd-deck  flex:1 + min-height:0
+             →  .vd-rail / .vd-main / .vd-logs  height:100% + min-height:0
+         `min-height: 0` 不是可选项：flex 子项默认 `min-height:auto`，会被内容
+         撑开而不是被父级夹住，985 行日志就是这么把栏子顶到 11198px 的。 */
+      .vd-shell {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        width: 100%;
         min-height: 0;
       }
+      .vd-shell > .vd-deck {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: row;
+        /* 1px 的缝隙是**分隔线**，不是留白：背景色从缝里透出来，正好画出两条
+           栏界。给它一个间距档位反而会变成一条 4px 的灰带。 */
+        gap: 1px;
+        background: var(--colorNeutralStroke2);
+      }
       .vd-rail, .vd-logs, .vd-main { background: var(--colorNeutralBackground1); }
-      .vd-deck-flow > .vd-rail { flex: 0 0 var(--vd-rail); min-width: var(--vd-rail); }
-      .vd-deck-flow > .vd-logs { flex: 0 0 var(--vd-logs); min-width: var(--vd-logs); }
-      .vd-deck-flow > .vd-main { flex: 1 1 auto; min-width: 0; }
+
+      /* ⚠️ 选择器要比**单个类**重。Thaw 的样式是运行时 `mount_style` 追加到
+         `<head>` 末尾的，排在这张表后面；同为 (0,1,0) 时后来者胜，而
+         `.thaw-layout-sider` 自带 `min-width: 240px`。 */
+      .vd-deck > .vd-rail { flex: 0 0 var(--vd-rail); min-width: var(--vd-rail); }
+      .vd-deck > .vd-logs { flex: 0 0 var(--vd-logs); min-width: var(--vd-logs); }
+      .vd-deck > .vd-main { flex: 1 1 auto; min-width: 0; }
+      .vd-deck > * { height: 100%; min-height: 0; }
 
       /* 一栏（或栏里的一块）：头不动，身子滚。头上是标题、新鲜度和这一栏的
          动作按钮——滚走了就要人先滚回去才能按。 */
@@ -184,13 +191,15 @@
       }
 
       /* 900px 以下三栏读不了，摊成一列——诚实地承认屏幕不够，好过硬挤。
-         `!important` 和 `.vd-deck-flow >` 都不是风格问题，理由见上面那段。 */
+         摊开之后不再各滚各的，整页一个滚动条才是窄屏上对的行为。 */
       @media (max-width: 900px) {
-        .vd-deck-flow { flex-direction: column !important; }
-        .vd-deck-flow > .vd-rail, .vd-deck-flow > .vd-logs {
+        .vd-shell { height: auto; min-height: 100%; }
+        .vd-shell > .vd-deck { flex-direction: column; }
+        .vd-deck > .vd-rail, .vd-deck > .vd-logs {
           flex: 0 0 auto; min-width: 0;
         }
-        .vd-deck-flow > .vd-main { min-height: 60vh; }
+        .vd-deck > * { height: auto; }
+        .vd-deck > .vd-main { min-height: 60vh; }
       }
     </style>
   </head>

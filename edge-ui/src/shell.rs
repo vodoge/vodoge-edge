@@ -168,44 +168,23 @@ mod tests {
 
 /// 布局接线的守卫：规则挂错元素**不会报错，只是不生效**。
 ///
-/// 🔴 这一组测试守的是一个已经发生过的坑。`Layout has_sider=true` 不把自己变成
-/// flex 容器——它把 `display:flex; flex-direction:row` 写成**行内样式**，写在内层
-/// 的 `.thaw-scrollbar__content` 上；`class=` 落到的外层 div 是 `display:block`。
-/// 于是三栏规则挂在 `.vd-deck` 上时，`gap` 和 `flex-direction` 一条都不生效，
-/// 编译过、运行不报错、控制台干净，只有在 900px 以下才看得出后果：中栏被压成
-/// 0 宽，短信 / eSIM / 控制台三个标签整个跑到视口外面被裁掉，点不到。
+/// 🔴 这一组守的是两个已经发生过的坑。
 ///
-/// 而且当时我用 `documentElement.scrollWidth > clientWidth` 验的「没有横向溢出」
-/// ——那个判断是**假绿**：溢出被祖先裁掉了，所以文档本身确实不滚动。
+/// **坑一：挂错元素。** `Layout` 的 `class` 落到外层一个 `display:block` 的
+/// div，真正能排布的是内层滚动节点，只有 `content_class` 够得到。挂错了编译
+/// 过、运行不报错、控制台干净——2026-09-04 因此让三个标签跑到了视口外面。
+///
+/// **坑二：高度链断掉。** `LayoutSider` 自带 `Scrollbar`，独立滚动的机器一直
+/// 都在；缺的是高度约束。链上任何一环断掉，栏子就会跟着内容长（实测 985 行
+/// 日志把它顶到 11198px），三栏退回**共用一个滚动条**——翻日志就把顶栏、模组
+/// 列表、标签栏一起翻走，只剩「关射频」那三个按钮孤零零留在屏幕上。
+///
+/// ⚠️ 这两条都不会有任何报错。测试是唯一会喊的人。
 #[cfg(test)]
 mod layout_wiring {
     /// 布局规则的两半：一半在 CSS 里，一半是 Leptos 传下去的 prop。
     const INDEX: &str = include_str!("../index.html");
     const LIB: &str = include_str!("lib.rs");
-
-    /// 在 `display:block` 的元素上写了也白写的属性。
-    const INERT_ON_BLOCK: &[&str] = &[
-        "flex-direction",
-        "flex-wrap",
-        "gap:",
-        "align-items",
-        "justify-content",
-    ];
-
-    /// 两边的名字必须对得上：CSS 里的选择器，就是 `content_class` 传下去的那个。
-    #[test]
-    fn the_deck_rules_target_the_class_the_shell_actually_passes() {
-        let name = LIB
-            .split("content_class=\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("没给 Layout 传 content_class —— 三栏规则会挂到外层那个 display:block 的 div 上，全部失效");
-
-        assert!(
-            INDEX.contains(&format!(".{name} {{")) && INDEX.contains(&format!(".{name} >")),
-            "index.html 里找不到 .{name} 的规则：名字只改了一半"
-        );
-    }
 
     /// 去掉 CSS 注释。注释里出现的花括号和选择器会毒化下面的切分。
     fn strip_comments(css: &str) -> String {
@@ -227,10 +206,9 @@ mod layout_wiring {
 
     /// 把 CSS 摊成 (选择器, 这一段声明)。
     ///
-    /// ⚠️ 不能用「按 `}` 切一刀」那种写法。`@media` 是**嵌套**的：规则写在断点
-    /// 里面时，那种切法会把它整段算进 `@media` 的 body，于是选择器变成
-    /// `@media (…)` 而不是 `.vd-deck`——而历史上出问题的那一处**正好就在断点
-    /// 里面**。第一版守卫就是这么写的，变异测试当场漏掉了它。
+    /// ⚠️ 不能用「按 `}` 切一刀」那种写法。`@media` 是**嵌套**的，那种切法会把
+    /// 内层规则算进 `@media` 的 body，选择器变成 `@media (…)`——而历史上出问题
+    /// 的那一处正好就在断点里面。第一版守卫就是这么写的，变异测试当场漏掉了它。
     fn declarations_by_selector(css: &str) -> Vec<(String, String)> {
         let css = strip_comments(css);
         let mut out = Vec::new();
@@ -253,43 +231,93 @@ mod layout_wiring {
         out
     }
 
-    /// 排布属性不许挂回外层那个 `.vd-deck`——挂上去是死的。
+    /// 剥掉 Rust 的行注释再判。
+    ///
+    /// ⚠️ 第一版忘了这一步，结果被**它自己要守的那条注释**绊倒：`lib.rs` 里
+    /// 写着「这里故意不用 `Layout has_sider=true`」，守卫扫原文就当成了违规。
+    /// 和上面 CSS 那个 `strip_comments` 是同一个教训——**扫源码的守卫必须先
+    /// 把注释摘干净**，否则它守的是文字，不是代码。
+    fn code_only(rust: &str) -> String {
+        rust.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 顶层（非 `@media` 内）某个选择器的全部声明拼在一起。
+    fn top_level(selector: &str) -> String {
+        let css = strip_comments(INDEX);
+        let cut = css.find("@media (max-width: 900px)").unwrap_or(css.len());
+        declarations_by_selector(&css[..cut])
+            .into_iter()
+            .filter(|(sel, _)| sel.split(',').map(str::trim).any(|s| s == selector))
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// 两边的名字必须对得上：CSS 里的选择器，就是 `content_class` 传下去的那个。
     #[test]
-    fn no_layout_property_hangs_on_the_block_level_deck() {
-        for (selector, body) in declarations_by_selector(INDEX) {
-            let targets_outer = selector
-                .split(',')
-                .map(str::trim)
-                .any(|s| s == ".vd-deck" || s.starts_with(".vd-deck "));
-            if !targets_outer {
-                continue;
-            }
-            for prop in INERT_ON_BLOCK {
-                assert!(
-                    !body.contains(prop),
-                    "`{prop}` 挂在了 .vd-deck 上（选择器 `{selector}`）。那个元素是 \
-                     display:block，这条规则不生效也不报错 —— 挂到 content_class 那一层去"
-                );
-            }
+    fn the_shell_rules_target_the_class_the_layout_actually_passes() {
+        let name = LIB
+            .split("content_class=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("没给 Layout 传 content_class —— 布局规则会挂到外层那个 display:block 的 div 上，全部失效");
+
+        assert!(
+            INDEX.contains(&format!(".{name} {{")),
+            "index.html 里找不到 .{name} 的规则：名字只改了一半"
+        );
+    }
+
+    /// 🔴 高度链一环都不能断，断了就退回「三栏共用一个滚动条」。
+    #[test]
+    fn the_height_chain_that_makes_each_column_scroll_alone_is_unbroken() {
+        let shell = top_level(".vd-shell");
+        for need in ["height: 100%", "flex-direction: column"] {
+            assert!(
+                shell.contains(need),
+                "`.vd-shell` 少了 `{need}` —— 外壳撑不住高度，三栏会跟着内容长"
+            );
+        }
+
+        let deck = top_level(".vd-shell > .vd-deck");
+        for need in ["flex: 1 1 auto", "min-height: 0"] {
+            assert!(
+                deck.contains(need),
+                "`.vd-shell > .vd-deck` 少了 `{need}` —— flex 子项默认 min-height:auto，\
+                 会被 985 行日志顶开而不是被父级夹住"
+            );
+        }
+
+        let cols = top_level(".vd-deck > *");
+        for need in ["height: 100%", "min-height: 0"] {
+            assert!(
+                cols.contains(need),
+                "`.vd-deck > *` 少了 `{need}` —— 栏子拿不到高度，\
+                 `LayoutSider` 自带的 Scrollbar 就永远不出现"
+            );
         }
     }
 
-    /// 换方向必须 `!important`：行内样式否则赢不了。
+    /// 🔴 deck 必须是普通 div，不能换回 `Layout has_sider=true`。
+    ///
+    /// 那个组件把 `flex-direction: row` 写成**行内样式**（要 `!important` 才掰得
+    /// 动），还在外壳和三栏之间多插一层滚动容器——正是那一层让三栏变成一起滚。
     #[test]
-    fn the_stacked_layout_can_outrank_the_inline_style() {
-        let mq = INDEX
-            .split("@media (max-width: 900px)")
-            .nth(1)
-            .expect("900px 断点没了——窄屏会一直挤成三栏");
-        let rule = mq
-            .split_once("flex-direction")
-            .expect("断点里没有改方向：摊成一列全靠这一条")
-            .1;
-        let decl = rule.split(';').next().unwrap_or_default();
+    fn the_deck_is_a_plain_div_not_a_sider_layout() {
         assert!(
-            decl.contains("!important"),
-            "改方向没写 !important —— `has_sider` 的行内 `flex-direction: row` 会赢，\
-             窄屏还是三栏，中栏被压成 0 宽"
+            LIB.contains(r#"<div class="vd-deck">"#),
+            "deck 不再是普通 div —— 换回 Layout has_sider 会重新引入行内 flex 样式和多余的滚动层"
+        );
+        assert!(
+            !code_only(LIB).contains("has_sider"),
+            "又出现了 has_sider：它的行内样式要 `!important` 才压得住，\
+             而且会在外壳和三栏之间多插一层滚动容器，三栏就不再各滚各的了"
         );
     }
 }

@@ -169,7 +169,11 @@ pub fn Panel() -> impl IntoView {
 
     view! {
         <ConfigProvider>
-            <Layout position=LayoutPosition::Absolute>
+            // ⚠️ 布局规则挂在 `content_class` 上，不是 `class` 上。`Layout` 的
+            // `class` 落到外层那个 `display:block` 的 div，flex 属性挂上去是
+            // 死的——2026-09-04 因为这个，窄屏下三个标签跑到了视口外面。
+            // `shell.rs` 的 `layout_wiring` 守着这件事。
+            <Layout position=LayoutPosition::Absolute content_class="vd-shell">
                 // ── 顶栏 ───────────────────────────────────────────────────
                 // 全局的三样：这是什么、连没连上云端、数据多新。⚠️ 新鲜度必须
                 // 在**任何**一栏之上，它说的是整块屏幕的年龄。
@@ -185,7 +189,21 @@ pub fn Panel() -> impl IntoView {
                 // 内层滚动节点上，`class` 落到的外层 div 是 display:block。
                 // 三栏的排布规则必须挂到 `vd-deck-flow` 上才有效——
                 // 改名要两边一起改，`shell.rs` 里有一条测试守着这件事。
-                <Layout has_sider=true class="vd-deck" content_class="vd-deck-flow">
+                // 🔴 这里**故意不用** `Layout has_sider=true`。
+                //
+                // 它有两个毛病：① 把 flex 写成行内样式塞在内层滚动节点上，
+                // 外面只能靠 `!important` 掰；② 在外壳和三栏之间多插一层
+                // 滚动容器——而我要的恰恰是**三栏各滚各的**，中间那层一插，
+                // 就变成了整块一起滚。
+                //
+                // 一起滚的后果实测过：翻日志翻到 1200px，顶栏、模组列表、
+                // 标签栏全部滚出屏幕，中栏是一片空白，而危险区那三个按钮
+                // 还留在原地——「关射频」按钮孤零零挂在那儿，唯一能说明
+                // 它对准哪一根的模组列表已经不在屏幕上了。
+                //
+                // `LayoutSider` 自带 `Scrollbar`，所以只要把高度约束接上，
+                // 三栏就各自独立滚动。这里只需要一个普通 flex 行。
+                <div class="vd-deck">
                     // ── 左栏：有哪几根 ─────────────────────────────────────
                     // 选中哪一根是这块面板唯一的全局上下文：中栏每一个操作都
                     // 瞄准它。所以它常驻，不做成标签。
@@ -263,7 +281,7 @@ pub fn Panel() -> impl IntoView {
                             <LogsPage state=logs />
                         </Pane>
                     </LayoutSider>
-                </Layout>
+                </div>
             </Layout>
         </ConfigProvider>
     }
