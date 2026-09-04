@@ -353,6 +353,20 @@ fn Row(
     let adoptable = can_adopt(&c, &managed);
     let imei = c.imei.clone().unwrap_or_default();
     let detail = c.detail.clone();
+    // 🔴 行标识用 USB 路径，不用控制口。
+    //
+    // 2026-09-04 对着生产 /api/status 核过：`control_port` 在这个机队里**不唯一**
+    // ——`/dev/cdc-wdm0` 同时属于 `qmi:usb:1-1.2`（IMEI …9705）和
+    // `qmi:usb:1-1.3.1`（IMEI …2811）两个候选。拿它当行标识，屏幕上就是两行
+    // 一模一样的东西，而操作员正要在其中一行上按「认领」或「纳管」。
+    //
+    // `usb_device`（1-1.2 / 1-1.3.1）才是区分它们的东西，也正是运维推理「哪一根
+    // 插在哪」时用的东西。原版显示的就是它（`d.usb_device || candidateKey(d)`），
+    // 搬迁时我错换成了控制口。控制口仍然画出来，只是降为次要信息。
+    let identity = c
+        .usb_device
+        .clone()
+        .unwrap_or_else(|| c.candidate_key.clone());
     let port = c.control_port.clone();
     let hw = hardware(&c);
 
@@ -378,7 +392,12 @@ fn Row(
     view! {
         <TableRow>
             <TableCell>
-                <Caption1>{port}</Caption1>
+                <div>
+                    <Caption1Strong>{identity}</Caption1Strong>
+                </div>
+                <div>
+                    <Caption1>{port}</Caption1>
+                </div>
             </TableCell>
             <TableCell>
                 <Caption1>{transport_label(&c.transport).to_string()}</Caption1>
@@ -551,6 +570,50 @@ mod tests {
         let note = requested_note(&receipt);
         assert!(!note.contains("· ·"), "{note}");
         assert!(!note.trim_end().ends_with('、'), "{note}");
+    }
+
+    /// 🔴 生产机队里 `control_port` **不唯一**，`usb_device` 才区分得开。
+    ///
+    /// 2026-09-04 从真实 `/api/status` 抓下来的四个候选里，`/dev/cdc-wdm0`
+    /// 同时属于 `qmi:usb:1-1.2`（IMEI …9705）和 `qmi:usb:1-1.3.1`
+    /// （IMEI …2811）。拿控制口当行标识，屏幕上就是两行一模一样的东西，
+    /// 而操作员正要在其中一行上按「认领」或「纳管」。
+    ///
+    /// 这个函数是那一列实际用的表达式，抽出来是为了能对着真实形状测。
+    fn row_identity(c: &DiscoveryBody) -> String {
+        c.usb_device
+            .clone()
+            .unwrap_or_else(|| c.candidate_key.clone())
+    }
+
+    #[test]
+    fn two_candidates_sharing_a_control_port_are_still_told_apart() {
+        // 真实数据里这两个候选共用 /dev/cdc-wdm0。
+        let mut a = candidate();
+        a.candidate_key = "qmi:usb:1-1.2".into();
+        a.usb_device = Some("1-1.2".into());
+        a.control_port = "/dev/cdc-wdm0".into();
+
+        let mut b = candidate();
+        b.candidate_key = "qmi:usb:1-1.3.1".into();
+        b.usb_device = Some("1-1.3.1".into());
+        b.control_port = "/dev/cdc-wdm0".into();
+
+        assert_eq!(a.control_port, b.control_port, "前提：生产里它们确实同口");
+        assert_ne!(
+            row_identity(&a),
+            row_identity(&b),
+            "同一个控制口上的两个候选在屏幕上必须分得开"
+        );
+    }
+
+    /// `usb_device` 缺失时落回 candidate_key —— 那个一定唯一，因为它就是键。
+    #[test]
+    fn a_candidate_without_a_usb_path_falls_back_to_something_unique() {
+        let mut c = candidate();
+        c.usb_device = None;
+        assert_eq!(row_identity(&c), c.candidate_key);
+        assert!(!row_identity(&c).is_empty());
     }
 
     /// 三种接口类型精确认领，见到没见过的原样显示——不瞎编。

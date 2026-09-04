@@ -132,6 +132,39 @@ fn state_key(raw: &str) -> String {
         .collect()
 }
 
+/// 状态字符串的中文标签。
+///
+/// 🔴 **见过的值才给标签，没见过的原样显示。** 这条规则不是洁癖：原版曾经给
+/// 十四种「发现状态」和一个叫 `mbim` 的传输方式编过标签，而 agent 只写五种
+/// 状态三种传输——多出来的那些永远不会出现，真正会出现的 `serial` 反而漏了。
+/// 一个永远不出现的标签和一个漏掉的标签，从屏幕上看是一样的。
+///
+/// agent 与面板一共会写这些（2026-09-04 对着生产 /api/status 核过）：
+///
+/// | 值 | 谁写的 | 意思 |
+/// |---|---|---|
+/// | `Offline` | 面板合成（`modem_body`）| 超过 `STALE_AFTER_MS` 没答话 |
+/// | `Busy` | 面板合成（`modem_body`）| 正在扫网等，**故意**不答轮询 |
+/// | `registered` / `searching` / `denied` | agent，来自 `Registration` | 注册状态 |
+/// | `online` | agent 的 AT-only 探测路径 | 它答话了——⚠️ **不等于可管理** |
+///
+/// ⚠️ `online` 的措辞要小心。`edge-bin` 那里的注释写得很清楚：这个值的意思是
+/// 「模组答话了」，而那条路径同时把 `manageable` 设成 false（每一个结构化操作
+/// 都走 QMI，AT-only 的模组做不了）。所以标签是「在线（仅 AT）」而不是光写
+/// 「在线」——后者会让人以为它和其它三根一样能用。
+fn state_label(raw: &str) -> String {
+    match state_key(raw).as_str() {
+        "registered" => "已注册".into(),
+        "searching" => "搜网中".into(),
+        "denied" => "被拒绝".into(),
+        "offline" => "离线".into(),
+        "busy" => "忙".into(),
+        "online" => "在线（仅 AT）".into(),
+        // 没见过的原样端出去。编一个标签比显示原文更坏。
+        _ => raw.to_string(),
+    }
+}
+
 fn state_tone(raw: &str) -> BadgeColor {
     match state_key(raw).as_str() {
         "registered" | "home" => BadgeColor::Success,
@@ -169,7 +202,7 @@ fn ModemRow(modem: ModemBody, state: StatusState) -> impl IntoView {
             </TableCell>
             <TableCell>{modem.family.clone()}</TableCell>
             <TableCell>
-                <Badge color=state_tone(&modem.state)>{modem.state.clone()}</Badge>
+                <Badge color=state_tone(&modem.state)>{state_label(&modem.state)}</Badge>
             </TableCell>
             <TableCell>{modem.network.clone().unwrap_or_else(|| "—".into())}</TableCell>
             <TableCell>{modem.iccid.clone().unwrap_or_else(|| "—".into())}</TableCell>
@@ -271,4 +304,61 @@ pub async fn poll(state: StatusState) {
     }
     state.load.set(result);
     state.in_flight.set(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 🔴 这些值不是编出来的，是 2026-09-04 从生产 `/api/status` 抓下来的。
+    ///
+    /// 开发全程用 `edge-panel/examples/serve.rs` 的造数据，那份数据里 state
+    /// 只有 `Offline` 和 `searching` 两种。真实机队还写 `registered` 和
+    /// `online`，而 `online` 恰恰是最容易被误读的那一个。
+    #[test]
+    fn every_state_the_fleet_actually_writes_has_a_chinese_label() {
+        for (raw, want) in [
+            ("Offline", "离线"),
+            ("Busy", "忙"),
+            ("registered", "已注册"),
+            ("searching", "搜网中"),
+            ("denied", "被拒绝"),
+        ] {
+            assert_eq!(state_label(raw), want, "{raw} 没有中文标签");
+        }
+    }
+
+    /// ⚠️ `online` 的意思是「模组答话了」，**不是**「可以用」。
+    ///
+    /// 写这个值的是 `edge-bin` 的 AT-only 探测路径，那条路径同时把
+    /// `manageable` 设成 false —— 每一个结构化操作都走 QMI，AT-only 的模组
+    /// 做不了。标签必须把这件事说出来，否则屏幕上它和另外三根一样是「在线」。
+    #[test]
+    fn online_says_it_is_at_only_rather_than_just_online() {
+        let label = state_label("online");
+        assert!(label.contains("在线"), "{label}");
+        assert!(
+            label.contains("AT"),
+            "「在线」单独出现会让人以为这一根和别的一样能用：{label}"
+        );
+    }
+
+    /// 没见过的值原样端出去。编一个标签比显示原文更坏 —— 原版就是这么把
+    /// 十四种不存在的状态和一个不存在的传输方式画上屏幕的。
+    #[test]
+    fn a_state_nobody_writes_is_shown_as_the_agent_spelled_it() {
+        assert_eq!(state_label("brand-new-thing"), "brand-new-thing");
+        assert_eq!(state_label(""), "");
+    }
+
+    /// 大小写两套拼写都要认：store 写小写，面板自己合成的是大写。
+    #[test]
+    fn both_spellings_of_the_same_state_get_the_same_label() {
+        assert_eq!(state_label("Offline"), state_label("offline"));
+        assert_eq!(state_label("REGISTERED"), state_label("registered"));
+        // `BadgeColor` 没有 `PartialEq`/`Debug`，所以比的是归一化后的键 ——
+        // `state_tone` 本来就只看这个键。
+        assert_eq!(state_key("Offline"), state_key("offline"));
+        assert_eq!(state_key("REGISTERED"), state_key("registered"));
+    }
 }
