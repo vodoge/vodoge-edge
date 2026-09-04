@@ -12,8 +12,9 @@ use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
     AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, LogsBody, MessageBody, MessagesBody,
-    ModemBody, PanelMode, RadioBody, RegistrationBody, RescanReceipt, ResetBody, RestartBody,
-    SendBody, SendReceipt, StatusBody, SwitchBody, UssdBody,
+    ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody, RescanReceipt, ResetBody,
+    RestartBody, RestartReceipt, SendBody, SendReceipt, StatusBody, SwitchBody, SwitchReceipt,
+    UssdBody, UssdCancelReceipt,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -630,8 +631,12 @@ async fn set_radio(State(state): State<Arc<PanelState>>, Json(body): Json<RadioB
             "local radio control is not configured",
         );
     };
+    // ⚠️ `imei` 要留一份给回执：`set_radio` 把它吃掉了，而回执的用处正是让
+    // 操作员认出「刚才被脱网的是这一根」——见 `RadioReceipt` 上关于不点名的
+    // 那条 🔴。
+    let imei = body.imei.clone();
     match actions.set_radio(body.imei, body.online) {
-        Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Ok(()) => Json(RadioReceipt::accepted(imei, body.online)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -661,8 +666,9 @@ async fn ussd_cancel(
     let Some(actions) = state.actions.as_ref() else {
         return json_error(StatusCode::NOT_IMPLEMENTED, "local USSD is not configured");
     };
+    let imei = body.imei.clone();
     match actions.ussd_cancel(body.imei) {
-        Ok(()) => Json(serde_json::json!({ "status": "cancelled" })).into_response(),
+        Ok(()) => Json(UssdCancelReceipt::cancelled(imei)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -715,8 +721,14 @@ async fn switch_profile(
     if body.iccid.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "iccid is required");
     }
+    // 🔴 回执带的是**请求的那三件事**（哪根、哪条 ICCID、往哪个方向），不是
+    // 卡上现在的状态：这条端点不回读，`SwitchReceipt` 上记着它为什么不许假装
+    // 自己知道。所以这里先留一份给回执，而不是从 `Actions` 的返回值里取——
+    // 那个返回值是 `()`，本来就什么都不说。
+    let imei = body.imei.clone();
+    let iccid = body.iccid.clone();
     match actions.switch_profile(body.imei, body.iccid, body.enable) {
-        Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Ok(()) => Json(SwitchReceipt::accepted(imei, iccid, body.enable)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }
@@ -762,8 +774,13 @@ async fn restart_modem(
     if body.imei.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "imei is required");
     }
+    // ⚠️ 回执里回的是**实际交给 `restart_modem` 的那个字符串**，不是上面那个
+    // 用来查空的 `trim()` 结果。上面只判断「是不是全是空白」，传下去的一直是
+    // 原样的 `body.imei`；回执要是回一个规整过的漂亮版本，操作员看到的就不是
+    // 真正打到硬件上的那个值了。
+    let imei = body.imei.clone();
     match actions.restart_modem(body.imei) {
-        Ok(()) => Json(serde_json::json!({ "status": "restarted" })).into_response(),
+        Ok(()) => Json(RestartReceipt::restarted(imei)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

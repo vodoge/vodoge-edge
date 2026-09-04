@@ -432,3 +432,310 @@ impl SendReceipt {
         }
     }
 }
+
+/* ── 「会写」端点的回执 ──────────────────────────────────────────────
+ *
+ * `/api/radio`、`/api/ussd/cancel`、`/api/esim/switch`、`/api/restart` 四条。
+ * 它们的 `Actions` 方法全都返回 `Result<(), PanelError>` —— 实现只回答「这次
+ * 调用有没有抛错」，再没有别的了。于是服务端一直用 `serde_json::json!` 现拼一个
+ * `{"status": ...}`，那个字段在任何类型里都不存在，和 `ClaimReceipt` /
+ * `RescanReceipt` / `SendReceipt` 补上之前是同一个洞。
+ *
+ * 🔴 **这四条的共同事实：`Ok` 只说明命令被接受了，不说明硬件到位了。**
+ * 所以回执里没有一个字段声称硬件的当前状态。它们带的是「这次请求点的是谁、
+ * 要求往哪个方向走」——够操作员把回执和自己刚按的那个按钮对上，仅此而已。
+ * 想知道现在到底怎么样，得去读别的端点，能读的地方写在各自的类型上。
+ *
+ * ⚠️ `status` 一律保留原来那个字面量，但**理由不是前端**。
+ *
+ * 这里原先写的是「浏览器读的就是这个字段，换掉前端会安静地变空」——
+ * 那是错的，我核过：`grep '\"status\"' edge-ui/src/` **零命中**。四个调用点
+ * 收的是 `Load<serde_json::Value>`，只 match `Ready(_)` / `Failed(why)`，
+ * 整个 body 都丢掉；`esim.rs` 甚至自己硬写 `claim = \"ok\"`。
+ *
+ * 保留它的真理由是**线格式向后兼容**：这几条端点是拿 `curl` 直接打得到的，
+ * 而模组卡死的时候手上常常只剩 `curl`。删掉一个外部消费者可能在读的字段，
+ * 属于悄悄改契约。`receipt_tests` 里每个类型钉一条，守的是这件事。
+ */
+
+/// 面板发出一次 profile 切换之后，等多久才去回读卡片。
+///
+/// 🔴 这个数字不是超时，是**等 eUICC 走完 REFRESH**。`set_profile` 请求了
+/// REFRESH，卡要重新初始化，期间 ISD-R 通道是关着的，读得更早读到的是切换
+/// 还没走完的那个状态。改版之前的面板等的也是 8 秒。
+///
+/// ⚠️ 借来的数，不是量出来的：这台机器上没有人计过一次 REFRESH 要多久
+/// （`edge-bin` 里 `ESIM_READBACK_ATTEMPTS` 的注释记的是同一件事）。放在这里
+/// 而不是各写各的，是为了将来量出真数时只有一处要改。
+pub const ESIM_SETTLE_MS: u64 = 8_000;
+
+/// `POST /api/radio` 的应答。
+///
+/// 🔴 `status` 恒为 `"ok"`，意思是**那一次 QMI 工作模式设置返回了成功**，
+/// 不是模组已经到了那个状态。关射频之后模组立刻脱网；开射频之后它要重新搜网
+/// 注册，几十秒内 `/api/status` 上它仍然是 `Offline` —— 那不是失败，是还没到
+/// 时候。回执里因此没有任何一个字段说「射频现在是开的」。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RadioReceipt {
+    /// 恒为 `"ok"`。见上面为什么这不等于射频到位。
+    pub status: String,
+    /// 请求点名的模组。
+    ///
+    /// 🔴 `None` 不是「所有模组」，是「**没点名**」：代理这时取的是它 modem map
+    /// 里的第一条，而面板不知道那是哪一根。这批硬件没有人能物理接触，把一次
+    /// 脱网操作记到错的模组头上，是要人去救错模组的 —— 所以这里原样回
+    /// `None`，而不是编一个 IMEI 出来。
+    pub imei: Option<String>,
+    /// 请求的方向：`true` 要求 Online，`false` 要求 LowPower。
+    ///
+    /// ⚠️ 名字里的 `requested_` 是故意的。叫 `online` 的字段会被读成「射频现在
+    /// 是开的」，而这个端点从不回读，它只知道自己被要求做什么。
+    pub requested_online: bool,
+}
+
+impl RadioReceipt {
+    pub fn accepted(imei: Option<String>, online: bool) -> Self {
+        Self {
+            status: "ok".into(),
+            imei,
+            requested_online: online,
+        }
+    }
+}
+
+/// `POST /api/ussd/cancel` 的应答。
+///
+/// 🔴 `status` 恒为 `"cancelled"`，意思是**取消命令被端口接受了**，不是网络那
+/// 边的会话确实结束了。
+///
+/// 🔴 这四条回执里只有它给不出回读路径：面板没有任何端点能回答「这根模组上
+/// 现在还有没有开着的 USSD 会话」。给不出就不给 —— 编一个 `confirmed: true`
+/// 出来，正是浏览器那半边刚刚修掉的毛病（原版 `.catch(() => {})` 吞掉失败，
+/// 不管端点回什么都画「已取消」）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UssdCancelReceipt {
+    /// 恒为 `"cancelled"`。
+    pub status: String,
+    /// 请求点名的模组；`None` 的含义同 [`RadioReceipt::imei`]。
+    pub imei: Option<String>,
+}
+
+impl UssdCancelReceipt {
+    pub fn cancelled(imei: Option<String>) -> Self {
+        Self {
+            status: "cancelled".into(),
+            imei,
+        }
+    }
+}
+
+/// `POST /api/restart` 的应答。
+///
+/// 🔴 `status` 恒为 `"restarted"`，意思是**重启命令返回了**，不是模组已经回来。
+/// 模组会从总线上消失再回来，这期间它在 `/api/status` 上是 `Offline`。
+///
+/// ⚠️ `imei` 回的是**真正交给 `Actions::restart_modem` 的那个字符串**，不是
+/// 规整过的漂亮版本。回执的用处是让操作员认出「被重启的是这一根」，那就必须
+/// 是实际打过去的那个值。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RestartReceipt {
+    /// 恒为 `"restarted"`。
+    pub status: String,
+    /// 被重启的模组。这条端点要求指名，所以不是 `Option`。
+    pub imei: String,
+}
+
+impl RestartReceipt {
+    pub fn restarted(imei: String) -> Self {
+        Self {
+            status: "restarted".into(),
+            imei,
+        }
+    }
+}
+
+/// `POST /api/esim/switch` 的应答。
+///
+/// 🔴 **这条端点的 ok 是这块面板明文规定不采信的那一个。** eSIM 那一栏的注释
+/// 记着理由：它在一次**没发生**的切换上回过 ok，也在一次**发生了**的切换上回过
+/// error。所以这个回执被设计成**说不出**「切换成功了」这句话 —— 它里面没有任何
+/// 一个字段描述卡片当前的状态，只有 [`Self::seen`] 那个洞，和把它填上要走的路。
+///
+/// 面板的判决逻辑分成「端点声称了什么」和「卡说了什么」两件事（见 `edge-ui`
+/// 的 `Receipt.claim` / `Receipt.seen`）。合成一个字段就等于让端点替卡说话，
+/// 所以这里的字段名和那边对齐，让两边说的是同一种话。
+///
+/// ⚠️ 面板这条路和云端那条路不一样：`edge-bin` 走云端下发的切换会在之后回读
+/// 芯片（`esim_inventory_after_switch`），面板这条**完全没有回读**。所以是
+/// 浏览器/`curl` 那一端必须自己去读，而不是可以偷懒。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SwitchReceipt {
+    /// 恒为 `"ok"`。🔴 只表示那一次 QMI `set_profile` 返回了成功。
+    pub status: String,
+    /// 请求点名的模组；`None` 的含义同 [`RadioReceipt::imei`]。
+    pub imei: Option<String>,
+    /// 被操作的 profile。切换要求指名 ICCID，所以这一条一定有。
+    ///
+    /// 没有它，一个回执对不上任何东西：操作员手上可能有好几次切换在飞，而
+    /// 回读到的列表是按 ICCID 找行的。
+    pub iccid: String,
+    /// 请求的方向：`true` 要求启用，`false` 要求停用。
+    ///
+    /// ⚠️ 和 [`RadioReceipt::requested_online`] 同一个理由带 `requested_` 前缀。
+    /// 回读出来的状态要和它比，比出来的才是判决。
+    pub requested_enable: bool,
+    /// 卡上回读到的启用状态。
+    ///
+    /// 🔴 **恒为 `None`**，因为这个端点不回读。留成 `Option` 而不是干脆不放这
+    /// 个字段，是因为「不知道」是这里唯一诚实的答案，而它需要在线上有个形状 ——
+    /// 将来服务端真的回读了，这里变成 `Some`，线格式不用动。
+    pub seen: Option<bool>,
+    /// 去哪个端点回读。
+    ///
+    /// 写在回执里而不是只写在浏览器代码里：模组卡死的时候手上常常只剩
+    /// `curl`，那时候这条回执自己得说清下一步。
+    ///
+    /// ⚠️ **它是 `POST`，而且要带 body。** 这条最早只写了路径，而
+    /// `/api/esim` 注册的是 `post(list_profiles)`、handler 要一个反序列化成
+    /// `ResetBody` 的 body —— 照字面 `curl http://host:8743/api/esim` 是
+    /// `GET`，回 405。一条「下一步」指令在它专门为之而写的那种紧急情况下
+    /// 第一次就失败，比不写更坏。完整的下一步是：
+    ///
+    /// ```text
+    /// curl -XPOST host:8743/api/esim -H 'content-type: application/json' -d '{}'
+    /// ```
+    pub readback_with: String,
+    /// 回读之前要等多久（毫秒）。见 [`ESIM_SETTLE_MS`]。
+    pub readback_after_ms: u64,
+}
+
+impl SwitchReceipt {
+    pub fn accepted(imei: Option<String>, iccid: String, enable: bool) -> Self {
+        Self {
+            status: "ok".into(),
+            imei,
+            iccid,
+            requested_enable: enable,
+            seen: None,
+            readback_with: "/api/esim".into(),
+            readback_after_ms: ESIM_SETTLE_MS,
+        }
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn wire<T: Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).expect("回执必须能序列化")
+    }
+
+    /// 🔴 这一条守的是一次**安静的**回归：浏览器那半边收的是
+    /// `Load<serde_json::Value>`，判断成败靠读 `status`。把手拼的 `json!` 换成
+    /// 结构体的时候，只要哪个字面量写错、或者谁觉得 `status` 冗余把它删了，
+    /// 前端不会报错 —— 它会照常渲染，只是那一格永远是空的。
+    ///
+    /// ⚠️ 断言的是**字面量本身**，不是「有这个字段」。`"ok"` 和 `"cancelled"`
+    /// 和 `"restarted"` 三个词各自出现在不同端点的前端分支里，换成同一个词
+    /// 一样会让前端变空。
+    #[test]
+    fn every_receipt_still_carries_the_status_word_the_old_wire_had() {
+        assert_eq!(wire(&RadioReceipt::accepted(None, true))["status"], "ok");
+        assert_eq!(
+            wire(&UssdCancelReceipt::cancelled(None))["status"],
+            "cancelled"
+        );
+        assert_eq!(
+            wire(&RestartReceipt::restarted("867018069514820".into()))["status"],
+            "restarted"
+        );
+        assert_eq!(
+            wire(&SwitchReceipt::accepted(
+                None,
+                "89852351225042214201".into(),
+                true
+            ))["status"],
+            "ok"
+        );
+    }
+
+    /// 方向是**请求的**方向，不是回读到的状态 —— 两个方向都钉住，免得
+    /// 构造函数把入参丢了还能靠默认值蒙对一半。
+    #[test]
+    fn a_radio_receipt_repeats_which_way_it_was_asked_to_go() {
+        let off = RadioReceipt::accepted(Some("867018069514820".into()), false);
+        assert!(!off.requested_online);
+        assert_eq!(off.imei.as_deref(), Some("867018069514820"));
+        assert!(RadioReceipt::accepted(None, true).requested_online);
+    }
+
+    /// 🔴 不点名不是「所有模组」，是「不知道是哪一根」。回执必须把这件事
+    /// 原样带回去，而不是替代理编一个 IMEI —— 这批硬件没人能物理接触，
+    /// 一次记错模组的脱网操作要人去救错的那一根。
+    #[test]
+    fn an_unnamed_request_comes_back_unnamed() {
+        assert!(RadioReceipt::accepted(None, false).imei.is_none());
+        assert!(UssdCancelReceipt::cancelled(None).imei.is_none());
+        assert!(SwitchReceipt::accepted(None, "8985".into(), true)
+            .imei
+            .is_none());
+    }
+
+    /// 🔴 这一条是整块面板那条原则的类型化身：**端点说 ok 不作数。**
+    /// `seen` 是卡回读出来的状态，这个端点从不回读，所以它只能是 `None`；
+    /// 谁哪天让它变成 `Some`，必须是因为真加了回读，而不是因为顺手。
+    #[test]
+    fn a_switch_receipt_never_claims_to_know_what_the_card_did() {
+        let receipt = SwitchReceipt::accepted(
+            Some("867018069514820".into()),
+            "89852351225042214201".into(),
+            true,
+        );
+        assert_eq!(receipt.seen, None);
+        // 线上也得是 null，不能被 `skip_serializing_if` 之类的东西吞掉：
+        // 一个不存在的字段和一个 `null` 字段，在读它的人眼里不是一回事。
+        assert!(wire(&receipt).get("seen").is_some_and(|v| v.is_null()));
+    }
+
+    /// 回执自己要说得出下一步。模组卡死的时候手上常常只剩 `curl`，
+    /// 「等多久、读哪儿」写在浏览器代码里那时候是够不着的。
+    #[test]
+    fn a_switch_receipt_says_where_and_when_to_read_the_card_back() {
+        let receipt = SwitchReceipt::accepted(None, "89852351225042214201".into(), false);
+        assert_eq!(receipt.readback_with, "/api/esim");
+        assert_eq!(receipt.readback_after_ms, ESIM_SETTLE_MS);
+        assert_eq!(receipt.iccid, "89852351225042214201");
+        assert!(!receipt.requested_enable);
+        // 回读的目标必须是路由表上真有的那条读端点，不能指向自己 ——
+        // 指回 `/api/esim/switch` 就是让人再切一次。
+        assert_ne!(receipt.readback_with, "/api/esim/switch");
+    }
+
+    /// 🔴 这四个类型存在的全部意义：服务端序列化它们，浏览器**用同一个类型**
+    /// 反序列化回来。只 `Serialize` 的话，改一个字段名两端不会一起编译不过，
+    /// 而那正是这次迁移要堵的洞。
+    #[test]
+    fn every_receipt_survives_the_round_trip_the_browser_makes() {
+        let radio = RadioReceipt::accepted(Some("867018069514820".into()), false);
+        let cancel = UssdCancelReceipt::cancelled(Some("867018069514820".into()));
+        let restart = RestartReceipt::restarted("867018069514820".into());
+        let switch = SwitchReceipt::accepted(None, "89852351225042214201".into(), true);
+        assert_eq!(
+            serde_json::from_value::<RadioReceipt>(wire(&radio)).expect("radio"),
+            radio
+        );
+        assert_eq!(
+            serde_json::from_value::<UssdCancelReceipt>(wire(&cancel)).expect("cancel"),
+            cancel
+        );
+        assert_eq!(
+            serde_json::from_value::<RestartReceipt>(wire(&restart)).expect("restart"),
+            restart
+        );
+        assert_eq!(
+            serde_json::from_value::<SwitchReceipt>(wire(&switch)).expect("switch"),
+            switch
+        );
+    }
+}

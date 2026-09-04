@@ -32,7 +32,10 @@ use crate::status::StatusState;
 ///
 /// ⚠️ 改版前的面板切换之后也是等 8 秒才刷新机队。读得更早，报的是 REFRESH 还
 /// 没走完的那个状态。
-const SETTLE_MS: u64 = 8_000;
+// 🔴 等待时长用共享常量，**不留本地副本**。服务端在 `SwitchReceipt` 里
+// 告诉操作员「等这么久再回读」，而面板自己也要等同样久；两份数字一旦漂开，
+// 面板就会在卡片 REFRESH 中途回读，然后给出一个错的判决。
+use edge_panel_api::ESIM_SETTLE_MS as SETTLE_MS;
 
 fn class_label(class: Option<u8>) -> &'static str {
     match class {

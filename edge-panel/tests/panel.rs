@@ -210,9 +210,16 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 /// 所有 `edge-ui`（`/next` 那个 Leptos 面板）的源文件。⚠️ `include_str!`
 /// 是编译期常量，新增一个会调 `/api/*` 的模块却忘了加进这张表，这条测试量
 /// 到的东西不会变多——所以每加一个新页面模块，先把它加进这张表。
+/// ⚠️ **加了新模块要加进来。** 下面 `the_audit_sees_every_module_in_the_panel`
+/// 拿 `lib.rs` 的 `mod` 数量对账，漏一个就红——这份名单在 2026-09-04 的盘点里
+/// 被抓到漏了 `shell.rs`（后来又漏了 `trace.rs` 和 `copy.rs`）：**搬走了代码，
+/// 守卫就瞎了**，而它不会报错，只是安静地少扫几个文件。
 const PANEL_SOURCES: &[&str] = &[
     include_str!("../../edge-ui/src/lib.rs"),
     include_str!("../../edge-ui/src/api.rs"),
+    include_str!("../../edge-ui/src/copy.rs"),
+    include_str!("../../edge-ui/src/shell.rs"),
+    include_str!("../../edge-ui/src/trace.rs"),
     include_str!("../../edge-ui/src/status.rs"),
     include_str!("../../edge-ui/src/health.rs"),
     include_str!("../../edge-ui/src/logs.rs"),
@@ -223,6 +230,38 @@ const PANEL_SOURCES: &[&str] = &[
     include_str!("../../edge-ui/src/esim.rs"),
     include_str!("../../edge-ui/src/danger.rs"),
 ];
+
+/// 剥掉 Rust 行注释。守卫要看的是代码，不是注释里的举例。
+fn code_only(rust: &str) -> String {
+    rust.lines()
+        .map(|line| match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 🔴 审计必须覆盖 `edge-ui` 的每一个模块。
+///
+/// 这份名单靠手写维护，而它守的两件事（端点覆盖、不许硬编码 URL）**漏扫一个
+/// 文件不会报错，只会安静地少检查一些代码**。2026-09-04 的盘点抓到它漏了
+/// `shell.rs`；补的时候发现 `trace.rs`、`copy.rs` 也在外面。
+#[test]
+fn the_audit_sees_every_module_in_the_panel() {
+    let lib = include_str!("../../edge-ui/src/lib.rs");
+    let declared = code_only(lib)
+        .lines()
+        .filter(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with(';'))
+        .count();
+    assert_eq!(
+        declared,
+        PANEL_SOURCES.len() - 1,
+        "edge-ui 声明了 {declared} 个模块，PANEL_SOURCES 收了 {}（含 lib.rs 自己）\
+         —— 漏掉的那个文件里调了什么端点、有没有硬编码 URL，没有任何人在看",
+        PANEL_SOURCES.len()
+    );
+}
 
 /// 在一份 Rust 源码里找 `"/api/...` 这个形状的字符串字面量，问号之前那一段。
 /// 覆盖两种写法：`api::get("/api/x", ...)` 和 `api::get(&format!("/api/x?...`。
@@ -343,7 +382,13 @@ async fn the_panel_carries_no_external_dependency() {
 
     // 我们自己写的 Rust 源码。零容忍：这段代码从一开始就不该有硬编码的
     // 网络地址——本机地址走的是相对路径 `/api/...`，不需要拼主机名。
+    //
+    // ⚠️ **先剥注释。** 守卫要管的是代码，不是散文。`copy.rs` 的文档里正当地
+    //    引用了 `http://<lan-ip>:8743` 来解释「那不是安全上下文、所以
+    //    `navigator.clipboard` 不存在」——把这种解释判成违规，只会逼下一个人
+    //    把该写的理由删掉。这个仓库已经因为「守卫扫到了注释」踩过两次。
     for code in PANEL_SOURCES {
+        let code = code_only(code);
         assert!(
             !code.contains("http://") && !code.contains("https://"),
             "edge-ui 的 Rust 源码里出现了一处硬编码的 URL"
@@ -613,12 +658,18 @@ async fn a_modem_says_whether_the_matrix_has_heard_of_its_combination() {
     assert_eq!(body["modems"][3]["carrier_profile"], "CN-Mobile");
 }
 
+/// ⚠️ 那几条「会写」的记录里都带着 `Option<String>` 的 IMEI，是为了让回执测试
+/// 能问一个别的地方问不到的问题：**回执上写的那一根，是不是就是真正打到
+/// `Actions` 上的那一根**。只记方向的话，一个把 IMEI 弄丢或者自己编一个出来的
+/// handler 照样能让测试全绿。
 struct RecordingActions {
     sent: Mutex<Vec<(String, String)>>,
     at: Mutex<Vec<String>>,
-    switched: Mutex<Vec<(String, bool)>>,
+    switched: Mutex<Vec<(Option<String>, String, bool)>>,
     ussd: Mutex<Vec<String>>,
-    radio: Mutex<Vec<bool>>,
+    cancelled: Mutex<Vec<Option<String>>>,
+    radio: Mutex<Vec<(Option<String>, bool)>>,
+    restarted: Mutex<Vec<String>>,
     rescans: Mutex<usize>,
     claims: Mutex<Vec<String>>,
 }
@@ -630,7 +681,9 @@ impl RecordingActions {
             at: Mutex::new(Vec::new()),
             switched: Mutex::new(Vec::new()),
             ussd: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
             radio: Mutex::new(Vec::new()),
+            restarted: Mutex::new(Vec::new()),
             rescans: Mutex::new(0),
             claims: Mutex::new(Vec::new()),
         }
@@ -668,7 +721,8 @@ impl Actions for RecordingActions {
         Ok(())
     }
 
-    fn restart_modem(&self, _imei: String) -> Result<(), PanelError> {
+    fn restart_modem(&self, imei: String) -> Result<(), PanelError> {
+        self.restarted.lock().expect("restarted").push(imei);
         Ok(())
     }
 
@@ -724,14 +778,14 @@ impl Actions for RecordingActions {
 
     fn switch_profile(
         &self,
-        _imei: Option<String>,
+        imei: Option<String>,
         iccid: String,
         enable: bool,
     ) -> Result<(), PanelError> {
         self.switched
             .lock()
             .expect("switched")
-            .push((iccid, enable));
+            .push((imei, iccid, enable));
         Ok(())
     }
 
@@ -761,12 +815,13 @@ impl Actions for RecordingActions {
         })
     }
 
-    fn ussd_cancel(&self, _imei: Option<String>) -> Result<(), PanelError> {
+    fn ussd_cancel(&self, imei: Option<String>) -> Result<(), PanelError> {
+        self.cancelled.lock().expect("cancelled").push(imei);
         Ok(())
     }
 
-    fn set_radio(&self, _imei: Option<String>, online: bool) -> Result<(), PanelError> {
-        self.radio.lock().expect("radio").push(online);
+    fn set_radio(&self, imei: Option<String>, online: bool) -> Result<(), PanelError> {
+        self.radio.lock().expect("radio").push((imei, online));
         Ok(())
     }
 }
@@ -1154,7 +1209,7 @@ async fn panel_switches_a_profile_by_iccid() {
     assert_eq!(response.status(), 200);
     assert_eq!(
         actions.switched.lock().expect("switched").as_slice(),
-        &[("89852351225042214201".to_string(), true)]
+        &[(None, "89852351225042214201".to_string(), true)]
     );
 }
 
@@ -1362,4 +1417,262 @@ async fn panel_rejects_an_empty_ussd_code() {
         .unwrap();
     assert_eq!(response.status(), 400);
     assert!(actions.ussd.lock().expect("ussd").is_empty());
+}
+
+/* ── 「会写」端点的回执 ──────────────────────────────────────────────
+ *
+ * `/api/radio`、`/api/ussd/cancel`、`/api/esim/switch`、`/api/restart` 四条
+ * 以前是 handler 用 `serde_json::json!` 现拼 `{"status": ...}` 回的，那个字段
+ * 在任何类型里都不存在。下面这几条测试守两件事：线上那个 `status` 字面量
+ * 一个都没变（浏览器那半边收 `serde_json::Value`，读的就是它），以及回执上
+ * 写的那一根确实是打到 `Actions` 上的那一根。
+ */
+
+/// POST 一条 JSON，回 (状态码, 响应体)。
+async fn post_json(
+    actions: Arc<RecordingActions>,
+    uri: &str,
+    payload: &str,
+) -> (u16, serde_json::Value) {
+    let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// 🔴 这一条守的是一次**安静的**回归。浏览器那半边这四条收的都是
+/// `Load<serde_json::Value>`，靠 `status` 认结果；换成结构体的时候只要哪个
+/// 字面量写错，前端不会报错，它会照常渲染而那一格永远是空的。
+///
+/// 四条一起写在一个测试里，是因为它们守的是同一件事，而且失败信息里带着
+/// 端点名——哪一条断了一眼能看见。
+#[tokio::test]
+async fn the_four_writing_endpoints_still_answer_with_the_status_word_they_always_did() {
+    for (uri, payload, expected) in [
+        (
+            "/api/radio",
+            r#"{"online":true,"imei":"867018069514820"}"#,
+            "ok",
+        ),
+        (
+            "/api/ussd/cancel",
+            r#"{"imei":"867018069514820"}"#,
+            "cancelled",
+        ),
+        (
+            "/api/esim/switch",
+            r#"{"iccid":"89852351225042214201","enable":true}"#,
+            "ok",
+        ),
+        ("/api/restart", r#"{"imei":"867018069514820"}"#, "restarted"),
+    ] {
+        let (code, body) = post_json(Arc::new(RecordingActions::new()), uri, payload).await;
+        assert_eq!(code, 200, "{uri} 没有回 200");
+        assert_eq!(
+            body["status"], expected,
+            "{uri} 的 status 变了：浏览器读的就是这个字段，改掉它前端会安静地变空"
+        );
+    }
+}
+
+/// 回执上的 IMEI 必须是**真正打到硬件上**的那一个。
+///
+/// 🔴 这批模组没有人能物理接触。一条把脱网操作记到错模组头上的回执，会让人
+/// 去救错的那一根——所以这里不只是问「回执里有没有 imei」，而是拿它和
+/// `Actions` 收到的那个值对。
+#[tokio::test]
+async fn a_radio_receipt_names_the_modem_that_was_actually_taken_down() {
+    let actions = Arc::new(RecordingActions::new());
+    let (code, body) = post_json(
+        actions.clone(),
+        "/api/radio",
+        r#"{"online":false,"imei":"867018069514820"}"#,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        actions.radio.lock().expect("radio").as_slice(),
+        &[(Some("867018069514820".to_string()), false)]
+    );
+    assert_eq!(body["imei"], "867018069514820");
+    // 方向回的是**请求的**方向。射频真的到位要几十秒，这个端点不回读，
+    // 所以字段名是 `requested_online` 而不是 `online`。
+    assert_eq!(body["requested_online"], false);
+}
+
+/// 🔴 不点名不是「所有模组」，是「不知道是哪一根」：代理这时取的是它 modem
+/// map 里的第一条。回执把 `null` 原样带回去，而不是编一个 IMEI 出来——
+/// 编出来的那个会被当成事实。
+#[tokio::test]
+async fn an_unnamed_radio_request_comes_back_unnamed_rather_than_guessed_at() {
+    let actions = Arc::new(RecordingActions::new());
+    let (code, body) = post_json(actions.clone(), "/api/radio", r#"{"online":true}"#).await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        actions.radio.lock().expect("radio").as_slice(),
+        &[(None, true)]
+    );
+    assert!(
+        body["imei"].is_null(),
+        "不点名的射频请求回了一个 IMEI：{body}"
+    );
+}
+
+/// 🔴 **这条端点的 ok 是面板明文规定不采信的那一个。** 它在没发生的切换上回过
+/// ok，也在发生了的切换上回过 error。所以这个回执必须**说不出**「卡换了」：
+/// `seen` 是回读出来的状态，而这条路上根本没有回读，只能是 `null`。
+///
+/// 谁哪天让它变成 `true`，必须是因为服务端真加了回读，而不是因为顺手。
+#[tokio::test]
+async fn a_switch_receipt_never_claims_the_card_did_what_was_asked() {
+    let actions = Arc::new(RecordingActions::new());
+    let (code, body) = post_json(
+        actions.clone(),
+        "/api/esim/switch",
+        r#"{"iccid":"89852351225042214201","enable":true,"imei":"867018069514820"}"#,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert!(
+        body.get("seen").is_some_and(|seen| seen.is_null()),
+        "切换回执声称知道卡现在的状态：{body}"
+    );
+    // 该带的三件事：哪根、哪条 ICCID、往哪个方向。少一件，操作员就没法把
+    // 这张回执和自己刚按的那个按钮对上。
+    assert_eq!(body["imei"], "867018069514820");
+    assert_eq!(body["iccid"], "89852351225042214201");
+    assert_eq!(body["requested_enable"], true);
+    assert_eq!(
+        actions.switched.lock().expect("switched").as_slice(),
+        &[(
+            Some("867018069514820".to_string()),
+            "89852351225042214201".to_string(),
+            true
+        )]
+    );
+}
+
+/// 回执自己要说得出下一步。模组卡死的时候手上常常只剩 `curl`——那时候
+/// 「等 8 秒、读 /api/esim」写在 wasm 里是够不着的。
+///
+/// ⚠️ 回读目标必须是路由表上真有的那条**读**端点。指回 `/api/esim/switch`
+/// 就是让人再切一次。
+#[tokio::test]
+async fn a_switch_receipt_says_where_and_when_to_read_the_card_back() {
+    let (code, body) = post_json(
+        Arc::new(RecordingActions::new()),
+        "/api/esim/switch",
+        r#"{"iccid":"89852351225042214201","enable":false}"#,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(body["readback_after_ms"], edge_panel_api::ESIM_SETTLE_MS);
+    assert_ne!(body["readback_with"], "/api/esim/switch", "指回切换端点就是让人再切一次");
+
+    // 🔴 **照着回执说的那条路真打一次。** 原来这里只 `assert_ne!` 了一下，
+    //    于是「回读目标必须是路由表上真有的那条读端点」这句话是空的：路径写错
+    //    一个字母、或者指向一条不存在的路由，都能一路绿着上线——而这条指令
+    //    存在的全部理由，就是操作员在只剩 curl 的时候照着它做。
+    let target = body["readback_with"].as_str().expect("回执要给出回读路径");
+    let (readback_code, readback_body) =
+        post_json(Arc::new(RecordingActions::new()), target, "{}").await;
+    assert_eq!(
+        readback_code, 200,
+        "回执让人去打 {target}，而那条路答的是 {readback_code} —— \
+         一条在紧急情况下第一次就失败的「下一步」，比不写更坏"
+    );
+    assert!(
+        readback_body.get("profiles").is_some(),
+        "{target} 答了 200，但里面没有 profile 列表 —— 那不是回读卡片的那条路"
+    );
+}
+
+/// 🔴 服务端宣称的等待时长，必须**就是**面板自己等的那一个。
+///
+/// 这个数字以前有两份：`edge-panel-api::ESIM_SETTLE_MS` 和 `edge-ui/src/esim.rs`
+/// 里自己的 `const SETTLE_MS`。两份漂开的话，回执告诉操作员「等 8 秒」而面板
+/// 等 3 秒，面板就会在卡片 REFRESH 中途回读，然后给出一个**错的判决**——
+/// 而这一栏存在的全部理由就是「不采信端点的 ok，以回读为准」。
+///
+/// 现在前端 `use edge_panel_api::ESIM_SETTLE_MS as SETTLE_MS`，一份。这条测试
+/// 守的是数字本身不许被「优化」掉：读得太早等于没读。
+#[test]
+fn the_readback_wait_is_long_enough_to_be_worth_waiting_for() {
+    assert!(
+        edge_panel_api::ESIM_SETTLE_MS >= 5_000,
+        "回读等待被压到了 {} ms —— 卡片 REFRESH 还没走完，ISD-R 通道是关的，\
+         这时候读到的状态是上一个，而屏幕上会把它当成切换的结果",
+        edge_panel_api::ESIM_SETTLE_MS
+    );
+    assert!(
+        edge_panel_api::ESIM_SETTLE_MS <= 30_000,
+        "等 {} ms 太久了 —— 久到操作员会以为面板卡住，然后手动再切一次",
+        edge_panel_api::ESIM_SETTLE_MS
+    );
+    // 前端不许再留一份本地副本。
+    let ui = include_str!("../../edge-ui/src/esim.rs");
+    assert!(
+        !ui.contains("const SETTLE_MS"),
+        "edge-ui 又自己留了一份等待时长 —— 两份数字会漂开"
+    );
+}
+
+/// 取消是这四条里唯一给不出回读路径的：面板没有任何端点能回答「这根模组上
+/// 现在还有没有开着的 USSD 会话」。
+///
+/// 🔴 所以回执里不许出现任何声称会话已经结束的字段。给不出就不给——原版
+/// 前端 `.catch(() => {})` 吞掉失败照画「已取消」，就是这么来的。
+#[tokio::test]
+async fn a_ussd_cancel_receipt_does_not_claim_the_session_is_closed() {
+    let actions = Arc::new(RecordingActions::new());
+    let (code, body) = post_json(
+        actions.clone(),
+        "/api/ussd/cancel",
+        r#"{"imei":"867018069514820"}"#,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(body["status"], "cancelled");
+    assert_eq!(body["imei"], "867018069514820");
+    assert_eq!(
+        actions.cancelled.lock().expect("cancelled").as_slice(),
+        &[Some("867018069514820".to_string())]
+    );
+    // 回执只有 status 和 imei 两个字段。多出来的任何一个都是在替网络说话。
+    assert_eq!(
+        body.as_object().expect("对象").len(),
+        2,
+        "取消回执多了字段：{body}——这条路上没有任何东西能确认会话真的关了"
+    );
+}
+
+/// 重启回执回的是**实际交给 `restart_modem` 的那个字符串**。
+///
+/// ⚠️ handler 只用 `trim()` 判断「是不是全是空白」，传下去的一直是原样的值。
+/// 回执要是回一个规整过的漂亮版本，操作员看到的就不是真正打到硬件上的那个。
+#[tokio::test]
+async fn a_restart_receipt_repeats_the_imei_that_reached_the_hardware() {
+    let actions = Arc::new(RecordingActions::new());
+    let (code, body) = post_json(
+        actions.clone(),
+        "/api/restart",
+        r#"{"imei":" 867018069514820 "}"#,
+    )
+    .await;
+    assert_eq!(code, 200);
+    let reached = actions.restarted.lock().expect("restarted").clone();
+    assert_eq!(reached.as_slice(), &[" 867018069514820 ".to_string()]);
+    assert_eq!(body["imei"], reached[0]);
+    assert_eq!(body["status"], "restarted");
 }
