@@ -257,7 +257,9 @@ strings target/release/vodoge-edge | grep -c edge-ui_bg.wasm   # expect > 0
 ### 2. Keep the way back
 
 ```sh
-cp -a /usr/local/bin/vodoge-edge /usr/local/bin/vodoge-edge.prev
+cmp -s /usr/local/bin/vodoge-edge target/release/vodoge-edge \
+  && echo "already deployed — keeping .prev as it is" \
+  || cp -a /usr/local/bin/vodoge-edge /usr/local/bin/vodoge-edge.prev
 sha256sum /usr/local/bin/vodoge-edge.prev target/release/vodoge-edge
 ```
 
@@ -265,6 +267,15 @@ Keep that output. `.prev` is the rollback, and the two hashes are how you tell
 afterwards which one is actually running — size alone is not enough, and on
 2026-08-29 a deploy on the cloud half went out with a matching size and corrupt
 content.
+
+⚠️ **The `cmp` guard is the point of that first line, not decoration.** A plain
+`cp` here is only correct the first time. On 2026-09-04 this block ran twice in
+a row: the second run copied the *newly installed* binary over `.prev`, so both
+paths held the same bytes and the way back was gone — discovered only because
+the rollback was needed. The guard makes a second run a no-op instead of a
+silent loss. Rebuilding `.prev` afterwards means checking out the previous
+commit and doing a full release build, which is the one thing you do not want
+to be doing at the moment you reached for the rollback.
 
 ### 3. Swap and restart
 
