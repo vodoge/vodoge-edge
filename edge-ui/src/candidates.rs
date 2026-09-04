@@ -248,61 +248,58 @@ pub fn CandidatesPage(
     rescan_state: RescanState,
 ) -> impl IntoView {
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"USB 候选"</b></Body1>
-                <CardHeaderAction slot>
-                    <Button
-                        disabled=rescan_state.busy
-                        on_click=move |_| {
-                            leptos::task::spawn_local(async move {
-                                rescan(state, rescan_state).await
-                            });
-                        }
-                    >
-                        {move || if rescan_state.busy.get() { "重扫中…" } else { "重扫 USB" }}
-                    </Button>
-                </CardHeaderAction>
-            </CardHeader>
-            {move || {
-                rescan_state
-                    .note
-                    .get()
-                    .map(|note| {
-                        let intent = if rescan_state.failed.get() {
-                            MessageBarIntent::Error
-                        } else {
-                            MessageBarIntent::Info
-                        };
+                        <div class="vd-actions">
+    <Button
+                            disabled=rescan_state.busy
+                            on_click=move |_| {
+                                leptos::task::spawn_local(async move {
+                                    rescan(state, rescan_state).await
+                                });
+                            }
+                        >
+                            {move || if rescan_state.busy.get() { "重扫中…" } else { "重扫 USB" }}
+                        </Button>
+                    </div>
+
+                {move || {
+                    rescan_state
+                        .note
+                        .get()
+                        .map(|note| {
+                            let intent = if rescan_state.failed.get() {
+                                MessageBarIntent::Error
+                            } else {
+                                MessageBarIntent::Info
+                            };
+                            view! {
+                                <MessageBar intent=intent layout=MessageBarLayout::Multiline>
+                                    <MessageBarBody>{note}</MessageBarBody>
+                                </MessageBar>
+                            }
+                        })
+                }}
+                {move || match state.load.get() {
+                    // 🔴 三态分开。读不到候选**不是**「没有候选」——后者会让操作员
+                    // 以为线插错了，然后去拔一根好好的线。
+                    Load::Loading => view! { <Caption1>"正在读候选…"</Caption1> }.into_any(),
+                    Load::Failed(why) => {
                         view! {
-                            <MessageBar intent=intent layout=MessageBarLayout::Multiline>
-                                <MessageBarBody>{note}</MessageBarBody>
+                            <MessageBar
+                                intent=MessageBarIntent::Error
+                                layout=MessageBarLayout::Multiline
+                            >
+                                <MessageBarBody>
+                                    <MessageBarTitle>"这次没读到"</MessageBarTitle>
+                                    {why}
+                                </MessageBarBody>
                             </MessageBar>
                         }
-                    })
-            }}
-            {move || match state.load.get() {
-                // 🔴 三态分开。读不到候选**不是**「没有候选」——后者会让操作员
-                // 以为线插错了，然后去拔一根好好的线。
-                Load::Loading => view! { <Caption1>"正在读候选…"</Caption1> }.into_any(),
-                Load::Failed(why) => {
-                    view! {
-                        <MessageBar
-                            intent=MessageBarIntent::Error
-                            layout=MessageBarLayout::Multiline
-                        >
-                            <MessageBarBody>
-                                <MessageBarTitle>"这次没读到"</MessageBarTitle>
-                                {why}
-                            </MessageBarBody>
-                        </MessageBar>
+                            .into_any()
                     }
-                        .into_any()
-                }
-                Load::Ready(body) => view! { <List body=body claims=claims state=state /> }.into_any(),
-            }}
-        </Card>
-    }
+                    Load::Ready(body) => view! { <List body=body claims=claims state=state /> }.into_any(),
+                }}
+
+        }
 }
 
 #[component]
@@ -313,29 +310,19 @@ fn List(body: StatusBody, claims: ClaimState, state: StatusState) -> impl IntoVi
     }
     let managed: Vec<String> = body.modems.iter().map(|m| m.imei.clone()).collect();
 
+    // 🔴 不用表格。这一栏只有 15rem 宽，六列会挤成一团。竖排一条一块，
+    // 和上面的模组列表同一个形状——它们本来就是同一类东西（哪个口上挂着什么）。
     view! {
-        <Table>
-            <TableHeader>
-                <TableRow>
-                    <TableHeaderCell>"候选"</TableHeaderCell>
-                    <TableHeaderCell>"接口"</TableHeaderCell>
-                    <TableHeaderCell>"状态"</TableHeaderCell>
-                    <TableHeaderCell>"硬件"</TableHeaderCell>
-                    <TableHeaderCell>"详情"</TableHeaderCell>
-                    <TableHeaderCell>"操作"</TableHeaderCell>
-                </TableRow>
-            </TableHeader>
-            <TableBody>
-                {body
-                    .discoveries
-                    .into_iter()
-                    .map(|c| {
-                        let managed = managed.clone();
-                        view! { <Row c=c managed=managed claims=claims state=state /> }
-                    })
-                    .collect_view()}
-            </TableBody>
-        </Table>
+        <div class="vd-cand-list">
+            {body
+                .discoveries
+                .into_iter()
+                .map(|c| {
+                    let managed = managed.clone();
+                    view! { <Row c=c managed=managed claims=claims state=state /> }
+                })
+                .collect_view()}
+        </div>
     }
     .into_any()
 }
@@ -390,19 +377,19 @@ fn Row(
     let tone_key = skey.clone();
 
     view! {
-        <TableRow>
-            <TableCell>
+            <div class="vd-cand">
+            <div class="vd-cand-cell">
                 <div>
                     <Caption1Strong>{identity}</Caption1Strong>
                 </div>
                 <div>
                     <Caption1>{port}</Caption1>
                 </div>
-            </TableCell>
-            <TableCell>
+            </div>
+            <div class="vd-cand-cell">
                 <Caption1>{transport_label(&c.transport).to_string()}</Caption1>
-            </TableCell>
-            <TableCell>
+            </div>
+            <div class="vd-cand-cell">
                 {move || {
                     let (label, tone) = if held.get() {
                         (state_label("claimed"), state_tone("claimed"))
@@ -411,9 +398,9 @@ fn Row(
                     };
                     view! { <Badge color=tone size=BadgeSize::Small>{label}</Badge> }
                 }}
-            </TableCell>
-            <TableCell>{hw.unwrap_or_else(|| "—".into())}</TableCell>
-            <TableCell>
+            </div>
+            <div class="vd-cand-cell">{hw.unwrap_or_else(|| "—".into())}</div>
+            <div class="vd-cand-cell">
                 {move || {
                     // 认领笔记盖过服务端的详情：操作员刚按下去的那件事,比一条
                     // 上一轮才更新的诊断更要紧。
@@ -439,8 +426,8 @@ fn Row(
                         view! { <Caption1>{detail}</Caption1> }.into_any()
                     }
                 }}
-            </TableCell>
-            <TableCell>
+            </div>
+            <div class="vd-cand-cell">
                 <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
                     {claimable
                         .then(|| {
@@ -486,8 +473,8 @@ fn Row(
                             }
                         })}
                 </Flex>
-            </TableCell>
-        </TableRow>
+            </div>
+            </div>
     }
 }
 

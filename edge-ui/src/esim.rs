@@ -397,84 +397,81 @@ pub fn EsimPage(
     });
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"eSIM profile"</b></Body1>
-                <CardHeaderAction slot>
-                    <Button
-                        disabled=Signal::derive(move || active.get().is_none() || !usable.get())
-                        on_click=move |_| {
-                            let imei = active.get_untracked();
-                            leptos::task::spawn_local(async move {
-                                read(state, imei).await;
-                            });
-                        }
-                    >
-                        {move || if state.read.get() { "重新读取" } else { "读取" }}
-                    </Button>
-                </CardHeaderAction>
-            </CardHeader>
-
-            // 在任何人点之前就摆在屏幕上。一个只在确认框里才出现的代价，
-            // 到得太晚了 —— 它本该改变的那个决定已经做完了。
-            <MessageBar intent=MessageBarIntent::Warning layout=MessageBarLayout::Multiline>
-                <MessageBarBody>
-                    "切换会把模组从它当前的网络上摘下来，直到卡片 REFRESH 完成。\
-                     eUICC 上同一时刻只有一个 profile 启用，所以启用一条就是停用另一条；\
-                     把最后一条停掉之后没有网络可回。这批硬件没有人能物理接触，插拔不是退路。\
-                     发出之后面板不采信 /api/esim/switch 的 ok —— 它等 8 秒再回读 /api/esim，\
-                     屏幕上写的是回读到的状态。"
-                </MessageBarBody>
-            </MessageBar>
-
-            {move || state.receipt.get().map(|r| view! { <ReceiptCard receipt=r /> })}
-
-            {move || {
-                if active.get().is_none() {
-                    return view! { <Caption1>"先在左边选一根模组。"</Caption1> }.into_any();
-                }
-                if !usable.get() {
-                    // 和危险区那一段说同一件事，用同样的话。
-                    return view! {
-                        <Caption1>
-                            "这一根由 AT 控制口管理，没有 QMI 通道 —— eSIM 的读取与切换都做不了。"
-                        </Caption1>
-                    }
-                    .into_any();
-                }
-                match state.profiles.get() {
-                    Load::Loading if !state.read.get() => {
-                        view! { <Caption1>"还没有读取。"</Caption1> }.into_any()
-                    }
-                    Load::Loading => view! { <Caption1>"正在读 profile…"</Caption1> }.into_any(),
-                    // 🔴 读不到 ≠ 卡上没有 profile。
-                    Load::Failed(why) => {
-                        view! {
-                            <MessageBar
-                                intent=MessageBarIntent::Error
-                                layout=MessageBarLayout::Multiline
-                            >
-                                <MessageBarBody>
-                                    <MessageBarTitle>"这次没读到"</MessageBarTitle>
-                                    {why}
-                                </MessageBarBody>
-                            </MessageBar>
-                        }
-                            .into_any()
-                    }
-                    Load::Ready(result) => {
-                        if result.profiles.is_empty() {
-                            return view! {
-                                <Caption1>"卡上没有 profile —— 读取本身成功了。"</Caption1>
+                        <div class="vd-actions">
+    <Button
+                            disabled=Signal::derive(move || active.get().is_none() || !usable.get())
+                            on_click=move |_| {
+                                let imei = active.get_untracked();
+                                leptos::task::spawn_local(async move {
+                                    read(state, imei).await;
+                                });
                             }
-                            .into_any();
-                        }
-                        view! { <Profiles result=result active=active state=state /> }.into_any()
+                        >
+                            {move || if state.read.get() { "重新读取" } else { "读取" }}
+                        </Button>
+                    </div>
+
+
+                // 在任何人点之前就摆在屏幕上。一个只在确认框里才出现的代价，
+                // 到得太晚了 —— 它本该改变的那个决定已经做完了。
+                <MessageBar intent=MessageBarIntent::Warning layout=MessageBarLayout::Multiline>
+                    <MessageBarBody>
+                        "切换会把模组从它当前的网络上摘下来，直到卡片 REFRESH 完成。\
+                         eUICC 上同一时刻只有一个 profile 启用，所以启用一条就是停用另一条；\
+                         把最后一条停掉之后没有网络可回。这批硬件没有人能物理接触，插拔不是退路。\
+                         发出之后面板不采信 /api/esim/switch 的 ok —— 它等 8 秒再回读 /api/esim，\
+                         屏幕上写的是回读到的状态。"
+                    </MessageBarBody>
+                </MessageBar>
+
+                {move || state.receipt.get().map(|r| view! { <ReceiptCard receipt=r /> })}
+
+                {move || {
+                    if active.get().is_none() {
+                        return view! { <Caption1>"先在左边选一根模组。"</Caption1> }.into_any();
                     }
-                }
-            }}
-        </Card>
-    }
+                    if !usable.get() {
+                        // 和危险区那一段说同一件事，用同样的话。
+                        return view! {
+                            <Caption1>
+                                "这一根由 AT 控制口管理，没有 QMI 通道 —— eSIM 的读取与切换都做不了。"
+                            </Caption1>
+                        }
+                        .into_any();
+                    }
+                    match state.profiles.get() {
+                        Load::Loading if !state.read.get() => {
+                            view! { <Caption1>"还没有读取。"</Caption1> }.into_any()
+                        }
+                        Load::Loading => view! { <Caption1>"正在读 profile…"</Caption1> }.into_any(),
+                        // 🔴 读不到 ≠ 卡上没有 profile。
+                        Load::Failed(why) => {
+                            view! {
+                                <MessageBar
+                                    intent=MessageBarIntent::Error
+                                    layout=MessageBarLayout::Multiline
+                                >
+                                    <MessageBarBody>
+                                        <MessageBarTitle>"这次没读到"</MessageBarTitle>
+                                        {why}
+                                    </MessageBarBody>
+                                </MessageBar>
+                            }
+                                .into_any()
+                        }
+                        Load::Ready(result) => {
+                            if result.profiles.is_empty() {
+                                return view! {
+                                    <Caption1>"卡上没有 profile —— 读取本身成功了。"</Caption1>
+                                }
+                                .into_any();
+                            }
+                            view! { <Profiles result=result active=active state=state /> }.into_any()
+                        }
+                    }
+                }}
+
+        }
 }
 
 #[component]

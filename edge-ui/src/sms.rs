@@ -224,226 +224,222 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
     });
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"发短信"</b></Body1>
-            </CardHeader>
+                <Caption1Strong>"发送"</Caption1Strong>
 
-            {move || {
-                blocked
-                    .get()
-                    .map(|refused| {
+                {move || {
+                    blocked
+                        .get()
+                        .map(|refused| {
+                            view! {
+                                <MessageBar
+                                    intent=MessageBarIntent::Warning
+                                    layout=MessageBarLayout::Multiline
+                                >
+                                    <MessageBarBody>
+                                        <MessageBarTitle>{refused.title}</MessageBarTitle>
+                                        {refused.why}
+                                    </MessageBarBody>
+                                </MessageBar>
+                            }
+                        })
+                }}
+
+                <Flex gap=FlexGap::Small style="flex-wrap: wrap;" align=FlexAlign::Center>
+                    <Input value=state.to placeholder="号码" disabled=Signal::derive(move || blocked.get().is_some()) />
+                    <Input value=state.body placeholder="内容" disabled=Signal::derive(move || blocked.get().is_some()) />
+                    <Button
+                        appearance=ButtonAppearance::Primary
+                        disabled=Signal::derive(move || {
+                            blocked.get().is_some() || state.note.get() == Some(SendNote::Sending)
+                        })
+                        on_click=move |_| {
+                            let active = active.get_untracked();
+                            leptos::task::spawn_local(async move { send(state, active).await });
+                        }
+                    >
+                        {move || {
+                            if state.note.get() == Some(SendNote::Sending) { "发送中…" } else { "发送" }
+                        }}
+                    </Button>
+                </Flex>
+
+                {move || {
+                    let over = edge_core::draft(&state.body.get()).over;
+                    let text = meter.get();
+                    if over {
                         view! {
                             <MessageBar
                                 intent=MessageBarIntent::Warning
                                 layout=MessageBarLayout::Multiline
                             >
+                                <MessageBarBody>{text}</MessageBarBody>
+                            </MessageBar>
+                        }
+                            .into_any()
+                    } else {
+                        view! { <Caption1>{text}</Caption1> }.into_any()
+                    }
+                }}
+
+                {move || {
+                    state
+                        .note
+                        .get()
+                        .map(|note| {
+                            match note {
+                                SendNote::Sending => {
+                                    view! { <Caption1>"发送中…"</Caption1> }.into_any()
+                                }
+                                // 🔴 「没有发出 —— 模组没有被碰过」是这里最要紧的一句话。
+                                SendNote::Refused(why) => {
+                                    view! {
+                                        <MessageBar
+                                            intent=MessageBarIntent::Warning
+                                            layout=MessageBarLayout::Multiline
+                                        >
+                                            <MessageBarBody>
+                                                <MessageBarTitle>
+                                                    "没有发出 —— 模组没有被碰过"
+                                                </MessageBarTitle>
+                                                {why}
+                                            </MessageBarBody>
+                                        </MessageBar>
+                                    }
+                                        .into_any()
+                                }
+                                SendNote::Failed(why) => {
+                                    view! {
+                                        <MessageBar
+                                            intent=MessageBarIntent::Error
+                                            layout=MessageBarLayout::Multiline
+                                        >
+                                            <MessageBarBody>
+                                                // ⚠️ 和上面那条拒绝的区别就在这句话里：
+                                                // 那边是面板拦下的、模组没有被碰过；这边
+                                                // 请求真的到了代理。写「发送失败」会把两件
+                                                // 事说成一件，而且和下面 api 层给的
+                                                // 「发送：…」前缀重复。
+                                                <MessageBarTitle>
+                                                    "请求到了代理，代理没有接受"
+                                                </MessageBarTitle>
+                                                {why}
+                                            </MessageBarBody>
+                                        </MessageBar>
+                                    }
+                                        .into_any()
+                                }
+                                // ⚠️ 「已提交」不是「已送达」。投递回执是后来的事。
+                                SendNote::Sent => {
+                                    view! {
+                                        <MessageBar intent=MessageBarIntent::Success>
+                                            <MessageBarBody>
+                                                "已提交给代理（不是已送达 —— 投递回执是后来的事）"
+                                            </MessageBarBody>
+                                        </MessageBar>
+                                    }
+                                        .into_any()
+                                }
+                            }
+                        })
+                }}
+
+
+                <Divider />
+                <Caption1Strong>"本地收件箱 · 断网也保留在本机"</Caption1Strong>
+                        <div class="vd-actions">
+    {move || {
+                            active
+                                .get()
+                                .map(|imei| {
+                                    let short = imei.chars().rev().take(6).collect::<Vec<_>>();
+                                    let short: String = short.into_iter().rev().collect();
+                                    view! {
+                                        <Checkbox
+                                            checked=state.mine
+                                            label=format!("只看 …{short}")
+                                        />
+                                    }
+                                })
+                        }}
+                    </div>
+
+
+                {move || match state.inbox.get() {
+                    // 🔴 读不到 ≠ 没有短信。原版这里正是把 500 读成了空列表。
+                    Load::Loading => view! { <Caption1>"正在读本地短信…"</Caption1> }.into_any(),
+                    Load::Failed(why) => {
+                        view! {
+                            <MessageBar
+                                intent=MessageBarIntent::Error
+                                layout=MessageBarLayout::Multiline
+                            >
                                 <MessageBarBody>
-                                    <MessageBarTitle>{refused.title}</MessageBarTitle>
-                                    {refused.why}
+                                    <MessageBarTitle>"这次没读到"</MessageBarTitle>
+                                    {why}
                                 </MessageBarBody>
                             </MessageBar>
                         }
-                    })
-            }}
-
-            <Flex gap=FlexGap::Small style="flex-wrap: wrap;" align=FlexAlign::Center>
-                <Input value=state.to placeholder="号码" disabled=Signal::derive(move || blocked.get().is_some()) />
-                <Input value=state.body placeholder="内容" disabled=Signal::derive(move || blocked.get().is_some()) />
-                <Button
-                    appearance=ButtonAppearance::Primary
-                    disabled=Signal::derive(move || {
-                        blocked.get().is_some() || state.note.get() == Some(SendNote::Sending)
-                    })
-                    on_click=move |_| {
-                        let active = active.get_untracked();
-                        leptos::task::spawn_local(async move { send(state, active).await });
+                            .into_any()
                     }
-                >
-                    {move || {
-                        if state.note.get() == Some(SendNote::Sending) { "发送中…" } else { "发送" }
-                    }}
-                </Button>
-            </Flex>
-
-            {move || {
-                let over = edge_core::draft(&state.body.get()).over;
-                let text = meter.get();
-                if over {
-                    view! {
-                        <MessageBar
-                            intent=MessageBarIntent::Warning
-                            layout=MessageBarLayout::Multiline
-                        >
-                            <MessageBarBody>{text}</MessageBarBody>
-                        </MessageBar>
-                    }
-                        .into_any()
-                } else {
-                    view! { <Caption1>{text}</Caption1> }.into_any()
-                }
-            }}
-
-            {move || {
-                state
-                    .note
-                    .get()
-                    .map(|note| {
-                        match note {
-                            SendNote::Sending => {
-                                view! { <Caption1>"发送中…"</Caption1> }.into_any()
-                            }
-                            // 🔴 「没有发出 —— 模组没有被碰过」是这里最要紧的一句话。
-                            SendNote::Refused(why) => {
-                                view! {
-                                    <MessageBar
-                                        intent=MessageBarIntent::Warning
-                                        layout=MessageBarLayout::Multiline
-                                    >
-                                        <MessageBarBody>
-                                            <MessageBarTitle>
-                                                "没有发出 —— 模组没有被碰过"
-                                            </MessageBarTitle>
-                                            {why}
-                                        </MessageBarBody>
-                                    </MessageBar>
-                                }
-                                    .into_any()
-                            }
-                            SendNote::Failed(why) => {
-                                view! {
-                                    <MessageBar
-                                        intent=MessageBarIntent::Error
-                                        layout=MessageBarLayout::Multiline
-                                    >
-                                        <MessageBarBody>
-                                            // ⚠️ 和上面那条拒绝的区别就在这句话里：
-                                            // 那边是面板拦下的、模组没有被碰过；这边
-                                            // 请求真的到了代理。写「发送失败」会把两件
-                                            // 事说成一件，而且和下面 api 层给的
-                                            // 「发送：…」前缀重复。
-                                            <MessageBarTitle>
-                                                "请求到了代理，代理没有接受"
-                                            </MessageBarTitle>
-                                            {why}
-                                        </MessageBarBody>
-                                    </MessageBar>
-                                }
-                                    .into_any()
-                            }
-                            // ⚠️ 「已提交」不是「已送达」。投递回执是后来的事。
-                            SendNote::Sent => {
-                                view! {
-                                    <MessageBar intent=MessageBarIntent::Success>
-                                        <MessageBarBody>
-                                            "已提交给代理（不是已送达 —— 投递回执是后来的事）"
-                                        </MessageBarBody>
-                                    </MessageBar>
-                                }
-                                    .into_any()
-                            }
+                    Load::Ready(body) => {
+                        let total = body.messages.len();
+                        let rows = narrowed(&body.messages, state.mine.get(), active.get().as_deref());
+                        if rows.is_empty() {
+                            let say = if total == 0 {
+                                "本机还没有短信。"
+                            } else {
+                                "这一根名下没有短信 —— 别的模组的还在，去掉「只看」就能看到。"
+                            };
+                            return view! { <Caption1>{say}</Caption1> }.into_any();
                         }
-                    })
-            }}
-        </Card>
+                        let count = format!("{} / {} 条", rows.len(), total);
+                        view! {
+                            <Caption1>{count}</Caption1>
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHeaderCell>"时间"</TableHeaderCell>
+                                        <TableHeaderCell>"方向"</TableHeaderCell>
+                                        <TableHeaderCell>"对端"</TableHeaderCell>
+                                        <TableHeaderCell>"模组"</TableHeaderCell>
+                                        <TableHeaderCell>"内容"</TableHeaderCell>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {rows
+                                        .into_iter()
+                                        .map(|m| {
+                                            view! {
+                                                <TableRow>
+                                                    <TableCell>
+                                                        <Caption1>{hhmmss(m.received_at as f64)}</Caption1>
+                                                    </TableCell>
+                                                    <TableCell>
+                                                        <Badge size=BadgeSize::Small>
+                                                            {direction_label(&m.direction)}
+                                                        </Badge>
+                                                    </TableCell>
+                                                    <TableCell>{m.peer}</TableCell>
+                                                    // 方向和模组都在载荷里，而改版前的面板把两者都
+                                                    // 扔了 —— 三根棒子的往来落在同一个列表里。
+                                                    <TableCell>
+                                                        <Caption1>
+                                                            {m.modem_imei.unwrap_or_else(|| "未记录".into())}
+                                                        </Caption1>
+                                                    </TableCell>
+                                                    <TableCell>{m.body}</TableCell>
+                                                </TableRow>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </TableBody>
+                            </Table>
+                        }
+                            .into_any()
+                    }
+                }}
 
-        <Card>
-            <CardHeader>
-                <Body1><b>"本地短信 · 断网也保留在本机"</b></Body1>
-                <CardHeaderAction slot>
-                    {move || {
-                        active
-                            .get()
-                            .map(|imei| {
-                                let short = imei.chars().rev().take(6).collect::<Vec<_>>();
-                                let short: String = short.into_iter().rev().collect();
-                                view! {
-                                    <Checkbox
-                                        checked=state.mine
-                                        label=format!("只看 …{short}")
-                                    />
-                                }
-                            })
-                    }}
-                </CardHeaderAction>
-            </CardHeader>
-
-            {move || match state.inbox.get() {
-                // 🔴 读不到 ≠ 没有短信。原版这里正是把 500 读成了空列表。
-                Load::Loading => view! { <Caption1>"正在读本地短信…"</Caption1> }.into_any(),
-                Load::Failed(why) => {
-                    view! {
-                        <MessageBar
-                            intent=MessageBarIntent::Error
-                            layout=MessageBarLayout::Multiline
-                        >
-                            <MessageBarBody>
-                                <MessageBarTitle>"这次没读到"</MessageBarTitle>
-                                {why}
-                            </MessageBarBody>
-                        </MessageBar>
-                    }
-                        .into_any()
-                }
-                Load::Ready(body) => {
-                    let total = body.messages.len();
-                    let rows = narrowed(&body.messages, state.mine.get(), active.get().as_deref());
-                    if rows.is_empty() {
-                        let say = if total == 0 {
-                            "本机还没有短信。"
-                        } else {
-                            "这一根名下没有短信 —— 别的模组的还在，去掉「只看」就能看到。"
-                        };
-                        return view! { <Caption1>{say}</Caption1> }.into_any();
-                    }
-                    let count = format!("{} / {} 条", rows.len(), total);
-                    view! {
-                        <Caption1>{count}</Caption1>
-                        <Table>
-                            <TableHeader>
-                                <TableRow>
-                                    <TableHeaderCell>"时间"</TableHeaderCell>
-                                    <TableHeaderCell>"方向"</TableHeaderCell>
-                                    <TableHeaderCell>"对端"</TableHeaderCell>
-                                    <TableHeaderCell>"模组"</TableHeaderCell>
-                                    <TableHeaderCell>"内容"</TableHeaderCell>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {rows
-                                    .into_iter()
-                                    .map(|m| {
-                                        view! {
-                                            <TableRow>
-                                                <TableCell>
-                                                    <Caption1>{hhmmss(m.received_at as f64)}</Caption1>
-                                                </TableCell>
-                                                <TableCell>
-                                                    <Badge size=BadgeSize::Small>
-                                                        {direction_label(&m.direction)}
-                                                    </Badge>
-                                                </TableCell>
-                                                <TableCell>{m.peer}</TableCell>
-                                                // 方向和模组都在载荷里，而改版前的面板把两者都
-                                                // 扔了 —— 三根棒子的往来落在同一个列表里。
-                                                <TableCell>
-                                                    <Caption1>
-                                                        {m.modem_imei.unwrap_or_else(|| "未记录".into())}
-                                                    </Caption1>
-                                                </TableCell>
-                                                <TableCell>{m.body}</TableCell>
-                                            </TableRow>
-                                        }
-                                    })
-                                    .collect_view()}
-                            </TableBody>
-                        </Table>
-                    }
-                        .into_any()
-                }
-            }}
-        </Card>
-    }
+        }
 }
 
 #[cfg(test)]

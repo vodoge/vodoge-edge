@@ -356,76 +356,73 @@ pub fn HealthPage(active: RwSignal<Option<String>>, state: RwSignal<Health>) -> 
     };
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"体检"</b></Body1>
-                <CardHeaderAction slot>
-                    <Button
-                        appearance=ButtonAppearance::Primary
-                        disabled=Signal::derive(move || {
-                            active.get().is_none() || matches!(state.get(), Health::Running { .. })
-                        })
-                        on_click=run
-                    >
-                        {move || match state.get() {
-                            Health::Running { .. } => "读取中…",
-                            Health::Idle => "体检",
-                            _ => "重新体检",
-                        }}
-                    </Button>
-                </CardHeaderAction>
-            </CardHeader>
+                        <div class="vd-actions">
+    <Button
+                            appearance=ButtonAppearance::Primary
+                            disabled=Signal::derive(move || {
+                                active.get().is_none() || matches!(state.get(), Health::Running { .. })
+                            })
+                            on_click=run
+                        >
+                            {move || match state.get() {
+                                Health::Running { .. } => "读取中…",
+                                Health::Idle => "体检",
+                                _ => "重新体检",
+                            }}
+                        </Button>
+                    </div>
 
-            {move || match state.get() {
-                Health::Idle => view! {
-                    <Text>
-                        {move || if active.get().is_none() {
-                            "先在左边选一根模组。"
-                        } else {
-                            "还没有体检结果。体检只下发只读查询，不改模组任何状态。"
-                        }}
-                    </Text>
-                }.into_any(),
 
-                // 🔴 失败画在**这一页上**，带原因；如果手上还有旧结果，它继续画着，
-                //    但明确标出是哪一次的——原版在这里什么都不说。
-                Health::Failed { why, stale } => view! {
-                    <MessageBar intent=MessageBarIntent::Error layout=MessageBarLayout::Multiline>
-                        <MessageBarBody>
-                            <MessageBarTitle>"这次没读到"</MessageBarTitle>
-                            {why}
-                        </MessageBarBody>
-                    </MessageBar>
-                    {stale.map(|(report, at)| view! {
-                        <MessageBar intent=MessageBarIntent::Warning layout=MessageBarLayout::Multiline>
+                {move || match state.get() {
+                    Health::Idle => view! {
+                        <Text>
+                            {move || if active.get().is_none() {
+                                "先在左边选一根模组。"
+                            } else {
+                                "还没有体检结果。体检只下发只读查询，不改模组任何状态。"
+                            }}
+                        </Text>
+                    }.into_any(),
+
+                    // 🔴 失败画在**这一页上**，带原因；如果手上还有旧结果，它继续画着，
+                    //    但明确标出是哪一次的——原版在这里什么都不说。
+                    Health::Failed { why, stale } => view! {
+                        <MessageBar intent=MessageBarIntent::Error layout=MessageBarLayout::Multiline>
                             <MessageBarBody>
-                                {format!("下面是上一次的结果，读于 {}，不是刚才那次。", hhmmss(at))}
+                                <MessageBarTitle>"这次没读到"</MessageBarTitle>
+                                {why}
                             </MessageBarBody>
                         </MessageBar>
+                        {stale.map(|(report, at)| view! {
+                            <MessageBar intent=MessageBarIntent::Warning layout=MessageBarLayout::Multiline>
+                                <MessageBarBody>
+                                    {format!("下面是上一次的结果，读于 {}，不是刚才那次。", hhmmss(at))}
+                                </MessageBarBody>
+                            </MessageBar>
+                            <Verdicts report=report.clone() />
+                            <FactGrid report=report />
+                        })}
+                    }.into_any(),
+
+                    Health::Running { stale } => view! {
+                        <Spinner label="正在读取…" />
+                        {stale.map(|(report, at)| view! {
+                            <Caption1>{format!("下面还是上一次的结果，读于 {}。", hhmmss(at))}</Caption1>
+                            <Verdicts report=report.clone() />
+                            <FactGrid report=report />
+                        })}
+                    }.into_any(),
+
+                    Health::Done { report, at } => view! {
+                        // ⚠️ 时间戳是承重的：信号和注册会在面板底下变，没有它，
+                        //    十分钟前的网格和刚读的长得一模一样。
+                        <Caption1>{format!("读于 {}", hhmmss(at))}</Caption1>
                         <Verdicts report=report.clone() />
                         <FactGrid report=report />
-                    })}
-                }.into_any(),
+                    }.into_any(),
+                }}
 
-                Health::Running { stale } => view! {
-                    <Spinner label="正在读取…" />
-                    {stale.map(|(report, at)| view! {
-                        <Caption1>{format!("下面还是上一次的结果，读于 {}。", hhmmss(at))}</Caption1>
-                        <Verdicts report=report.clone() />
-                        <FactGrid report=report />
-                    })}
-                }.into_any(),
-
-                Health::Done { report, at } => view! {
-                    // ⚠️ 时间戳是承重的：信号和注册会在面板底下变，没有它，
-                    //    十分钟前的网格和刚读的长得一模一样。
-                    <Caption1>{format!("读于 {}", hhmmss(at))}</Caption1>
-                    <Verdicts report=report.clone() />
-                    <FactGrid report=report />
-                }.into_any(),
-            }}
-        </Card>
-    }
+        }
 }
 
 #[component]

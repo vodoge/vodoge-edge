@@ -92,7 +92,7 @@ fn since(now: f64, then: f64) -> String {
 /// 🔴 原版注释在 markup 里写着 "Never claim to be live"。它说的是数据的年龄，
 /// 不是连接的状态——一次成功的 HTTP 读不代表 USB 上真的有人应答。
 #[component]
-fn Freshness(state: StatusState) -> impl IntoView {
+pub fn Freshness(state: StatusState) -> impl IntoView {
     let text = move || {
         let now = state.now.get();
         let last = state.last_ok.get();
@@ -192,8 +192,34 @@ fn state_tone(raw: &str) -> BadgeColor {
     }
 }
 
+/// 心跳距今多久。⚠️ 「模组没给 last_seen」和「很久以前」是两回事，前者说 `—`
+/// ——复用上面那个 `since`，它已经把「从没读到过」和真实间隔分开了。
+fn heartbeat(last_seen: Option<i64>, now: f64) -> String {
+    match last_seen {
+        Some(seen) if seen > 0 => since(now, seen as f64),
+        _ => "—".into(),
+    }
+}
+
+/// 接口类型的短标签。⚠️ 只认 agent 真写的三种，别的原样显示。
+fn discovery_label(raw: &str) -> &str {
+    match raw {
+        "qmi" => "QMI",
+        "at" => "AT",
+        "serial" => "串口",
+        other => other,
+    }
+}
+
+/// 左栏里的一根模组。
+///
+/// 🔴 **卡归属和驻留网络是两行，不是一行。** 2026-09-04 的生产机队里三根 QMI
+/// 模组**全在漫游**：一根香港 CSL、一根中国移动大陆、一根**美国 310-240**，而
+/// 驻留网络有两根都是「中国移动」。只画驻留网络的话，那两根在屏幕上一模一样，
+/// 而它们的卡来自完全不同的运营商。旧面板的注释早就点出这件事，搬迁时我把它
+/// 压成了一张只有驻留网络的表。
 #[component]
-fn ModemRow(modem: ModemBody, state: StatusState) -> impl IntoView {
+fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
     let imei = modem.imei.clone();
     let selected = {
         let imei = imei.clone();
@@ -203,107 +229,169 @@ fn ModemRow(modem: ModemBody, state: StatusState) -> impl IntoView {
         let imei = imei.clone();
         move |_| state.active.set(Some(imei.clone()))
     };
-    let origin = match modem.capability_origin {
-        edge_panel_api::CapabilityOrigin::Rule => "规则",
-        edge_panel_api::CapabilityOrigin::Fallback => "回退",
-    };
+
+    let home = modem.home.clone();
+    let network = modem.network.clone();
+    let network_numeric = modem.network_numeric.clone();
+    let iccid = modem.iccid.clone();
+    let family = modem.family.clone();
+    let last_seen = modem.last_seen;
+    let discovery = discovery_label(&modem.discovery).to_string();
+    let manageable = modem.manageable;
+    let fallback = matches!(
+        modem.capability_origin,
+        edge_core::CapabilityOrigin::Fallback
+    );
+    let carrier = modem.carrier_profile.clone();
+    let state_raw = modem.state.clone();
+
     view! {
-        <TableRow>
-            <TableCell>
-                <Button
-                    appearance=Signal::derive(move || if selected() { ButtonAppearance::Primary } else { ButtonAppearance::Subtle })
-                    on_click=on_click
+        <button
+            class=move || {
+                if selected() { "vd-modem vd-modem--on" } else { "vd-modem" }
+            }
+            on:click=on_click
+        >
+            <span class="vd-modem-top">
+                <span class="vd-modem-imei">{imei.clone()}</span>
+                <Badge color=state_tone(&state_raw) size=BadgeSize::Small>
+                    {state_label(&state_raw)}
+                </Badge>
+            </span>
+
+            // 卡是谁的。排在驻留网络前面——漫游时这两者属于不同的运营商，
+            // 而「这是哪张卡」才是区分两根相似棒子的东西。
+            <span class="vd-modem-line">
+                {home.clone().unwrap_or_else(|| "卡归属未知".into())}
+            </span>
+            <span class="vd-modem-line vd-faint">
+                {match (network.clone(), network_numeric.clone()) {
+                    (Some(n), Some(num)) => format!("驻留 {n} ({num})"),
+                    (Some(n), None) => format!("驻留 {n}"),
+                    _ => "未驻留网络".into(),
+                }}
+            </span>
+            <span class="vd-modem-line vd-faint">
+                {move || {
+                    format!(
+                        "{family} · 心跳 {}",
+                        heartbeat(last_seen, state.now.get()),
+                    )
+                }}
+            </span>
+            <span class="vd-modem-line vd-faint">
+                {iccid.clone().map(|c| format!("ICCID {c}")).unwrap_or_else(|| "ICCID —".into())}
+            </span>
+
+            <span class="vd-modem-flags">
+                <Badge appearance=BadgeAppearance::Outline size=BadgeSize::Small>
+                    {discovery}
+                </Badge>
+                <Badge
+                    appearance=BadgeAppearance::Outline
+                    size=BadgeSize::Small
+                    color=if manageable { BadgeColor::Success } else { BadgeColor::Warning }
                 >
-                    {modem.imei.clone()}
-                </Button>
-            </TableCell>
-            <TableCell>{modem.family.clone()}</TableCell>
-            <TableCell>
-                <Badge color=state_tone(&modem.state)>{state_label(&modem.state)}</Badge>
-            </TableCell>
-            <TableCell>{modem.network.clone().unwrap_or_else(|| "—".into())}</TableCell>
-            <TableCell>{modem.iccid.clone().unwrap_or_else(|| "—".into())}</TableCell>
-            <TableCell>{origin}</TableCell>
-        </TableRow>
+                    {if manageable { "可管理" } else { "仅 AT" }}
+                </Badge>
+                // ⚠️ 只在矩阵**从没听说过**这个组合时才出现。有规则的即使规则说
+                // 「probe」也不吭声——那是有人做过的决定，不是一个待解的问题。
+                {fallback
+                    .then(|| {
+                        view! {
+                            <Badge color=BadgeColor::Warning size=BadgeSize::Small>
+                                "矩阵无规则"
+                            </Badge>
+                        }
+                    })}
+            </span>
+            // 写规则要用的那两个键，只在需要的人面前出现，而且拼法和矩阵一致，
+            // 好让人直接抄进 TOML 而不是猜。
+            {fallback
+                .then(|| {
+                    view! {
+                        <span class="vd-modem-line vd-faint">
+                            {format!("规则键 {} · {carrier}", modem.family)}
+                        </span>
+                    }
+                })}
+        </button>
     }
 }
 
-/// 模组列表。**四种画面，一种都不能画成另一种。**
+/// 左栏：模组列表。**四种画面，一种都不能画成另一种。**
+///
+/// 在飞、读不到、真的没有、有——这四件事在屏幕上必须长得不一样。整块面板
+/// 的其余部分都瞄准这里选中的那一根，所以这一栏画错的代价比别处大：
+/// 「读不到」画成「没有模组」，看的人会以为硬件掉了，然后去机房。
 #[component]
-pub fn StatusPage(state: StatusState) -> impl IntoView {
+pub fn ModemRail(state: StatusState) -> impl IntoView {
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"模组"</b></Body1>
-                <CardHeaderAction slot>
-                    <Freshness state=state />
-                </CardHeaderAction>
-            </CardHeader>
+        {move || match state.load.get() {
+            // ① 在飞。和「没有」是两回事。
+            Load::Loading => view! { <Spinner label="正在读取 agent…" /> }.into_any(),
 
-            {move || match state.load.get() {
-                // ① 在飞。和「没有」是两回事。
-                Load::Loading => view! { <Spinner label="正在读取 agent…" /> }.into_any(),
-
-                // ② 🔴 失败，画在**这一页上**，带原因。原版把它折叠成了空列表，
-                //    失败原因只出现在另一个标签的控制台里。
-                Load::Failed(why) => view! {
-                    <MessageBar intent=MessageBarIntent::Error>
+            // ② 🔴 失败，画在**这一栏上**，带原因。原版把它折叠成了空列表，
+            //    失败原因只出现在另一个标签的控制台里。
+            Load::Failed(why) => {
+                view! {
+                    <MessageBar intent=MessageBarIntent::Error layout=MessageBarLayout::Multiline>
                         <MessageBarBody>
                             <MessageBarTitle>"读不到模组列表"</MessageBarTitle>
                             {why}
                         </MessageBarBody>
                     </MessageBar>
-                }.into_any(),
-
-                Load::Ready(body) => {
-                    let mode = match body.mode {
-                        PanelMode::Cloud => "已连上云端",
-                        PanelMode::Local => "本地模式（无上行）",
-                    };
-                    let modems = body.modems.clone();
-                    let discoveries = body.discoveries.len();
-                    if modems.is_empty() {
-                        // ③ 真的没有。这是一句关于这台机器的事实，
-                        //    而且要说清下一步——候选存在与否会改变措辞。
-                        return view! {
-                            <Text>{mode}</Text>
-                            <MessageBar intent=MessageBarIntent::Info>
-                                <MessageBarBody>
-                                    {if discoveries > 0 {
-                                        format!("没有已纳管的模组，但看到 {discoveries} 个 USB 候选——它们要先被纳入探测。")
-                                    } else {
-                                        "没有检测到模组。插上模组后按「重扫 USB」。".to_string()
-                                    }}
-                                </MessageBarBody>
-                            </MessageBar>
-                        }.into_any();
-                    }
-                    // ④ 有数据。
-                    let st = state;
-                    view! {
-                        <Text>{mode}</Text>
-                        <Table>
-                            <TableHeader>
-                                <TableRow>
-                                    <TableHeaderCell>"IMEI"</TableHeaderCell>
-                                    <TableHeaderCell>"型号"</TableHeaderCell>
-                                    <TableHeaderCell>"状态"</TableHeaderCell>
-                                    <TableHeaderCell>"驻留网络"</TableHeaderCell>
-                                    <TableHeaderCell>"ICCID"</TableHeaderCell>
-                                    <TableHeaderCell>"能力来源"</TableHeaderCell>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {modems
-                                    .into_iter()
-                                    .map(|m| view! { <ModemRow modem=m state=st /> })
-                                    .collect_view()}
-                            </TableBody>
-                        </Table>
-                    }.into_any()
                 }
-            }}
-        </Card>
+                    .into_any()
+            }
+
+            Load::Ready(body) => {
+                let discoveries = body.discoveries.len();
+                if body.modems.is_empty() {
+                    // ③ 真的没有。这是一句关于这台机器的事实，而且要说清下一步。
+                    return view! {
+                        <MessageBar intent=MessageBarIntent::Info layout=MessageBarLayout::Multiline>
+                            <MessageBarBody>
+                                {if discoveries > 0 {
+                                    format!(
+                                        "没有已纳管的模组，但看到 {discoveries} 个 USB 候选——它们要先被纳入探测。",
+                                    )
+                                } else {
+                                    "没有检测到模组。插上模组后按「重扫 USB」。".to_string()
+                                }}
+                            </MessageBarBody>
+                        </MessageBar>
+                    }
+                        .into_any();
+                }
+                let st = state;
+                view! {
+                    <div class="vd-modem-list">
+                        {body
+                            .modems
+                            .into_iter()
+                            .map(|m| view! { <ModemCard modem=m state=st /> })
+                            .collect_view()}
+                    </div>
+                }
+                    .into_any()
+            }
+        }}
+    }
+}
+
+/// 顶栏那句「这台机器在哪种模式下」。
+#[component]
+pub fn ModeLabel(state: StatusState) -> impl IntoView {
+    move || match state.load.get() {
+        Load::Ready(body) => {
+            let mode = match body.mode {
+                PanelMode::Cloud => "已连上云端",
+                PanelMode::Local => "本地模式（无上行）",
+            };
+            view! { <Caption1>{mode}</Caption1> }.into_any()
+        }
+        _ => ().into_any(),
     }
 }
 

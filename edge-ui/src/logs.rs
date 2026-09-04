@@ -303,109 +303,110 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
     });
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"日志"</b></Body1>
-                <CardHeaderAction slot>
-                    <Freshness state=state />
-                </CardHeaderAction>
-            </CardHeader>
+                        <div class="vd-actions">
+    <Freshness state=state />
+                    </div>
 
-            // ⚠️ 这句话不能省。屏幕上「错 0 条」很容易被当成 daemon 的结论，
-            // 而它其实是这段 wasm 读着行文猜的。
-            <Caption1>
-                "级别 / 话题 / 模组都是从行文推断的，不是服务端标的 —— /api/logs 只给时间和文本。"
-            </Caption1>
 
-            // ⚠️ Thaw 0.4.8 的 `Flex` 没有 wrap 这个 prop，而这一排在窄屏上必须能折行。
-                // 一行内联样式，不进样式表，也不动那块中央覆写。
-                <Flex gap=FlexGap::Small align=FlexAlign::Center style="flex-wrap: wrap;">
-                {LEVELS
-                    .iter()
-                    .enumerate()
-                    .map(|(i, level)| {
-                        let level = *level;
-                        view! {
-                            // ⚠️ `label` 必须是个 `Signal`，不能是 `format!` 出来的
-                            // `String`：后者在建视图时求一次值，计数会永远停在 0 —— 而
-                            // 屏幕上「错 0」看着像个结论,不像个没在更新的数。
-                            <Checkbox
-                                checked=state.levels[i]
-                                label=Signal::derive(move || {
-                                    format!("{} {}", level.label(), counts.get()[i])
-                                })
-                            />
-                        }
-                    })
-                    .collect_view()}
+                // ⚠️ 这句话不能省。屏幕上「错 0 条」很容易被当成 daemon 的结论，
+                // 而它其实是这段 wasm 读着行文猜的。
+                <Caption1>
+                    "级别 / 话题 / 模组都是从行文推断的，不是服务端标的 —— /api/logs 只给时间和文本。"
+                </Caption1>
 
-                <Checkbox
-                    checked=state.quiet
-                    label="静音心跳"
-                />
-
-                <Select value=state.topic>
-                    <option value="">"全部话题"</option>
-                    {TOPIC_ORDER
+                // ⚠️ Thaw 0.4.8 的 `Flex` 没有 wrap 这个 prop，而这一排在窄屏上必须能折行。
+                    // 一行内联样式，不进样式表，也不动那块中央覆写。
+                    <Flex gap=FlexGap::Small align=FlexAlign::Center style="flex-wrap: wrap;">
+                    {LEVELS
                         .iter()
-                        .map(|t| {
-                            view! { <option value=topic_key(*t)>{t.label()}</option> }
+                        .enumerate()
+                        .map(|(i, level)| {
+                            let level = *level;
+                            view! {
+                                // ⚠️ `label` 必须是个 `Signal`，不能是 `format!` 出来的
+                                // `String`：后者在建视图时求一次值，计数会永远停在 0 —— 而
+                                // 屏幕上「错 0」看着像个结论,不像个没在更新的数。
+                                <Checkbox
+                                    checked=state.levels[i]
+                                    label=Signal::derive(move || {
+                                        format!("{} {}", level.label(), counts.get()[i])
+                                    })
+                                />
+                            }
                         })
                         .collect_view()}
-                </Select>
 
-                <Select value=state.imei>
-                    <option value="">"全部模组"</option>
+                    <Checkbox
+                        checked=state.quiet
+                        label="静音心跳"
+                    />
+
+                    <Select value=state.topic>
+                        <option value="">"全部话题"</option>
+                        {TOPIC_ORDER
+                            .iter()
+                            .map(|t| {
+                                view! { <option value=topic_key(*t)>{t.label()}</option> }
+                            })
+                            .collect_view()}
+                    </Select>
+
+                    <Select value=state.imei>
+                        <option value="">"全部模组"</option>
+                        {move || {
+                            imeis
+                                .get()
+                                .into_iter()
+                                .map(|imei| { let shown = imei.clone(); view! { <option value=imei>{shown}</option> } })
+                                .collect_view()
+                        }}
+                    </Select>
+
+                    // 「包含文本」而不是「正则」：见模块开头。写着什么就做什么。
+                    <Input value=state.query placeholder="包含文本" />
+
                     {move || {
-                        imeis
-                            .get()
-                            .into_iter()
-                            .map(|imei| { let shown = imei.clone(); view! { <option value=imei>{shown}</option> } })
-                            .collect_view()
+                        if state.paused.get() {
+                            let held = state.held.get().len();
+                            view! {
+                                <Button
+                                    appearance=ButtonAppearance::Primary
+                                    on_click=move |_| resume(state)
+                                >
+                                    {format!("继续（缓冲 {held} 条）")}
+                                </Button>
+                            }
+                                .into_any()
+                        } else {
+                            view! {
+                                <Button on_click=move |_| state.paused.set(true)>"暂停"</Button>
+                            }
+                                .into_any()
+                        }
                     }}
-                </Select>
+                </Flex>
 
-                // 「包含文本」而不是「正则」：见模块开头。写着什么就做什么。
-                <Input value=state.query placeholder="包含文本" />
+                <Tally state=state shown=shown />
 
                 {move || {
-                    if state.paused.get() {
-                        let held = state.held.get().len();
-                        view! {
-                            <Button
-                                appearance=ButtonAppearance::Primary
-                                on_click=move |_| resume(state)
-                            >
-                                {format!("继续（缓冲 {held} 条）")}
-                            </Button>
-                        }
-                            .into_any()
+                    let rows = drawn.get();
+                    if rows.is_empty() {
+                        let total = state.rows.get().len();
+                        let say = if total == 0 {
+                            // ⚠️ 「还没有行」和「读不到」是两回事，后者由 Freshness 说。
+                            "还没有收到日志行。"
+                        } else {
+                            "当前筛选下没有行 —— 收到的行还在，只是被筛掉了。"
+                        };
+                        view! { <Caption1>{say}</Caption1> }.into_any()
                     } else {
                         view! {
-                            <Button on_click=move |_| state.paused.set(true)>"暂停"</Button>
-                        }
-                            .into_any()
-                    }
-                }}
-            </Flex>
-
-            <Tally state=state shown=shown />
-
-            {move || {
-                let rows = drawn.get();
-                if rows.is_empty() {
-                    let total = state.rows.get().len();
-                    let say = if total == 0 {
-                        // ⚠️ 「还没有行」和「读不到」是两回事，后者由 Freshness 说。
-                        "还没有收到日志行。"
-                    } else {
-                        "当前筛选下没有行 —— 收到的行还在，只是被筛掉了。"
-                    };
-                    view! { <Caption1>{say}</Caption1> }.into_any()
-                } else {
-                    view! {
-                        <Table>
-                            <TableBody>
+                            // 🔴 不用表格。日志栏只有 26rem 宽，四列表格会把「轮询」
+                            // 折成两行、把行文截掉——而行文是这一栏唯一真正要读的东西。
+                            //
+                            // 改成两行一条：短的元信息一行，行文独占一行；级别再用
+                            // 左边一条色带标一次，好让人竖着扫过去只找红的。
+                            <div class="vd-log">
                                 {rows
                                     .into_iter()
                                     .rev()
@@ -415,37 +416,34 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
                                             Level::Warn => BadgeColor::Warning,
                                             Level::Info => BadgeColor::Informative,
                                         };
+                                        let cls = match row.level {
+                                            Level::Err => "vd-log-row vd-log-row--err",
+                                            Level::Warn => "vd-log-row vd-log-row--warn",
+                                            Level::Info => "vd-log-row",
+                                        };
                                         view! {
-                                            <TableRow>
-                                                <TableCell>
-                                                    <Caption1>
+                                            <div class=cls>
+                                                <div class="vd-log-meta">
+                                                    <span class="vd-log-at">
                                                         {hhmmss(row.line.at as f64)}
-                                                    </Caption1>
-                                                </TableCell>
-                                                <TableCell>
-                                                    <Badge
-                                                        color=tone
-                                                        size=BadgeSize::Small
-                                                    >
+                                                    </span>
+                                                    <Badge color=tone size=BadgeSize::Small>
                                                         {row.level.label()}
                                                     </Badge>
-                                                </TableCell>
-                                                <TableCell>
-                                                    <Caption1>{row.topic.label()}</Caption1>
-                                                </TableCell>
-                                                <TableCell>{row.line.text.clone()}</TableCell>
-                                            </TableRow>
+                                                    <span class="vd-faint">{row.topic.label()}</span>
+                                                </div>
+                                                <div class="vd-log-text">{row.line.text.clone()}</div>
+                                            </div>
                                         }
                                     })
                                     .collect_view()}
-                            </TableBody>
-                        </Table>
+                            </div>
+                        }
+                            .into_any()
                     }
-                        .into_any()
-                }
-            }}
-        </Card>
-    }
+                }}
+
+        }
 }
 
 /// 「上一次读得怎么样」。⚠️ 这一格从不声称自己是新的。

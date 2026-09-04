@@ -35,6 +35,7 @@ mod esim;
 mod health;
 mod logs;
 mod scan;
+mod shell;
 mod sms;
 mod status;
 
@@ -48,8 +49,9 @@ use esim::{EsimPage, EsimState};
 use health::{Health, HealthPage};
 use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use scan::{ScanPage, ScanState};
+use shell::{Pane, Panel};
 use sms::{SmsPage, SmsState, INBOX_EVERY_MS};
-use status::{StatusPage, StatusState, STATUS_EVERY_MS};
+use status::{Freshness, ModeLabel, ModemRail, StatusState, STATUS_EVERY_MS};
 
 #[component]
 pub fn Panel() -> impl IntoView {
@@ -162,17 +164,103 @@ pub fn Panel() -> impl IntoView {
         console.forget_modem();
     });
 
+    // 中栏当前显示哪一块。`TabList` 用字符串，`Panel` 负责两边的翻译。
+    let tab = RwSignal::new(Panel::Health.key().to_string());
+
     view! {
         <ConfigProvider>
-            <StatusPage state=state />
-            <DangerZone status=state state=danger />
-            <HealthPage active=state.active state=health />
-            <ScanPage active=state.active state=scan />
-            <EsimPage active=state.active state=esim status=state />
-            <SmsPage state=sms status=state />
-            <CandidatesPage state=state claims=claims rescan_state=rescan_state />
-            <ConsolePage active=state.active state=console />
-            <LogsPage state=logs />
+            <Layout position=LayoutPosition::Absolute>
+                // ── 顶栏 ───────────────────────────────────────────────────
+                // 全局的三样：这是什么、连没连上云端、数据多新。⚠️ 新鲜度必须
+                // 在**任何**一栏之上，它说的是整块屏幕的年龄。
+                <LayoutHeader class="vd-top">
+                    <span class="vd-brand">"VoDoge 边缘面板"</span>
+                    <ModeLabel state=state />
+                    <span class="vd-top-end">
+                        <Freshness state=state />
+                    </span>
+                </LayoutHeader>
+
+                <Layout has_sider=true class="vd-deck">
+                    // ── 左栏：有哪几根 ─────────────────────────────────────
+                    // 选中哪一根是这块面板唯一的全局上下文：中栏每一个操作都
+                    // 瞄准它。所以它常驻，不做成标签。
+                    <LayoutSider class="vd-rail">
+                        <Pane title="模组">
+                            <ModemRail state=state />
+                        </Pane>
+                        <Pane title="USB 候选">
+                            <CandidatesPage
+                                state=state
+                                claims=claims
+                                rescan_state=rescan_state
+                            />
+                        </Pane>
+                        // 危险区钉在左栏底部，跟着选中的模组走——它是关于
+                        // **这一根**的，不是关于中栏当前那一块的。
+                        <div class="vd-rail-foot">
+                            <DangerZone status=state state=danger />
+                        </div>
+                    </LayoutSider>
+
+                    // ── 中栏：对选中这一根做什么 ───────────────────────────
+                    <Layout class="vd-main">
+                        <div class="vd-pane">
+                            <div class="vd-pane-head vd-tabs">
+                                <TabList selected_value=tab>
+                                    {Panel::ALL
+                                        .iter()
+                                        .map(|p| {
+                                            view! {
+                                                <Tab value=p.key()>{p.label()}</Tab>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </TabList>
+                            </div>
+                            <div class="vd-pane-body">
+                                {move || match Panel::from_key(&tab.get()) {
+                                    Panel::Health => {
+                                        view! { <HealthPage active=state.active state=health /> }
+                                            .into_any()
+                                    }
+                                    Panel::Network => {
+                                        view! { <ScanPage active=state.active state=scan /> }
+                                            .into_any()
+                                    }
+                                    Panel::Sms => {
+                                        view! { <SmsPage state=sms status=state /> }.into_any()
+                                    }
+                                    Panel::Esim => {
+                                        view! {
+                                            <EsimPage
+                                                active=state.active
+                                                state=esim
+                                                status=state
+                                            />
+                                        }
+                                            .into_any()
+                                    }
+                                    Panel::Console => {
+                                        view! { <ConsolePage active=state.active state=console /> }
+                                            .into_any()
+                                    }
+                                }}
+                            </div>
+                        </div>
+                    </Layout>
+
+                    // ── 右栏：daemon 此刻在说什么 ──────────────────────────
+                    // ⚠️ **不能**做成一个标签。中栏按下一个按钮之后要立刻看到
+                    // daemon 说了什么；把两者藏进互斥的标签里，就等于每做一步
+                    // 都要来回切一次。旧面板把它独立成一栏是对的。
+                    <LayoutSider class="vd-logs">
+                        <Pane title="日志">
+                            <LogsPage state=logs />
+                        </Pane>
+                    </LayoutSider>
+                </Layout>
+            </Layout>
         </ConfigProvider>
     }
 }

@@ -387,220 +387,217 @@ pub fn ConsolePage(active: RwSignal<Option<String>>, state: ConsoleState) -> imp
     };
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"AT / USSD 控制台"</b></Body1>
-                <CardHeaderDescription slot>
-                    <Caption1>
-                        {move || match active.get() {
-                            // ⚠️ 未选模组时命令落在哪里，必须在框边上就说清楚 ——
-                            // 对话框里也会再说一次。
-                            None => "未选模组 —— 命令会落在第一个应答的控制口".to_string(),
-                            Some(imei) => format!("发往 {imei}"),
-                        }}
-                    </Caption1>
-                </CardHeaderDescription>
-            </CardHeader>
+                        <div class="vd-actions">
+    <Caption1>
+                            {move || match active.get() {
+                                // ⚠️ 未选模组时命令落在哪里，必须在框边上就说清楚 ——
+                                // 对话框里也会再说一次。
+                                None => "未选模组 —— 命令会落在第一个应答的控制口".to_string(),
+                                Some(imei) => format!("发往 {imei}"),
+                            }}
+                        </Caption1>
+                    </div>
 
-            <Caption1Strong>"只读探针"</Caption1Strong>
-            <Caption1>"这一排全是只读查询，不会改模组状态。改状态的命令一律手输 —— 打字本身就是那道守卫。"</Caption1>
-            <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
-                {QUICK
-                    .iter()
-                    .map(|(label, command)| {
-                        let command = command.to_string();
-                        let probe = probe.clone();
-                        view! {
-                            <Button
-                                size=ButtonSize::Small
-                                on_click=move |_| probe(command.clone())
-                            >
-                                {*label}
-                            </Button>
-                        }
-                    })
-                    .collect_view()}
-            </Flex>
 
-            // ⚠️ USSD 会话开着的话，这句话跟着会话走——不跟着下面那个下拉框走。
-            // 切到 AT 不会关掉它，只有「取消会话」会。
-            {move || {
-                state
-                    .ussd_open
-                    .get()
-                    .then(|| {
-                        view! {
-                            <MessageBar
-                                intent=MessageBarIntent::Warning
-                                layout=MessageBarLayout::Multiline
-                            >
-                                <MessageBarBody>
-                                    <div>
-                                        "USSD 会话开着 —— 运营商在等回复。把菜单选项直接填进输入框再发一次；切到 AT 不会关掉它，只有「取消会话」会。"
-                                    </div>
-                                </MessageBarBody>
-                                <MessageBarActions>
-                                    <Button
-                                        size=ButtonSize::Small
-                                        on_click=move |_| {
-                                            let active = active.get_untracked();
-                                            leptos::task::spawn_local(async move {
-                                                cancel_ussd(state, active).await
-                                            });
-                                        }
-                                    >
-                                        "取消会话"
-                                    </Button>
-                                </MessageBarActions>
-                            </MessageBar>
-                        }
-                    })
-            }}
-
-            <Flex gap=FlexGap::Small style="flex-wrap: wrap;" align=FlexAlign::Center>
-                // 两个模式按钮而不是下拉框：Thaw 0.4.8 的 `Select` 双向绑定的是
-                // `Model<String>`，和这里的 `RwSignal<Mode>` 之间没有现成的转换，
-                // 硬凑一个字符串代理只会多一处「两份状态要保持同步」的地方；
-                // Thaw 0.4.8 也没有 ToggleButton，用 appearance 表示选中态。
-                <Button
-                    appearance=Signal::derive(move || {
-                        if state.mode.get() == Mode::At {
-                            ButtonAppearance::Primary
-                        } else {
-                            ButtonAppearance::Secondary
-                        }
-                    })
-                    on_click=move |_| state.mode.set(Mode::At)
-                >
-                    "AT"
-                </Button>
-                <Button
-                    appearance=Signal::derive(move || {
-                        if state.mode.get() == Mode::Ussd {
-                            ButtonAppearance::Primary
-                        } else {
-                            ButtonAppearance::Secondary
-                        }
-                    })
-                    on_click=move |_| state.mode.set(Mode::Ussd)
-                >
-                    "USSD"
-                </Button>
-
-                // ⚠️ 键盘处理挂在外面这个 div 上，不在 `Input` 上：Thaw 0.4.8 的
-                // `Input` 没有 `on_key_down` 这个 prop。按键会冒泡上来，效果一样，
-                // 而且不用改组件库。
-                <div on:keydown=move |event: web_sys::KeyboardEvent| {
-                        match event.key().as_str() {
-                            "Enter" => {
-                                event.prevent_default();
-                                send(state.input.get_untracked());
+                <Caption1Strong>"只读探针"</Caption1Strong>
+                <Caption1>"这一排全是只读查询，不会改模组状态。改状态的命令一律手输 —— 打字本身就是那道守卫。"</Caption1>
+                <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
+                    {QUICK
+                        .iter()
+                        .map(|(label, command)| {
+                            let command = command.to_string();
+                            let probe = probe.clone();
+                            view! {
+                                <Button
+                                    size=ButtonSize::Small
+                                    on_click=move |_| probe(command.clone())
+                                >
+                                    {*label}
+                                </Button>
                             }
-                            "ArrowUp" => {
-                                event.prevent_default();
-                                let history = state.history.get_untracked();
-                                let cursor = state.cursor.get_untracked();
-                                if cursor.is_none() {
-                                    // 翻之前先把这半行（连同模式）存下来。
-                                    state.draft.set((state.mode.get_untracked(), state.input.get_untracked()));
-                                }
-                                let (next, mode, text) = back(
-                                    &history,
-                                    cursor,
-                                    (state.mode.get_untracked(), &state.input.get_untracked()),
-                                );
-                                state.cursor.set(next);
-                                state.mode.set(mode);
-                                state.input.set(text);
-                            }
-                            "ArrowDown" => {
-                                event.prevent_default();
-                                let history = state.history.get_untracked();
-                                let draft = state.draft.get_untracked();
-                                let (next, mode, text) = forward(
-                                    &history,
-                                    state.cursor.get_untracked(),
-                                    (draft.0, &draft.1),
-                                );
-                                state.cursor.set(next);
-                                state.mode.set(mode);
-                                state.input.set(text);
-                            }
-                            "Escape" => {
-                                // ⚠️ Esc 是「取消我正在打的这一行」，不只是失焦。
-                                // 一行留在框里的半截命令，正是下一次回车会误发出去
-                                // 的那个东西。
-                                event.prevent_default();
-                                state.input.set(String::new());
-                                state.cursor.set(None);
-                                state.draft.set((state.mode.get_untracked(), String::new()));
-                            }
-                            _ => {}
-                        }
-                    }
-                >
-                    <Input
-                        value=state.input
-                        placeholder=Signal::derive(move || match state.mode.get() {
-                            Mode::At => "AT+…（回车发出，↑↓ 翻历史，Esc 清空这一行）".to_string(),
-                            Mode::Ussd => "*100#（回车发出，↑↓ 翻历史，Esc 清空这一行）".to_string(),
                         })
-                    />
-                </div>
-                <Button
-                    appearance=ButtonAppearance::Primary
-                    on_click=move |_| send(state.input.get_untracked())
-                >
-                    "发出"
-                </Button>
+                        .collect_view()}
+                </Flex>
 
-                // ⚠️ 只在 AT 模式下有意义：agent 自己的分类器（`edge_core::
-                // classify_at_command`，服务端已经在用的同一份判断）会拒绝任何
-                // 改动射频、通话、短信、卡或持久配置的命令，除非带 force。这一格
-                // 每次发送后自动复位——见模块文档。
-                //
-                // 🔴 用 `For` 而不是 `move || (…).then(...)`（原本试过，见下）把
-                // 这个 checkbox 包成一个只有 0 或 1 个元素、键是 `seq` 的列表。
-                // 每次发送/取消都会把 `seq` 往前推一格，这里的键跟着变，`For`
-                // 的 diff 会把「旧键」当成被删掉、「新键」当成刚加上——也就是
-                // 把 `<Checkbox>` 整个拆了重建，而不是原地更新它的 props。
-                //
-                // 这不是洁癖：Thaw 0.4.8 的这个 checkbox，从代码里（不是从用户
-                // 点击）把 `force` 改回 `false` 时，只有样式（勾选图标、CSS 类）
-                // 会跟着变，原生 `<input>` 那个 `checked` **属性**不会同步。属性
-                // 卡在陈旧的 `true` 上，下一次用户点这个看起来已经没勾的框，
-                // 浏览器的原生切换逻辑是拿那个陈旧的 `true` 去翻，翻成
-                // `false`——和当前状态一样，什么都看不出来，得再点一次才能真的
-                // 勾上。这正是「忘了关的开关」那句话要避免的那类静默失效，只是
-                // 换了个由头。曾经试过在同一个 `.then()` 分支里加一个不相关的
-                // `seq` 依赖逼它重新求值，没用——分支形状（`Some(...)`）没变，
-                // Leptos 只会原地更新 props，同一个 bug。只有真的换掉整个分支
-                // （用 `For` 的键值变化）才会真的重新创建 DOM 节点。
-                // `each` 自己读 `state.mode` / `state.seq`——把这两个 `.get()`
-                // 放进包一层的 `{move || ...}` 反而会让 `For` 追踪不到，因为
-                // 那样 `each` 闭包本身就只是「返回一份已经算好的快照」，不再
-                // 在自己的求值里触发信号读取。让 `For` 的 diff 逻辑亲自感知到
-                // 键集合变化，才能保证它真的按键去重建，而不是被外层的
-                // 「同一种形状」优化成原地更新 props。
-                <For
-                    each=move || {
-                        if state.mode.get() == Mode::At {
-                            vec![state.seq.get()]
-                        } else {
-                            Vec::new()
+                // ⚠️ USSD 会话开着的话，这句话跟着会话走——不跟着下面那个下拉框走。
+                // 切到 AT 不会关掉它，只有「取消会话」会。
+                {move || {
+                    state
+                        .ussd_open
+                        .get()
+                        .then(|| {
+                            view! {
+                                <MessageBar
+                                    intent=MessageBarIntent::Warning
+                                    layout=MessageBarLayout::Multiline
+                                >
+                                    <MessageBarBody>
+                                        <div>
+                                            "USSD 会话开着 —— 运营商在等回复。把菜单选项直接填进输入框再发一次；切到 AT 不会关掉它，只有「取消会话」会。"
+                                        </div>
+                                    </MessageBarBody>
+                                    <MessageBarActions>
+                                        <Button
+                                            size=ButtonSize::Small
+                                            on_click=move |_| {
+                                                let active = active.get_untracked();
+                                                leptos::task::spawn_local(async move {
+                                                    cancel_ussd(state, active).await
+                                                });
+                                            }
+                                        >
+                                            "取消会话"
+                                        </Button>
+                                    </MessageBarActions>
+                                </MessageBar>
+                            }
+                        })
+                }}
+
+                <Flex gap=FlexGap::Small style="flex-wrap: wrap;" align=FlexAlign::Center>
+                    // 两个模式按钮而不是下拉框：Thaw 0.4.8 的 `Select` 双向绑定的是
+                    // `Model<String>`，和这里的 `RwSignal<Mode>` 之间没有现成的转换，
+                    // 硬凑一个字符串代理只会多一处「两份状态要保持同步」的地方；
+                    // Thaw 0.4.8 也没有 ToggleButton，用 appearance 表示选中态。
+                    <Button
+                        appearance=Signal::derive(move || {
+                            if state.mode.get() == Mode::At {
+                                ButtonAppearance::Primary
+                            } else {
+                                ButtonAppearance::Secondary
+                            }
+                        })
+                        on_click=move |_| state.mode.set(Mode::At)
+                    >
+                        "AT"
+                    </Button>
+                    <Button
+                        appearance=Signal::derive(move || {
+                            if state.mode.get() == Mode::Ussd {
+                                ButtonAppearance::Primary
+                            } else {
+                                ButtonAppearance::Secondary
+                            }
+                        })
+                        on_click=move |_| state.mode.set(Mode::Ussd)
+                    >
+                        "USSD"
+                    </Button>
+
+                    // ⚠️ 键盘处理挂在外面这个 div 上，不在 `Input` 上：Thaw 0.4.8 的
+                    // `Input` 没有 `on_key_down` 这个 prop。按键会冒泡上来，效果一样，
+                    // 而且不用改组件库。
+                    <div on:keydown=move |event: web_sys::KeyboardEvent| {
+                            match event.key().as_str() {
+                                "Enter" => {
+                                    event.prevent_default();
+                                    send(state.input.get_untracked());
+                                }
+                                "ArrowUp" => {
+                                    event.prevent_default();
+                                    let history = state.history.get_untracked();
+                                    let cursor = state.cursor.get_untracked();
+                                    if cursor.is_none() {
+                                        // 翻之前先把这半行（连同模式）存下来。
+                                        state.draft.set((state.mode.get_untracked(), state.input.get_untracked()));
+                                    }
+                                    let (next, mode, text) = back(
+                                        &history,
+                                        cursor,
+                                        (state.mode.get_untracked(), &state.input.get_untracked()),
+                                    );
+                                    state.cursor.set(next);
+                                    state.mode.set(mode);
+                                    state.input.set(text);
+                                }
+                                "ArrowDown" => {
+                                    event.prevent_default();
+                                    let history = state.history.get_untracked();
+                                    let draft = state.draft.get_untracked();
+                                    let (next, mode, text) = forward(
+                                        &history,
+                                        state.cursor.get_untracked(),
+                                        (draft.0, &draft.1),
+                                    );
+                                    state.cursor.set(next);
+                                    state.mode.set(mode);
+                                    state.input.set(text);
+                                }
+                                "Escape" => {
+                                    // ⚠️ Esc 是「取消我正在打的这一行」，不只是失焦。
+                                    // 一行留在框里的半截命令，正是下一次回车会误发出去
+                                    // 的那个东西。
+                                    event.prevent_default();
+                                    state.input.set(String::new());
+                                    state.cursor.set(None);
+                                    state.draft.set((state.mode.get_untracked(), String::new()));
+                                }
+                                _ => {}
+                            }
                         }
-                    }
-                    key=|seq| *seq
-                    let:_seq
-                >
-                    <Checkbox checked=state.force label="强制" />
-                </For>
-            </Flex>
+                    >
+                        <Input
+                            value=state.input
+                            placeholder=Signal::derive(move || match state.mode.get() {
+                                Mode::At => "AT+…（回车发出，↑↓ 翻历史，Esc 清空这一行）".to_string(),
+                                Mode::Ussd => "*100#（回车发出，↑↓ 翻历史，Esc 清空这一行）".to_string(),
+                            })
+                        />
+                    </div>
+                    <Button
+                        appearance=ButtonAppearance::Primary
+                        on_click=move |_| send(state.input.get_untracked())
+                    >
+                        "发出"
+                    </Button>
 
-            <GuardList />
-            <Transcript state=state />
-        </Card>
-    }
+                    // ⚠️ 只在 AT 模式下有意义：agent 自己的分类器（`edge_core::
+                    // classify_at_command`，服务端已经在用的同一份判断）会拒绝任何
+                    // 改动射频、通话、短信、卡或持久配置的命令，除非带 force。这一格
+                    // 每次发送后自动复位——见模块文档。
+                    //
+                    // 🔴 用 `For` 而不是 `move || (…).then(...)`（原本试过，见下）把
+                    // 这个 checkbox 包成一个只有 0 或 1 个元素、键是 `seq` 的列表。
+                    // 每次发送/取消都会把 `seq` 往前推一格，这里的键跟着变，`For`
+                    // 的 diff 会把「旧键」当成被删掉、「新键」当成刚加上——也就是
+                    // 把 `<Checkbox>` 整个拆了重建，而不是原地更新它的 props。
+                    //
+                    // 这不是洁癖：Thaw 0.4.8 的这个 checkbox，从代码里（不是从用户
+                    // 点击）把 `force` 改回 `false` 时，只有样式（勾选图标、CSS 类）
+                    // 会跟着变，原生 `<input>` 那个 `checked` **属性**不会同步。属性
+                    // 卡在陈旧的 `true` 上，下一次用户点这个看起来已经没勾的框，
+                    // 浏览器的原生切换逻辑是拿那个陈旧的 `true` 去翻，翻成
+                    // `false`——和当前状态一样，什么都看不出来，得再点一次才能真的
+                    // 勾上。这正是「忘了关的开关」那句话要避免的那类静默失效，只是
+                    // 换了个由头。曾经试过在同一个 `.then()` 分支里加一个不相关的
+                    // `seq` 依赖逼它重新求值，没用——分支形状（`Some(...)`）没变，
+                    // Leptos 只会原地更新 props，同一个 bug。只有真的换掉整个分支
+                    // （用 `For` 的键值变化）才会真的重新创建 DOM 节点。
+                    // `each` 自己读 `state.mode` / `state.seq`——把这两个 `.get()`
+                    // 放进包一层的 `{move || ...}` 反而会让 `For` 追踪不到，因为
+                    // 那样 `each` 闭包本身就只是「返回一份已经算好的快照」，不再
+                    // 在自己的求值里触发信号读取。让 `For` 的 diff 逻辑亲自感知到
+                    // 键集合变化，才能保证它真的按键去重建，而不是被外层的
+                    // 「同一种形状」优化成原地更新 props。
+                    <For
+                        each=move || {
+                            if state.mode.get() == Mode::At {
+                                vec![state.seq.get()]
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        key=|seq| *seq
+                        let:_seq
+                    >
+                        <Checkbox checked=state.force label="强制" />
+                    </For>
+                </Flex>
+
+                <GuardList />
+                <Transcript state=state />
+
+        }
 }
 
 /// 守卫命令表。⚠️ 要在**任何人打字之前**就摆在屏幕上 —— 一条只在对话框里

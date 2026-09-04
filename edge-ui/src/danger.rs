@@ -229,10 +229,9 @@ pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
                 if is_manageable { "危险区" } else { "AT 通道" }
             );
             view! {
-                <Card>
-                    <CardHeader>
-                        <Body1><b>{heading}</b></Body1>
-                    </CardHeader>
+                    // ⚠️ 这一行带着 IMEI，而且「危险区」和「AT 通道」是两种不同的
+                    // 处境——AT-only 的模组够不到 QMI，射频开关和 USB 复位都不可用。
+                    <Caption1Strong>{heading}</Caption1Strong>
 
                     {move || {
                         state
@@ -308,7 +307,7 @@ pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
                     <Caption1>
                         "不再轮询它，并从上方列表移除。历史保留，之后可在 USB 候选里重新纳管。"
                     </Caption1>
-                </Card>
+
             }
                 .into_any()
         }}

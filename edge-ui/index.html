@@ -37,6 +37,137 @@
       /* ③ 标识符用等宽。IMEI、ICCID、IMSI 都是一位一位对着读的，比例字体下
          「0」和「O」、「1」和「l」要靠猜。 */
       .thaw-table-cell { font-variant-numeric: tabular-nums; }
+
+      /* ══ 页面骨架 ═══════════════════════════════════════════════════════
+         ⚠️ 这一段和上面三条不是一回事：上面改的是 Thaw **组件**的默认值，这里
+         是**页面自身的排布**——三栏各多宽、哪块滚哪块不滚。Thaw 没有、也不该
+         有这个，`Layout`/`LayoutSider` 只负责把它们摆成一行并各自套一个
+         `Scrollbar`；宽度是这块面板自己的决定。
+
+         🔴 为什么是三栏而不是一根长条：左栏「有哪几根」、中栏「对选中这根做
+         什么」、右栏「daemon 此刻在说什么」——排障时这三个问题是**同时**要看
+         的。第一版 Leptos 面板把所有卡片竖着堆起来，功能一个不少，但一屏能看
+         到的东西少了一大半。 */
+
+      html, body { height: 100%; margin: 0; }
+
+      :root {
+        --vd-rail: 15.5rem;   /* 左栏：放得下 15 位 IMEI 加一个状态徽章 */
+        --vd-logs: 26rem;     /* 右栏：放得下一行日志而不折行 */
+      }
+      @media (max-width: 1400px) { :root { --vd-rail: 14rem; --vd-logs: 22rem; } }
+      @media (max-width: 1180px) { :root { --vd-rail: 13rem; --vd-logs: 18rem; } }
+
+      .vd-top {
+        display: flex; align-items: center; gap: 12px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        flex: 0 0 auto;
+      }
+      .vd-brand { font-weight: 650; }
+      .vd-top-end { margin-left: auto; }
+
+      /* 1px 的缝隙是**分隔线**，不是留白：背景色从缝里透出来，正好画出两条
+         栏界。给它一个间距档位反而会变成一条 4px 的灰带。 */
+      .vd-deck {
+        gap: 1px;
+        background: var(--colorNeutralStroke2);
+        min-height: 0;
+      }
+      .vd-rail, .vd-logs, .vd-main { background: var(--colorNeutralBackground1); }
+      .vd-rail { flex: 0 0 var(--vd-rail); min-width: var(--vd-rail); }
+      .vd-logs { flex: 0 0 var(--vd-logs); min-width: var(--vd-logs); }
+      .vd-main { flex: 1 1 auto; min-width: 0; }
+
+      /* 一栏（或栏里的一块）：头不动，身子滚。头上是标题、新鲜度和这一栏的
+         动作按钮——滚走了就要人先滚回去才能按。 */
+      .vd-pane { display: flex; flex-direction: column; min-height: 0; }
+      .vd-pane-head {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        flex: 0 0 auto;
+      }
+      .vd-pane-head-end { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+      .vd-pane-body { padding: 8px 10px; min-height: 0; }
+      .vd-tabs { padding: 0 6px; }
+
+      .vd-rail-foot {
+        border-top: 1px solid var(--colorNeutralStroke2);
+        margin-top: auto;
+      }
+
+      /* ── 左栏里的一根模组 ────────────────────────────────────────────
+         六列的表塞不进 15rem，所以竖着堆。⚠️ 卡归属和驻留网络是**两行**：
+         生产机队里三根 QMI 模组全在漫游，只画驻留网络的话有两根看起来一模
+         一样，而它们的卡分别来自香港和美国。 */
+      .vd-modem-list { display: flex; flex-direction: column; gap: 6px; }
+      .vd-modem {
+        display: flex; flex-direction: column; gap: 1px;
+        width: 100%; text-align: left; cursor: pointer;
+        padding: 6px 8px;
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: 4px;
+        background: var(--colorNeutralBackground1);
+        color: inherit; font: inherit;
+      }
+      .vd-modem:hover { background: var(--colorNeutralBackground1Hover); }
+      .vd-modem--on {
+        border-color: var(--colorBrandStroke1);
+        background: var(--colorBrandBackground2);
+      }
+      .vd-modem-top { display: flex; align-items: center; gap: 6px; }
+      .vd-modem-imei {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        letter-spacing: .01em;
+      }
+      .vd-modem-line { font-size: 11px; line-height: 1.45; }
+      .vd-modem-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+      .vd-faint { color: var(--colorNeutralForeground3); }
+
+      /* ── 左栏里的一个候选 ────────────────────────────────────────────
+         和模组卡同一个形状：六列的表塞不进 15rem。 */
+      .vd-cand-list { display: flex; flex-direction: column; gap: 5px; }
+      .vd-cand {
+        display: flex; flex-direction: column; gap: 2px;
+        padding: 5px 7px;
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: 4px;
+        font-size: 11px;
+      }
+      .vd-cand-cell { min-width: 0; word-break: break-word; }
+
+      /* ── 日志行 ──────────────────────────────────────────────────────
+         26rem 塞不下四列表格，所以两行一条：短的元信息一行，行文独占一行。
+         左边那条色带是给「竖着扫一眼只找红的」用的。 */
+      .vd-log { display: flex; flex-direction: column; }
+      .vd-log-row {
+        padding: 3px 6px 4px;
+        border-bottom: 1px solid var(--colorNeutralStroke3);
+        border-left: 2px solid transparent;
+      }
+      .vd-log-row--warn { border-left-color: var(--colorPaletteDarkOrangeBorderActive); }
+      .vd-log-row--err  { border-left-color: var(--colorPaletteRedBorderActive); }
+      .vd-log-meta { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+      .vd-log-at { font-variant-numeric: tabular-nums; color: var(--colorNeutralForeground3); }
+      .vd-log-text {
+        font-size: 11px; line-height: 1.45;
+        word-break: break-word;
+      }
+
+      /* 各页顶部那一排动作按钮（原来在 Card 头里）。 */
+      .vd-actions {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+        margin-bottom: 6px;
+      }
+
+      /* 900px 以下三栏读不了，摊成一列——诚实地承认屏幕不够，好过硬挤。 */
+      @media (max-width: 900px) {
+        .vd-deck { flex-direction: column; }
+        .vd-rail, .vd-logs { flex: 0 0 auto; min-width: 0; }
+        .vd-main { min-height: 60vh; }
+      }
     </style>
   </head>
   <body></body>

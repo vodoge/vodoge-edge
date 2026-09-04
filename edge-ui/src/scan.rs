@@ -173,109 +173,106 @@ pub fn ScanPage(active: RwSignal<Option<String>>, state: ScanState) -> impl Into
     let running = Memo::new(move |_| matches!(state.scan.get(), Scan::Running { .. }));
 
     view! {
-        <Card>
-            <CardHeader>
-                <Body1><b>"扫网"</b></Body1>
-                <CardHeaderAction slot>
-                    <Button
-                        appearance=ButtonAppearance::Primary
-                        disabled=Signal::derive(move || active.get().is_none() || running.get())
-                        on_click=move |_| {
-                            let Some(imei) = active.get_untracked() else { return };
-                            if !confirmed(&ask(&imei)) {
-                                return;
-                            }
-                            leptos::task::spawn_local(async move { run(state, imei).await });
-                        }
-                    >
-                        {move || {
-                            if running.get() {
-                                "扫描中…"
-                            } else if matches!(state.scan.get(), Scan::Idle) {
-                                "扫网"
-                            } else {
-                                "重新扫网"
-                            }
-                        }}
-                    </Button>
-                </CardHeaderAction>
-            </CardHeader>
-
-            {move || match state.scan.get() {
-                Scan::Idle => {
-                    let say = if active.get().is_none() {
-                        "先在左边选一根模组。"
-                    } else {
-                        "还没有扫描。全频段扫网期间这一根不服务，最长 180 秒。"
-                    };
-                    view! { <Caption1>{say}</Caption1> }.into_any()
-                }
-                Scan::Running { since, stale } => {
-                    let elapsed = ((state.now.get() - since) / 1000.0).max(0.0);
-                    let limit = SCAN_LIMIT_MS / 1000.0;
-                    view! {
-                        // ⚠️ 三分钟里必须一直有东西在动，否则「在扫」和「卡死」
-                        // 长得一模一样。这条进度条走的是本地秒表。
-                        <ProgressBar
-                            value=Signal::derive(move || elapsed.min(limit))
-                            max=Signal::derive(move || limit)
-                            color=ProgressBarColor::Warning
-                        />
-                        <Caption1>
-                            {format!(
-                                "扫描中 · 已 {} 秒 / 最长 {} 秒 · 剩 {} 秒",
-                                elapsed.round() as u64,
-                                limit as u64,
-                                (limit - elapsed).max(0.0).round() as u64,
-                            )}
-                        </Caption1>
-                        <MessageBar
-                            intent=MessageBarIntent::Warning
-                            layout=MessageBarLayout::Multiline
-                        >
-                            <MessageBarBody>
-                                "这一根此刻不服务：不注册、不收短信、没有数据。\
-                                 它在机队里会显示为「忙」而不是离线。扫完自己回来，\
-                                 不需要任何补救动作。"
-                            </MessageBarBody>
-                        </MessageBar>
-                        {stale
-                            .map(|(result, at)| {
-                                view! { <Stale result=result at=at note="下面是上一次的结果。" /> }
-                            })}
-                    }
-                        .into_any()
-                }
-                Scan::Failed { why, stale } => {
-                    view! {
-                        <MessageBar
-                            intent=MessageBarIntent::Error
-                            layout=MessageBarLayout::Multiline
-                        >
-                            <MessageBarBody>
-                                <MessageBarTitle>"这次没扫成"</MessageBarTitle>
-                                {why}
-                            </MessageBarBody>
-                        </MessageBar>
-                        {stale
-                            .map(|(result, at)| {
-                                view! {
-                                    <Stale
-                                        result=result
-                                        at=at
-                                        note="下面是上一次的结果，不是刚才那次。"
-                                    />
+                        <div class="vd-actions">
+    <Button
+                            appearance=ButtonAppearance::Primary
+                            disabled=Signal::derive(move || active.get().is_none() || running.get())
+                            on_click=move |_| {
+                                let Some(imei) = active.get_untracked() else { return };
+                                if !confirmed(&ask(&imei)) {
+                                    return;
                                 }
-                            })}
+                                leptos::task::spawn_local(async move { run(state, imei).await });
+                            }
+                        >
+                            {move || {
+                                if running.get() {
+                                    "扫描中…"
+                                } else if matches!(state.scan.get(), Scan::Idle) {
+                                    "扫网"
+                                } else {
+                                    "重新扫网"
+                                }
+                            }}
+                        </Button>
+                    </div>
+
+
+                {move || match state.scan.get() {
+                    Scan::Idle => {
+                        let say = if active.get().is_none() {
+                            "先在左边选一根模组。"
+                        } else {
+                            "还没有扫描。全频段扫网期间这一根不服务，最长 180 秒。"
+                        };
+                        view! { <Caption1>{say}</Caption1> }.into_any()
                     }
-                        .into_any()
-                }
-                Scan::Done { result, at } => {
-                    view! { <Found result=result at=at /> }.into_any()
-                }
-            }}
-        </Card>
-    }
+                    Scan::Running { since, stale } => {
+                        let elapsed = ((state.now.get() - since) / 1000.0).max(0.0);
+                        let limit = SCAN_LIMIT_MS / 1000.0;
+                        view! {
+                            // ⚠️ 三分钟里必须一直有东西在动，否则「在扫」和「卡死」
+                            // 长得一模一样。这条进度条走的是本地秒表。
+                            <ProgressBar
+                                value=Signal::derive(move || elapsed.min(limit))
+                                max=Signal::derive(move || limit)
+                                color=ProgressBarColor::Warning
+                            />
+                            <Caption1>
+                                {format!(
+                                    "扫描中 · 已 {} 秒 / 最长 {} 秒 · 剩 {} 秒",
+                                    elapsed.round() as u64,
+                                    limit as u64,
+                                    (limit - elapsed).max(0.0).round() as u64,
+                                )}
+                            </Caption1>
+                            <MessageBar
+                                intent=MessageBarIntent::Warning
+                                layout=MessageBarLayout::Multiline
+                            >
+                                <MessageBarBody>
+                                    "这一根此刻不服务：不注册、不收短信、没有数据。\
+                                     它在机队里会显示为「忙」而不是离线。扫完自己回来，\
+                                     不需要任何补救动作。"
+                                </MessageBarBody>
+                            </MessageBar>
+                            {stale
+                                .map(|(result, at)| {
+                                    view! { <Stale result=result at=at note="下面是上一次的结果。" /> }
+                                })}
+                        }
+                            .into_any()
+                    }
+                    Scan::Failed { why, stale } => {
+                        view! {
+                            <MessageBar
+                                intent=MessageBarIntent::Error
+                                layout=MessageBarLayout::Multiline
+                            >
+                                <MessageBarBody>
+                                    <MessageBarTitle>"这次没扫成"</MessageBarTitle>
+                                    {why}
+                                </MessageBarBody>
+                            </MessageBar>
+                            {stale
+                                .map(|(result, at)| {
+                                    view! {
+                                        <Stale
+                                            result=result
+                                            at=at
+                                            note="下面是上一次的结果，不是刚才那次。"
+                                        />
+                                    }
+                                })}
+                        }
+                            .into_any()
+                    }
+                    Scan::Done { result, at } => {
+                        view! { <Found result=result at=at /> }.into_any()
+                    }
+                }}
+
+        }
 }
 
 #[component]
