@@ -42,6 +42,12 @@ pub struct SmsState {
     pub note: RwSignal<Option<SendNote>>,
     /// 只看当前选中的那一根。
     pub mine: RwSignal<bool>,
+    /// 操作员明确认下了这一根的发送代价。
+    ///
+    /// 🔴 **这是「我知道这一根会掉线」，不是一个全局开关。** 换模组必须清掉
+    /// （见 [`SmsState::forget_modem`]）—— 在 A 上认下的代价漂到 B 头上，
+    /// 就成了「替另一根做了决定」。
+    pub commission: RwSignal<bool>,
     inflight: RwSignal<bool>,
 }
 
@@ -58,6 +64,9 @@ pub enum SendNote {
     /// 代理那边失败的。
     Failed(String),
     Sent,
+    /// 发在一根**已知会掉线**的模组上。带着封禁表的 `also`：短信多半真的发出
+    /// 去了，接下来那一根会离开总线几十秒 —— 两件事都要说，不然操作员会重发。
+    SentWithCost(String),
 }
 
 impl SmsState {
@@ -66,6 +75,7 @@ impl SmsState {
             inbox: RwSignal::new(Load::Loading),
             to: RwSignal::new(String::new()),
             body: RwSignal::new(String::new()),
+            commission: RwSignal::new(false),
             note: RwSignal::new(None),
             mine: RwSignal::new(false),
             inflight: RwSignal::new(false),
@@ -82,6 +92,12 @@ impl SmsState {
     /// 原版也没有清它们。
     pub fn forget_modem(&self) {
         self.note.set(None);
+        // 🔴 代价的认可**不跨模组**。勾的是「我知道**这一根**发完会掉线」，
+        //    留着它切到下一根，等于替另一根做了这个决定。
+        //
+        // ⚠️ 正在打的号码和内容**故意留着**（切模组去查点东西再切回来是常事），
+        //    但这一个不留 —— 它不是草稿，是一次授权。
+        self.commission.set(false);
     }
 }
 
@@ -101,8 +117,14 @@ pub async fn poll(state: SmsState) {
 /// 面板自己的拦截。返回 `Some(理由)` 表示**不要发**。
 ///
 /// 抽成一个函数是为了能被测试直接调 —— 它是这一栏唯一会阻止硬件被触碰的东西。
-fn refusal(active: Option<&str>) -> Option<Refusal> {
+fn refusal(active: Option<&str>, commission: bool) -> Option<Refusal> {
     let Some(imei) = active else {
+        // 🔴 **这一条 `commission` 也越不过去。**
+        //
+        // 服务端的 `blocked_send` 里 `commission` 会短路掉全部检查，包括
+        // 「没带 IMEI」那一条。面板这里比服务端更严，是故意的：不带 IMEI 时
+        // 代理取的是它 modem map 里的第一条，而那一根**可能正是封禁的那根**。
+        // 「我知道这一根的代价」和「随便挑一根替我承担代价」是两回事。
         return Some(Refusal {
             // ⚠️ 标题不能是「这一根发不了」—— 一根都没选的时候，没有「这一根」。
             title: "先选一根模组",
@@ -111,10 +133,27 @@ fn refusal(active: Option<&str>) -> Option<Refusal> {
                 .into(),
         });
     };
+    if commission {
+        // 操作员已经在勾选框旁边读过代价，并且明确选了承担它。
+        return None;
+    }
     edge_core::sms_block(imei).map(|block| Refusal {
         title: "这一根发不了",
         why: format!("{imei} 被面板禁止发送短信。{}", block.why),
     })
+}
+
+/// 勾选框旁边那句话。
+///
+/// 🔴 **必须带上封禁表的 `also`。** 那一句是「短信多半真的发出去了」——而它
+/// 在此之前**一个地方都没显示过**，`refusal` 只用了 `why`。真要发的时候，
+/// 那才是操作员最需要知道的一句：被告知「失败」的人会重发，对方收两次。
+fn commission_ask(imei: &str) -> Option<String> {
+    let block = edge_core::sms_block(imei)?;
+    Some(format!(
+        "仍然发送 —— 我知道代价。{} {}",
+        block.why, block.also
+    ))
 }
 
 /// 一次拒绝：标题和理由。分开是因为这两种拒绝的**标题不一样** —— 一个是「还
@@ -126,8 +165,9 @@ struct Refusal {
 }
 
 async fn send(state: SmsState, active: Option<String>) {
+    let commission = state.commission.get_untracked();
     // ⚠️ 第二遍检查。按钮置灰是第一遍，而在文本框里按回车会绕过它。
-    if let Some(refused) = refusal(active.as_deref()) {
+    if let Some(refused) = refusal(active.as_deref(), commission) {
         state.note.set(Some(SendNote::Refused(refused.why)));
         return;
     }
@@ -143,19 +183,28 @@ async fn send(state: SmsState, active: Option<String>) {
     state.note.set(Some(SendNote::Sending));
     // ⚠️ `imei` 必须带上。这个字段就是上面那段拦截存在的理由。
     // ⚠️ `commission` 是**唯一**能越过短信封禁表的路径（见 edge-panel 的
-    // `blocked_send`）。这里恒为 false：面板上还没有它的入口，而这个字段
-    // 之所以写在这里而不是靠 `#[serde(default)]` 省掉，是为了让下一个加
-    // 复测通路的人一眼看见它在哪。
+    // `blocked_send`）。只有操作员在勾选框旁边读过代价并勾上，才会是 true。
+    let blocked_note = active
+        .as_deref()
+        .and_then(edge_core::sms_block)
+        .filter(|_| commission)
+        .map(|block| block.also.to_string());
     let payload = edge_panel_api::SendBody {
         to,
         body,
         imei: active,
-        commission: false,
+        commission,
     };
     let got: Load<SendReceipt> = api::post("/api/send", &payload, "发送").await;
     match got {
         Load::Ready(receipt) if receipt.status == "sent" => {
-            state.note.set(Some(SendNote::Sent));
+            // 🔴 在封禁的那一根上发成功之后，**不能只说「已提交」**。
+            //    那一根接下来会离开总线几十秒 —— 那是已知代价，不是故障；
+            //    而且短信多半真的发出去了，操作员这时候最不该做的就是重发。
+            state.note.set(Some(match blocked_note {
+                Some(also) => SendNote::SentWithCost(also),
+                None => SendNote::Sent,
+            }));
             state.to.set(String::new());
             state.body.set(String::new());
             leptos::task::spawn_local(async move { poll(state).await });
@@ -206,7 +255,9 @@ fn narrowed(messages: &[MessageBody], mine: bool, active: Option<&str>) -> Vec<M
 pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
     let active = status.active;
 
-    let blocked = Memo::new(move |_| refusal(active.get().as_deref()));
+    let blocked = Memo::new(move |_| refusal(active.get().as_deref(), state.commission.get()));
+    // 这一根有没有「认下代价就能发」这条路。没选模组时没有。
+    let ask = Memo::new(move |_| active.get().as_deref().and_then(commission_ask));
     let meter = Memo::new(move |_| {
         let body = state.body.get();
         if body.is_empty() {
@@ -249,6 +300,22 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
                                         {refused.why}
                                     </MessageBarBody>
                                 </MessageBar>
+                            }
+                        })
+                }}
+
+                // 🔴 认下代价才能发。勾选框上写的是**完整的代价**，包括
+                //    「短信多半真的发出去了」——那一句在此之前一处都没显示过，
+                //    而它正是操作员按下去之后最需要记得的：被告知「失败」的人
+                //    会重发，对方收两次。
+                {move || {
+                    ask.get()
+                        .map(|label| {
+                            view! {
+                                <Checkbox
+                                    checked=state.commission
+                                    label=label
+                                />
                             }
                         })
                 }}
@@ -343,6 +410,25 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
                                         <MessageBar intent=MessageBarIntent::Success>
                                             <MessageBarBody>
                                                 "已提交给代理（不是已送达 —— 投递回执是后来的事）"
+                                            </MessageBarBody>
+                                        </MessageBar>
+                                    }
+                                        .into_any()
+                                }
+                                // 🔴 发在一根已知会掉线的模组上。**两件事都要说**：
+                                //    接下来它会离开总线（是代价，不是故障），以及
+                                //    短信多半真的发出去了（所以别重发）。
+                                SendNote::SentWithCost(also) => {
+                                    view! {
+                                        <MessageBar
+                                            intent=MessageBarIntent::Warning
+                                            layout=MessageBarLayout::Multiline
+                                        >
+                                            <MessageBarBody>
+                                                <MessageBarTitle>
+                                                    "已提交 —— 接下来这一根会离开总线几十秒"
+                                                </MessageBarTitle>
+                                                {format!("{also} 它掉线是预期之中的，不是这次发送失败。")}
                                             </MessageBarBody>
                                         </MessageBar>
                                     }
@@ -492,7 +578,7 @@ mod tests {
     /// 在没有 IMEI 时会替你抽签。
     #[test]
     fn sending_without_a_chosen_modem_is_refused_and_says_why() {
-        let refused = refusal(None).expect("不选模组必须被拦");
+        let refused = refusal(None, false).expect("不选模组必须被拦");
         let why = &refused.why;
         assert_eq!(
             refused.title, "先选一根模组",
@@ -506,7 +592,7 @@ mod tests {
     #[test]
     fn a_blocked_modem_is_refused_here_too() {
         let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
-        let refused = refusal(Some(imei)).expect("封禁的模组必须被拦");
+        let refused = refusal(Some(imei), false).expect("封禁的模组必须被拦");
         let why = &refused.why;
         assert_eq!(refused.title, "这一根发不了");
         assert!(why.contains(imei), "要指名是哪一根：{why}");
@@ -518,7 +604,7 @@ mod tests {
 
     #[test]
     fn an_ordinary_modem_is_not_refused() {
-        assert_eq!(refusal(Some("860000000000001")), None);
+        assert_eq!(refusal(Some("860000000000001"), false), None);
     }
 
     /// 🔴 没记模组的消息在两个视图里都留着。
@@ -558,6 +644,66 @@ mod tests {
             edge_core::draft("hello #").limit,
             edge_core::UCS2_MAX_CHARS,
             "一个 # 就把限额从 160 打到 70"
+        );
+    }
+
+    /// 🔴 认下代价之后才发得出去，而且**代价那句话必须完整**。
+    ///
+    /// 封禁表有两句：`why`（每发一条丢一次模组）和 `also`（短信多半真的发出
+    /// 去了，所以别重发）。在此之前面板只显示 `why` —— 而真要发的时候，
+    /// `also` 才是最要紧的一句：被告知「失败」的人会重发，对方收两次。
+    #[test]
+    fn commissioning_opens_the_path_and_states_the_whole_cost() {
+        let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
+        let block = edge_core::sms_block(imei).expect("有条目");
+
+        assert!(refusal(Some(imei), false).is_some(), "没勾之前必须还是拦着");
+        assert!(
+            refusal(Some(imei), true).is_none(),
+            "勾了之后要放行 —— 否则这个入口是假的"
+        );
+
+        let label = commission_ask(imei).expect("封禁的模组要给出这条路");
+        assert!(label.contains(block.why), "勾选框上没写清代价：{label}");
+        assert!(
+            label.contains(block.also),
+            "勾选框上少了「短信多半真的发出去了」——那正是按下去之后最该记得的：{label}"
+        );
+    }
+
+    /// 🔴 没选模组时，`commission` 也越不过去。
+    ///
+    /// 服务端的 `blocked_send` 里 commission 会短路掉全部检查，包括这一条。
+    /// 面板这里比服务端更严，是故意的：不带 IMEI 时代理取 modem map 里的第一
+    /// 条，而那一根**可能正是封禁的那根**。「我知道这一根的代价」和「随便挑
+    /// 一根替我承担代价」是两回事。
+    #[test]
+    fn commissioning_never_covers_having_picked_no_modem() {
+        let refused = refusal(None, true).expect("没选模组时 commission 也不能放行");
+        assert_eq!(refused.title, "先选一根模组");
+    }
+
+    /// 没被封禁的模组不该出现这个勾选框 —— 它是给有代价的那根用的。
+    #[test]
+    fn a_modem_with_no_block_gets_no_commission_box() {
+        assert!(commission_ask("867018069514820").is_none());
+    }
+
+    /// 🔴 认下的代价**不跨模组**。
+    ///
+    /// 勾的是「我知道**这一根**发完会掉线」。留着它切到下一根，等于替另一根
+    /// 做了这个决定 —— 这正是 `lib.rs` 那段换模组清场要防的那类事。
+    #[test]
+    fn the_accepted_cost_does_not_follow_you_to_the_next_modem() {
+        let src = include_str!("sms.rs");
+        let body = src
+            .split("pub fn forget_modem")
+            .nth(1)
+            .expect("forget_modem 还在吗");
+        let body = &body[..body.find("\n    }").unwrap_or(body.len())];
+        assert!(
+            body.contains("commission.set(false)"),
+            "换模组没有清掉 commission —— 在 A 上认下的代价会漂到 B 头上"
         );
     }
 }
