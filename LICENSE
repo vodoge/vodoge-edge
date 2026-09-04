@@ -23,14 +23,27 @@ The following paths are licensed under the Apache License, Version 2.0. The
 complete text is in section 6 of this file.
 
     contract/       edge-core/      edge-modem/     edge-store/
-    edge-uplink/    edge-agent/     edge-panel/     edge-proxy/
-    edge-bin/
+    edge-uplink/    edge-agent/     edge-panel/     edge-panel-api/
+    edge-ui/        edge-proxy/     edge-bin/
 
 Also Apache-2.0: everything at the repository root that is not listed in
 section 2 -- Cargo.toml, Cargo.lock, scripts/, docs/, .github/, README.md.
 
 This matches `license = "Apache-2.0"` in Cargo.toml, which is the license
-metadata for these nine crates and only for these nine crates.
+metadata for these eleven crates and only for these eleven crates.
+
+That match is not automatic, and it has already been lost once. The
+workspace-level `license` key reaches a crate only when that crate's own
+Cargo.toml says `license.workspace = true`. edge-panel-api/ and edge-ui/ joined
+the workspace (commits 8979b4f and 0d9df15) without that line, so from those
+commits until this correction they were published here carrying no license
+metadata at all -- edge-ui/ compiled into the released binary among them --
+while this list still said nine. (An earlier draft of this paragraph counted
+those commits. A number derived from HEAD does not belong in a permanent
+licence file: it was accurate for about ten minutes, and every commit since
+has made it more wrong. The two crates also joined five commits apart, so no
+single count describes both.) A crate falls under this section only once its
+own manifest opts in. Check that line when you add one, and check this list.
 
     Licensed under the Apache License, Version 2.0 (the "License"); you may not
     use these files except in compliance with the License. You may obtain a
@@ -141,7 +154,7 @@ C3. No Rust source in this repository references either executable.
 C4. voice/ and vowifi/ are not part of the Cargo workspace.
     Falsified when Cargo.toml's members list gains either path, or when any
     crate grows a build script or dependency that compiles or embeds them.
-    Verified: members lists exactly the nine crates named in section 1.
+    Verified: members lists exactly the eleven crates named in section 1.
 
 C5. Nothing in this repository packages the Rust agent and the Go binaries into
     one deliverable.

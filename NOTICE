@@ -7,7 +7,8 @@ which path is under which license is in LICENSE. In short:
 
   Apache-2.0            the Rust workspace: contract/, edge-core/, edge-modem/,
                         edge-store/, edge-uplink/, edge-agent/, edge-panel/,
-                        edge-proxy/, edge-bin/, and the repository root.
+                        edge-panel-api/, edge-ui/, edge-proxy/, edge-bin/, and
+                        the repository root.
                         Full text: LICENSE, section 6.
 
   AGPL-3.0-or-later     voice/ (binary vodoge-voice) and vowifi/ (binary

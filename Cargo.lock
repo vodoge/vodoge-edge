@@ -515,6 +515,7 @@ version = "0.1.0"
 dependencies = [
  "edge-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

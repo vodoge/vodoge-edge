@@ -23,31 +23,37 @@ Plug a few Quectel modems into a small Linux box and the agent will:
 - **Refuse what it knows will not work.** A capability matrix records measured
   `(modem family, carrier)` facts. An unsupported pairing is refused by name
   rather than attempted and silently lost.
-- **Serve a LAN panel.** `:8743` shows every module, its card, signal and APN
-  contexts, and can send SMS and run AT — with no cloud involved.
+- **Serve a LAN panel.** `:8743` shows every module, its card and where it is
+  registered, plots the last hour of which modules were answering, reads signal
+  back on demand, and can send SMS, scan operators, switch eSIM profiles and run
+  AT — with no cloud involved.
 - **Answer the cloud.** Commands arrive over one outbound WSS connection and
   produce a receipt and a terminal result, exactly once each.
 
 ## Design
 
-Nine crates, one binary. The split is not decoration — `edge-core` is guarded by
-CI that fails if its source so much as *names* `std::fs`, `std::net`, `std::io`
-or `std::process`:
+Eleven crates, one binary. The split is not decoration — `edge-core` is guarded
+by CI that fails if its source so much as *names* `std::fs`, `std::net`,
+`std::io` or `std::process`:
 
 ```
-contract/     Protocol types, generated from the edge-cloud JSON Schema
-edge-core/    Pure domain: capability matrix, strategies, settlement, policy
-              ── no I/O, enforced by scripts/check-core-source.sh
-edge-modem/   QMI/QMUX codecs, AT transport, eUICC (ES10c), discovery
-edge-store/   SQLite: local inbox, uplink outbox, persisted matrix
-edge-uplink/  Cumulative acknowledgement and gap state — pure
-edge-agent/   Command execution: receipt, dispatch, terminal result
-edge-panel/   Axum LAN panel and the in-process log ring
-edge-proxy/   Per-modem proxy listeners
-edge-bin/     The single binary that wires all of the above together
+contract/       Protocol types, generated from the edge-cloud JSON Schema
+edge-core/      Pure domain: capability matrix, strategies, settlement, policy
+                ── no I/O, enforced by scripts/check-core-source.sh
+edge-modem/     QMI/QMUX codecs, AT transport, eUICC (ES10c), discovery
+edge-store/     SQLite: local inbox, uplink outbox, persisted matrix
+edge-uplink/    Cumulative acknowledgement and gap state — pure
+edge-agent/     Command execution: receipt, dispatch, terminal result
+edge-panel/     Axum LAN panel and the in-process log ring
+edge-panel-api/ The panel's HTTP types, shared by its two halves — no I/O,
+                and must stay buildable for wasm32
+edge-ui/        The panel's browser half: Leptos, built by trunk into
+                edge-ui/dist/ and embedded into edge-panel
+edge-proxy/     Per-modem proxy listeners
+edge-bin/       The single binary that wires all of the above together
 
-voice/        Go: IMS media relay (vodoge-voice)         ── AGPL-3.0
-vowifi/       Go: IKEv2/EAP-AKA stack (vodoge-ike-probe) ── AGPL-3.0
+voice/          Go: IMS media relay (vodoge-voice)         ── AGPL-3.0
+vowifi/         Go: IKEv2/EAP-AKA stack (vodoge-ike-probe) ── AGPL-3.0
 ```
 
 Two rules earn their keep repeatedly:
@@ -373,7 +379,7 @@ This repository is not under one license. The complete map is in
 
 | Path | License | Full text |
 | --- | --- | --- |
-| `contract/` `edge-core/` `edge-modem/` `edge-store/` `edge-uplink/` `edge-agent/` `edge-panel/` `edge-proxy/` `edge-bin/`, and the repository root | Apache-2.0 | `LICENSE`, section 6 |
+| `contract/` `edge-core/` `edge-modem/` `edge-store/` `edge-uplink/` `edge-agent/` `edge-panel/` `edge-panel-api/` `edge-ui/` `edge-proxy/` `edge-bin/`, and the repository root | Apache-2.0 | `LICENSE`, section 6 |
 | `voice/` (binary `vodoge-voice`) | AGPL-3.0-or-later | `voice/LICENSE` |
 | `vowifi/` (binary `vodoge-ike-probe`) | AGPL-3.0-or-later | `vowifi/LICENSE` |
 

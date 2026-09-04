@@ -2,7 +2,14 @@
 name = "edge-panel-api"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 edge-core = { path = "../edge-core" }
 serde = { version = "1", features = ["derive"] }
+
+# ⚠️ 只在 dev 里。这个 crate 要能编到 wasm32，正文依赖那一栏是刻意压到
+# serde + edge-core 的；线格式的断言需要能把结构体读成一棵通用的 JSON 树，
+# 那是测试代码的事，进不了浏览器产物。
+[dev-dependencies]
+serde_json = "1"
