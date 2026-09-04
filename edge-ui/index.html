@@ -120,6 +120,50 @@
       .vd-pane-body { padding: 8px 10px; min-height: 0; }
       .vd-tabs { padding: 0 6px; }
 
+      /* ── 舰队一行 + 轨迹条带 ────────────────────────────────────────
+         2026-09-04：三根 QMI 在轮流掉线，面板每一帧都画对了，而看的人不可能
+         看出「在轮换」——发现它靠的是拿 shell 采了六分钟 lsusb。这一小块就是
+         那条缺掉的时间轴。 */
+      .vd-fleet {
+        display: flex; flex-direction: column; gap: 2px;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        font-size: 12px; line-height: 1.35;
+      }
+
+      .vd-trace {
+        display: flex; gap: 1px;
+        height: 9px; margin: 4px 0 2px;
+      }
+      .vd-tick { flex: 1 1 0; min-width: 0; border-radius: 1px; }
+
+      /* 答了。 */
+      .vd-tick--up   { background: var(--colorPaletteGreenBackground3); }
+      /* agent 说它在，但这一帧没答。 */
+      .vd-tick--down { background: var(--colorPaletteRedBackground3); }
+      /* agent 压根没提它——和「没答」分开，指向的排查方向不一样。 */
+      .vd-tick--gone { background: var(--colorNeutralStroke2); }
+
+      /* 🔴 我们没问到 agent。**必须一眼看出不是模组的状态。**
+         所以既不用红也不用绿，用斜纹——「这里没有信息」这件事本身要有形状。
+         画成红色的话，一次网络抖动在屏幕上就是一段模组掉线，
+         而那是会让人跑一趟机房的结论。 */
+      .vd-tick--unread {
+        background: repeating-linear-gradient(
+          45deg,
+          var(--colorNeutralStroke3) 0 2px,
+          transparent 2px 4px
+        );
+        outline: 1px solid var(--colorNeutralStroke3);
+        outline-offset: -1px;
+      }
+
+      /* 翻转次数。没到一分钟观察量时组件返回空串，这一行自然不占位。 */
+      .vd-modem-flip:empty { display: none; }
+
+      /* 上一次读到的列表。压暗，免得被读成当前状态——旁边那条警告条说明了年龄。 */
+      .vd-stale { opacity: 0.55; }
+
       .vd-rail-foot {
         border-top: 1px solid var(--colorNeutralStroke2);
         margin-top: auto;

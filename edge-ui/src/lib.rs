@@ -38,6 +38,7 @@ mod scan;
 mod shell;
 mod sms;
 mod status;
+mod trace;
 
 use leptos::prelude::*;
 use thaw::*;

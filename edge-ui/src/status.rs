@@ -55,6 +55,19 @@ pub struct StatusState {
     pub active: RwSignal<Option<String>>,
     /// 轮询是否在飞。🔴 原版没有这个，慢响应会重叠、旧响应能覆盖新响应。
     pub in_flight: RwSignal<bool>,
+    /// 最后一次**读成功**的列表，连同它的时刻。
+    ///
+    /// 🔴 读失败时不清空模组列表——`health.rs` 早就是这么做的（「下面是上一次
+    /// 的结果」），而这一栏是全项目唯一还在无条件丢掉上一帧的读取路径。
+    /// 一次网络抖动让四根模组从屏幕上一起消失，比显示一份标注了年龄的旧列表
+    /// 坏得多：前者看起来像硬件全掉了。
+    pub stale: RwSignal<Option<(StatusBody, f64)>>,
+    /// 舰队的时间轴。见 `trace.rs` 开头那段。
+    ///
+    /// 🔴 **这个字段不进 `lib.rs` 的换模组清场。** 那段注释写着「加新页面的人：
+    /// 你的状态也要在这里清一次」，而轨迹是唯一的例外——它是**舰队级**的、
+    /// 跨模组的，切一次模组清一次就等于永远看不到轮换，而轮换正是它存在的理由。
+    pub trace: RwSignal<std::collections::VecDeque<crate::trace::Frame>>,
 }
 
 impl StatusState {
@@ -65,6 +78,8 @@ impl StatusState {
             now: RwSignal::new(now_ms()),
             active: RwSignal::new(None),
             in_flight: RwSignal::new(false),
+            stale: RwSignal::new(None),
+            trace: RwSignal::new(std::collections::VecDeque::new()),
         }
     }
 }
@@ -211,6 +226,111 @@ fn discovery_label(raw: &str) -> &str {
     }
 }
 
+/// 时:分:秒。⚠️ 和 `health.rs` / `logs.rs` 等处同源的那一份——重复了六份，
+/// 该收进 `edge-core`，但那是另一件事，不在这次改动里顺手做。
+fn hhmmss(at: f64) -> String {
+    let d = js_sys::Date::new(&at.into());
+    format!(
+        "{:02}:{:02}:{:02}",
+        d.get_hours(),
+        d.get_minutes(),
+        d.get_seconds()
+    )
+}
+
+/// 轨迹条带画多少格。10 秒一帧 × 60 = 10 分钟，正好塞进 15.5rem 的左栏。
+///
+/// ⚠️ 只是**画**多少格；`trace.rs` 留的是 360 帧（1 小时）。翻转次数按全部
+/// 帧算，条带只显示尾巴——两者的窗口不一样，所以文案里必须各自说清自己的跨度。
+const TRACE_COLS: usize = 60;
+
+/// 一根模组最近十分钟答没答。
+///
+/// 🔴 四种格子，四种颜色，**「读不到 agent」必须自成一色**。把它画成「离线」，
+/// 一次网络抖动就会在屏幕上变成一段模组掉线——而那是会让人跑一趟机房的结论。
+#[component]
+fn TraceStrip(state: StatusState, #[prop(into)] imei: String) -> impl IntoView {
+    view! {
+        <span class="vd-trace" aria-hidden="true">
+            {move || {
+                let t = state.trace.get();
+                crate::trace::strip(&t, &imei, TRACE_COLS)
+                    .into_iter()
+                    .map(|c| {
+                        let cls = match c {
+                            crate::trace::Cell::Answering => "vd-tick vd-tick--up",
+                            crate::trace::Cell::Silent => "vd-tick vd-tick--down",
+                            crate::trace::Cell::Absent => "vd-tick vd-tick--gone",
+                            crate::trace::Cell::Unread => "vd-tick vd-tick--unread",
+                        };
+                        view! { <i class=cls></i> }
+                    })
+                    .collect_view()
+            }}
+        </span>
+    }
+}
+
+/// 舰队一行：在册几根、此刻答几根、观察窗内同时答几根。
+///
+/// 🔴 **「在册 3、而同时应答从没超过 2」这一句就是结论本身**——它等价于
+/// 「总线挂不住三个」，正是 2026-09-04 那次操作员要拿 shell 采六分钟 `lsusb`
+/// 才得到的判断。零 agent 改动，全部从轨迹推出来。
+#[component]
+fn FleetLine(state: StatusState) -> impl IntoView {
+    view! {
+        {move || {
+            let t = state.trace.get();
+            let registered = match state.load.get() {
+                Load::Ready(b) => b.modems.len(),
+                _ => state.stale.get().map(|(b, _)| b.modems.len()).unwrap_or(0),
+            };
+            let window = crate::trace::window_ms(&t);
+            let now = crate::trace::latest_answering(&t);
+            let span = crate::trace::concurrency(&t);
+
+            // ⚠️ 观察不足时**什么都不说**。两帧就敢下「总线挂不住三个」的结论，
+            //    比不说更坏——它会让人相信一个还没被观察到的模式。
+            if window < 60_000.0 || registered == 0 {
+                return view! {
+                    <span class="vd-fleet vd-faint">
+                        {format!("在册 {registered} 根 · 轨迹还在攒（不足 1 分钟）")}
+                    </span>
+                }.into_any();
+            }
+
+            let mins = (window / 60_000.0).round() as i64;
+            let now_txt = match now {
+                Some((_, n)) => format!("此刻应答 {n}"),
+                None => "此刻读不到 agent".to_string(),
+            };
+            let (lo, hi) = span.unwrap_or((0, 0));
+            let span_txt = if lo == hi {
+                format!("同时应答恒为 {lo}")
+            } else {
+                format!("同时应答 {lo}–{hi}")
+            };
+            // 🔴 这就是那句结论。在册数大于历史同时应答上限 = 挂不住。
+            let verdict = registered > hi;
+
+            view! {
+                <span class="vd-fleet">
+                    <span>{format!("在册 {registered} 根 · {now_txt}")}</span>
+                    <span class="vd-faint">{format!("近 {mins} 分钟：{span_txt}")}</span>
+                    {verdict
+                        .then(|| {
+                            view! {
+                                <Badge color=BadgeColor::Warning size=BadgeSize::Small>
+                                    {format!("{registered} 根在册，但同时最多只应答过 {hi} 根")}
+                                </Badge>
+                            }
+                        })}
+                </span>
+            }.into_any()
+        }}
+    }
+}
+
 /// 左栏里的一根模组。
 ///
 /// 🔴 **卡归属和驻留网络是两行，不是一行。** 2026-09-04 的生产机队里三根 QMI
@@ -236,6 +356,7 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
     let iccid = modem.iccid.clone();
     let family = modem.family.clone();
     let last_seen = modem.last_seen;
+    let control_port = modem.control_port.clone();
     let discovery = discovery_label(&modem.discovery).to_string();
     let manageable = modem.manageable;
     let fallback = matches!(
@@ -282,6 +403,34 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
             <span class="vd-modem-line vd-faint">
                 {iccid.clone().map(|c| format!("ICCID {c}")).unwrap_or_else(|| "ICCID —".into())}
             </span>
+            // 🔴 控制口。2026-09-04 整件事就是「哪个 cdc-wdm 节点消失了」，
+            // 而节点在重新枚举时会在模组之间**重新分配**——不写在卡上，
+            // 操作员永远拼不出这条因果。agent 一直在给这个字段，只是没人画。
+            <span class="vd-modem-line vd-faint">
+                {control_port.clone().unwrap_or_else(|| "控制口 —".into())}
+            </span>
+
+            // 最近十分钟的应答轨迹。快照说「现在怎么样」，这条说「一直怎么样」。
+            <TraceStrip state=state imei=imei.clone() />
+            <span class="vd-modem-line vd-faint vd-modem-flip">
+                {
+                    let imei = imei.clone();
+                    move || {
+                        let t = state.trace.get();
+                        let w = crate::trace::window_ms(&t);
+                        // ⚠️ 翻转次数**必须**配着实际观察长度一起说。只写「翻转
+                        //    22 次」不写分母，看着像结论，其实没有尺度。
+                        if w < 60_000.0 {
+                            return String::new();
+                        }
+                        let n = crate::trace::flips(&t, &imei);
+                        if n == 0 {
+                            return String::new();
+                        }
+                        format!("近 {} 分钟翻转 {n} 次", (w / 60_000.0).round() as i64)
+                    }
+                }
+            </span>
 
             <span class="vd-modem-flags">
                 <Badge appearance=BadgeAppearance::Outline size=BadgeSize::Small>
@@ -327,6 +476,9 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
 #[component]
 pub fn ModemRail(state: StatusState) -> impl IntoView {
     view! {
+        // 舰队一行在四种画面**之上**：它说的是这一小时的形态，
+        // 不属于「这一次读到了什么」。
+        <FleetLine state=state />
         {move || match state.load.get() {
             // ① 在飞。和「没有」是两回事。
             Load::Loading => view! { <Spinner label="正在读取 agent…" /> }.into_any(),
@@ -334,6 +486,13 @@ pub fn ModemRail(state: StatusState) -> impl IntoView {
             // ② 🔴 失败，画在**这一栏上**，带原因。原版把它折叠成了空列表，
             //    失败原因只出现在另一个标签的控制台里。
             Load::Failed(why) => {
+                // 🔴 读不到**不清空列表**。`health.rs` 早就是这么做的
+                //    （「下面是上一次的结果」），而这一栏一直是全项目唯一
+                //    无条件丢掉上一帧的读取路径。一次网络抖动让四根模组从
+                //    屏幕上一起消失，看起来就是「硬件全掉了」——而这块面板
+                //    的职责恰恰是在故障时说清「我没问到」和「它没了」的区别。
+                let stale = state.stale.get();
+                let st = state;
                 view! {
                     <MessageBar intent=MessageBarIntent::Error layout=MessageBarLayout::Multiline>
                         <MessageBarBody>
@@ -341,6 +500,29 @@ pub fn ModemRail(state: StatusState) -> impl IntoView {
                             {why}
                         </MessageBarBody>
                     </MessageBar>
+                    {stale
+                        .map(|(body, at)| {
+                            view! {
+                                <MessageBar
+                                    intent=MessageBarIntent::Warning
+                                    layout=MessageBarLayout::Multiline
+                                >
+                                    <MessageBarBody>
+                                        {format!(
+                                            "下面是上一次读到的列表，读于 {} —— 不是现在的状态。",
+                                            hhmmss(at),
+                                        )}
+                                    </MessageBarBody>
+                                </MessageBar>
+                                <div class="vd-modem-list vd-stale">
+                                    {body
+                                        .modems
+                                        .into_iter()
+                                        .map(|m| view! { <ModemCard modem=m state=st /> })
+                                        .collect_view()}
+                                </div>
+                            }
+                        })}
                 }
                     .into_any()
             }
@@ -404,11 +586,50 @@ pub async fn poll(state: StatusState) {
     }
     state.in_flight.set(true);
     let result: Load<StatusBody> = api::get("/api/status", "读取状态").await;
-    if matches!(result, Load::Ready(_)) {
-        state.last_ok.set(now_ms());
+    let at = now_ms();
+
+    // 🔴 **两个分支都要往轨迹里推一帧。** 只推成功的那些，会在轨迹上造出一段
+    // 假的连续——十分钟读不到 agent 会被画成十分钟一切正常。
+    match &result {
+        Load::Ready(body) => {
+            state.last_ok.set(at);
+            state.stale.set(Some((body.clone(), at)));
+            let seen = body
+                .modems
+                .iter()
+                .map(|m| (m.imei.clone(), answering(&m.state)))
+                .collect();
+            state
+                .trace
+                .update(|t| crate::trace::push(t, crate::trace::Frame { at, ok: true, seen }));
+        }
+        Load::Failed(_) => {
+            state.trace.update(|t| {
+                crate::trace::push(
+                    t,
+                    crate::trace::Frame {
+                        at,
+                        ok: false,
+                        seen: Vec::new(),
+                    },
+                )
+            });
+        }
+        Load::Loading => {}
     }
+
     state.load.set(result);
     state.in_flight.set(false);
+}
+
+/// 这一帧里，这根模组算不算「答了」。
+///
+/// ⚠️ `Offline` 是 agent 按 `last_seen` 超过 60 秒判的（`edge-panel` 的
+/// `STALE_AFTER_MS`）。除它以外的状态都意味着这一轮探测拿到了回应——
+/// 包括 `denied`、`notregistered` 这些「答了但注册不上」的。
+/// **答没答**和**注册没注册**是两件事，轨迹画的是前者。
+pub fn answering(raw: &str) -> bool {
+    state_key(raw) != "offline"
 }
 
 #[cfg(test)]
