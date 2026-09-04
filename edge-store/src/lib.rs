@@ -9,7 +9,10 @@ mod outbox;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub use outbox::{CapacityAlert, DurableOutbox, QueueError, DEFAULT_MAX_RECORDS};
+pub use outbox::{
+    CapacityAlert, CapacityOutcome, CapacityOverflow, DurableOutbox, QueueError,
+    DEFAULT_MAX_RECORDS,
+};
 
 /// Where each module was last seen on the USB bus.
 ///
