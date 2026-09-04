@@ -165,3 +165,131 @@ mod tests {
         );
     }
 }
+
+/// 布局接线的守卫：规则挂错元素**不会报错，只是不生效**。
+///
+/// 🔴 这一组测试守的是一个已经发生过的坑。`Layout has_sider=true` 不把自己变成
+/// flex 容器——它把 `display:flex; flex-direction:row` 写成**行内样式**，写在内层
+/// 的 `.thaw-scrollbar__content` 上；`class=` 落到的外层 div 是 `display:block`。
+/// 于是三栏规则挂在 `.vd-deck` 上时，`gap` 和 `flex-direction` 一条都不生效，
+/// 编译过、运行不报错、控制台干净，只有在 900px 以下才看得出后果：中栏被压成
+/// 0 宽，短信 / eSIM / 控制台三个标签整个跑到视口外面被裁掉，点不到。
+///
+/// 而且当时我用 `documentElement.scrollWidth > clientWidth` 验的「没有横向溢出」
+/// ——那个判断是**假绿**：溢出被祖先裁掉了，所以文档本身确实不滚动。
+#[cfg(test)]
+mod layout_wiring {
+    /// 布局规则的两半：一半在 CSS 里，一半是 Leptos 传下去的 prop。
+    const INDEX: &str = include_str!("../index.html");
+    const LIB: &str = include_str!("lib.rs");
+
+    /// 在 `display:block` 的元素上写了也白写的属性。
+    const INERT_ON_BLOCK: &[&str] = &[
+        "flex-direction",
+        "flex-wrap",
+        "gap:",
+        "align-items",
+        "justify-content",
+    ];
+
+    /// 两边的名字必须对得上：CSS 里的选择器，就是 `content_class` 传下去的那个。
+    #[test]
+    fn the_deck_rules_target_the_class_the_shell_actually_passes() {
+        let name = LIB
+            .split("content_class=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("没给 Layout 传 content_class —— 三栏规则会挂到外层那个 display:block 的 div 上，全部失效");
+
+        assert!(
+            INDEX.contains(&format!(".{name} {{")) && INDEX.contains(&format!(".{name} >")),
+            "index.html 里找不到 .{name} 的规则：名字只改了一半"
+        );
+    }
+
+    /// 去掉 CSS 注释。注释里出现的花括号和选择器会毒化下面的切分。
+    fn strip_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(i) = rest.find("/*") {
+            out.push_str(&rest[..i]);
+            match rest[i + 2..].find("*/") {
+                Some(j) => rest = &rest[i + 2 + j + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 把 CSS 摊成 (选择器, 这一段声明)。
+    ///
+    /// ⚠️ 不能用「按 `}` 切一刀」那种写法。`@media` 是**嵌套**的：规则写在断点
+    /// 里面时，那种切法会把它整段算进 `@media` 的 body，于是选择器变成
+    /// `@media (…)` 而不是 `.vd-deck`——而历史上出问题的那一处**正好就在断点
+    /// 里面**。第一版守卫就是这么写的，变异测试当场漏掉了它。
+    fn declarations_by_selector(css: &str) -> Vec<(String, String)> {
+        let css = strip_comments(css);
+        let mut out = Vec::new();
+        let mut mark = 0usize;
+        for (i, ch) in css.char_indices() {
+            match ch {
+                '{' => {
+                    let selector = css[mark..i].trim().to_string();
+                    let body_end = css[i + 1..]
+                        .find(['{', '}'])
+                        .map(|j| i + 1 + j)
+                        .unwrap_or(css.len());
+                    out.push((selector, css[i + 1..body_end].to_string()));
+                    mark = i + 1;
+                }
+                '}' => mark = i + 1,
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// 排布属性不许挂回外层那个 `.vd-deck`——挂上去是死的。
+    #[test]
+    fn no_layout_property_hangs_on_the_block_level_deck() {
+        for (selector, body) in declarations_by_selector(INDEX) {
+            let targets_outer = selector
+                .split(',')
+                .map(str::trim)
+                .any(|s| s == ".vd-deck" || s.starts_with(".vd-deck "));
+            if !targets_outer {
+                continue;
+            }
+            for prop in INERT_ON_BLOCK {
+                assert!(
+                    !body.contains(prop),
+                    "`{prop}` 挂在了 .vd-deck 上（选择器 `{selector}`）。那个元素是 \
+                     display:block，这条规则不生效也不报错 —— 挂到 content_class 那一层去"
+                );
+            }
+        }
+    }
+
+    /// 换方向必须 `!important`：行内样式否则赢不了。
+    #[test]
+    fn the_stacked_layout_can_outrank_the_inline_style() {
+        let mq = INDEX
+            .split("@media (max-width: 900px)")
+            .nth(1)
+            .expect("900px 断点没了——窄屏会一直挤成三栏");
+        let rule = mq
+            .split_once("flex-direction")
+            .expect("断点里没有改方向：摊成一列全靠这一条")
+            .1;
+        let decl = rule.split(';').next().unwrap_or_default();
+        assert!(
+            decl.contains("!important"),
+            "改方向没写 !important —— `has_sider` 的行内 `flex-direction: row` 会赢，\
+             窄屏还是三栏，中栏被压成 0 宽"
+        );
+    }
+}

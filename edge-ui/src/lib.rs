@@ -181,7 +181,11 @@ pub fn Panel() -> impl IntoView {
                     </span>
                 </LayoutHeader>
 
-                <Layout has_sider=true class="vd-deck">
+                // ⚠️ `content_class` 不是装饰：`has_sider` 把 flex 行内样式写在
+                // 内层滚动节点上，`class` 落到的外层 div 是 display:block。
+                // 三栏的排布规则必须挂到 `vd-deck-flow` 上才有效——
+                // 改名要两边一起改，`shell.rs` 里有一条测试守着这件事。
+                <Layout has_sider=true class="vd-deck" content_class="vd-deck-flow">
                     // ── 左栏：有哪几根 ─────────────────────────────────────
                     // 选中哪一根是这块面板唯一的全局上下文：中栏每一个操作都
                     // 瞄准它。所以它常驻，不做成标签。
