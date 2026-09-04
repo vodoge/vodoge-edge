@@ -123,7 +123,10 @@ async fn toggle_radio(state: DangerState, status: StatusState, imei: String) {
         return;
     }
     state.busy.set(true);
-    let body = serde_json::json!({ "imei": imei, "online": go_online });
+    let body = edge_panel_api::RadioBody {
+        online: go_online,
+        imei: Some(imei.clone()),
+    };
     let got: Load<serde_json::Value> = api::post("/api/radio", &body, "射频").await;
     state.busy.set(false);
     match got {
@@ -156,7 +159,7 @@ async fn usb_reset(state: DangerState, status: StatusState, imei: String) {
         return;
     }
     state.busy.set(true);
-    let body = serde_json::json!({ "imei": imei });
+    let body = edge_panel_api::ResetBody { imei: Some(imei) };
     let got: Load<UsbResetResult> = api::post("/api/usb-reset", &body, "USB 复位").await;
     state.busy.set(false);
     match got {
@@ -190,7 +193,7 @@ async fn unregister(
         return;
     }
     state.busy.set(true);
-    let body = serde_json::json!({ "imei": imei });
+    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
     let got: Load<RegistrationResult> =
         api::post("/api/modems/unregister", &body, "取消纳管").await;
     state.busy.set(false);

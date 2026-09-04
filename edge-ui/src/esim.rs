@@ -252,7 +252,7 @@ fn hhmmss(at: f64) -> String {
 
 async fn read(state: EsimState, imei: Option<String>) -> Option<ProfilesResult> {
     state.profiles.set(Load::Loading);
-    let body = serde_json::json!({ "imei": imei });
+    let body = edge_panel_api::ResetBody { imei };
     let got: Load<ProfilesResult> = api::post("/api/esim", &body, "eSIM").await;
     state.read.set(true);
     let out = match &got {

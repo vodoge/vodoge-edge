@@ -142,7 +142,16 @@ async fn send(state: SmsState, active: Option<String>) {
 
     state.note.set(Some(SendNote::Sending));
     // ⚠️ `imei` 必须带上。这个字段就是上面那段拦截存在的理由。
-    let payload = serde_json::json!({ "to": to, "body": body, "imei": active });
+    // ⚠️ `commission` 是**唯一**能越过短信封禁表的路径（见 edge-panel 的
+    // `blocked_send`）。这里恒为 false：面板上还没有它的入口，而这个字段
+    // 之所以写在这里而不是靠 `#[serde(default)]` 省掉，是为了让下一个加
+    // 复测通路的人一眼看见它在哪。
+    let payload = edge_panel_api::SendBody {
+        to,
+        body,
+        imei: active,
+        commission: false,
+    };
     let got: Load<SendReceipt> = api::post("/api/send", &payload, "发送").await;
     match got {
         Load::Ready(receipt) if receipt.status == "sent" => {

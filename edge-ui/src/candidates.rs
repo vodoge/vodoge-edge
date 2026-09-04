@@ -136,6 +136,10 @@ pub async fn rescan(state: StatusState, rescan: RescanState) {
     rescan.busy.set(true);
     rescan.note.set(Some("正在读取 USB 设备与控制口…".into()));
     let got: Load<RescanReceipt> =
+        // ⚠️ 全仓库唯一一个不带类型的请求体，而且是对的：`/api/rescan` 的
+        // handler 只取 `State`，**根本不收 body**（edge-panel/src/lib.rs 的
+        // `rescan_modems`）。给它编一个类型出来会凭空造出一个服务端并不读的
+        // 契约。`api.rs` 里那条守卫按路径把它放行。
         api::post("/api/rescan", &serde_json::json!({}), "重扫 USB").await;
     rescan.busy.set(false);
     rescan.at.set(Some(crate::status::now_ms()));
@@ -197,7 +201,9 @@ impl ClaimState {
 
 async fn claim(state: StatusState, claims: ClaimState, key: String) {
     claims.set(&key, ClaimNote::Pending);
-    let body = serde_json::json!({ "candidate_key": key });
+    let body = edge_panel_api::ClaimCandidateBody {
+        candidate_key: key.clone(),
+    };
     let got: Load<ClaimReceipt> = api::post("/api/discoveries/claim", &body, "纳入探测").await;
     match got {
         Load::Ready(receipt) => {
@@ -224,7 +230,7 @@ async fn claim(state: StatusState, claims: ClaimState, key: String) {
 
 async fn adopt(state: StatusState, claims: ClaimState, key: String, imei: String) {
     claims.set(&key, ClaimNote::Pending);
-    let body = serde_json::json!({ "imei": imei });
+    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
     let got: Load<RegistrationResult> = api::post("/api/modems/register", &body, "纳管").await;
     match got {
         Load::Ready(result) => {

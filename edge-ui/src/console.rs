@@ -287,7 +287,11 @@ pub async fn run(state: ConsoleState, active: Option<String>, command: String, m
 
     match mode {
         Mode::At => {
-            let body = serde_json::json!({ "command": command, "imei": active, "force": force });
+            let body = edge_panel_api::AtBody {
+                command,
+                imei: active,
+                force,
+            };
             let got: Load<AtResult> = api::post("/api/at", &body, "AT").await;
             match got {
                 Load::Ready(result) => update_entry(state, seq, Exchange::Answered(result)),
@@ -296,7 +300,10 @@ pub async fn run(state: ConsoleState, active: Option<String>, command: String, m
             }
         }
         Mode::Ussd => {
-            let body = serde_json::json!({ "code": command, "imei": active });
+            let body = edge_panel_api::UssdBody {
+                code: command,
+                imei: active,
+            };
             let got: Load<UssdResult> = api::post("/api/ussd", &body, "USSD").await;
             match got {
                 Load::Ready(result) => {
@@ -331,7 +338,7 @@ pub async fn cancel_ussd(state: ConsoleState, active: Option<String>) {
             state: Exchange::Waiting,
         },
     );
-    let body = serde_json::json!({ "imei": active });
+    let body = edge_panel_api::ResetBody { imei: active };
     let got: Load<serde_json::Value> = api::post("/api/ussd/cancel", &body, "取消 USSD 会话").await;
     match got {
         Load::Ready(_) => {

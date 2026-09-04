@@ -104,3 +104,107 @@ pub async fn post<B: Serialize, T: DeserializeOwned>(path: &str, body: &B, what:
     };
     finish(request.send().await, what).await
 }
+
+/// 🔴 请求体也必须走共享类型 —— 这个 crate 的立身之本只兑现了一半。
+///
+/// crate 头上写着：「把 agent 的答复反序列化成 `edge_panel_api` 的类型 ——
+/// **服务端序列化时用的同一批类型** —— 改字段名会让两边一起编译失败。」
+///
+/// **答复方向确实成立**（文档说的就是「答复」），但请求方向长期形同虚设：
+/// 2026-09-04 盘点时，14 个 POST 调用点里有 12 个用 `serde_json::json!` 手拼
+/// 请求体，而 `edge-panel-api` 里 9 个请求类型就定义在那儿没人用。改一个请求
+/// 字段名，编译器一声不吭，服务端 400，屏幕上是一句看不出根因的失败。
+#[cfg(test)]
+mod request_bodies_are_typed {
+    /// ⚠️ **加了新模块要加进来。** 下面那条测试拿 `lib.rs` 的 `mod` 数量对账，
+    /// 少收一个就会红 —— 「搬走了代码，守卫就瞎了」这个坑在这个仓库里已经踩过
+    /// 两次（`PANEL_SOURCES` 漏掉 `shell.rs`、CSS 守卫漏掉断点里的规则）。
+    ///
+    /// ⚠️ **`api.rs` 自己不在里面。** 它是传输层、不造请求体，而且守卫就住在
+    /// 这个文件里 —— 扫自己会被自己代码里的字符串字面量 `"api::post("` 绊倒。
+    /// 这个自指的坑在这个仓库里也踩过一次（守卫被它自己要守的那条注释绊倒）。
+    const SOURCES: &[(&str, &str)] = &[
+        ("candidates.rs", include_str!("candidates.rs")),
+        ("console.rs", include_str!("console.rs")),
+        ("danger.rs", include_str!("danger.rs")),
+        ("esim.rs", include_str!("esim.rs")),
+        ("health.rs", include_str!("health.rs")),
+        ("logs.rs", include_str!("logs.rs")),
+        ("scan.rs", include_str!("scan.rs")),
+        ("shell.rs", include_str!("shell.rs")),
+        ("sms.rs", include_str!("sms.rs")),
+        ("status.rs", include_str!("status.rs")),
+        ("trace.rs", include_str!("trace.rs")),
+    ];
+
+    const LIB: &str = include_str!("lib.rs");
+
+    /// `/api/rescan` 的 handler 只取 `State`，**根本不收 body**。给它编一个
+    /// 类型出来会凭空造出一个服务端并不读的契约。
+    const NO_BODY_ENDPOINTS: &[&str] = &["/api/rescan"];
+
+    fn code_only(rust: &str) -> String {
+        rust.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 守卫扫的是这些文件；`lib.rs` 声明了几个模块就得收几个。
+    #[test]
+    fn the_guard_sees_every_module_in_the_crate() {
+        let declared = code_only(LIB)
+            .lines()
+            .filter(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with(';'))
+            .count();
+        assert_eq!(
+            declared,
+            SOURCES.len() + 1,
+            "lib.rs 声明了 {declared} 个模块，守卫收了 {}（另加不扫的 api.rs）\
+             —— 新模块要加进 SOURCES，否则它里面手拼的请求体没人管",
+            SOURCES.len()
+        );
+    }
+
+    /// 🔴 请求体不许用 `json!` 手拼。
+    #[test]
+    fn no_request_body_is_hand_built_with_json() {
+        for (name, src) in SOURCES {
+            for (n, line) in code_only(src).lines().enumerate() {
+                let t = line.trim();
+                let builds_body = t.starts_with("let body =") || t.starts_with("let payload =");
+                assert!(
+                    !(builds_body && t.contains("json!")),
+                    "{name}:{} 用 json! 手拼请求体：{t}\n\
+                     —— 用 edge-panel-api 里的类型，那才是服务端反序列化时用的同一份",
+                    n + 1
+                );
+            }
+        }
+    }
+
+    /// 内联的 `json!` 只允许出现在服务端确实不收 body 的那几个端点上。
+    #[test]
+    fn an_inline_json_body_is_only_allowed_where_the_server_reads_none() {
+        for (name, src) in SOURCES {
+            for (n, line) in code_only(src).lines().enumerate() {
+                if !line.contains("api::post(") || !line.contains("json!") {
+                    continue;
+                }
+                let path = line
+                    .split('"')
+                    .nth(1)
+                    .expect("api::post 的第一个参数是路径字面量");
+                assert!(
+                    NO_BODY_ENDPOINTS.contains(&path),
+                    "{name}:{} 给 {path} 内联了一个 json! 请求体，\
+                     而那个端点是收 body 的 —— 用共享类型",
+                    n + 1
+                );
+            }
+        }
+    }
+}

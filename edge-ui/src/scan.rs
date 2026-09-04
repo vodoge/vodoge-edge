@@ -146,7 +146,7 @@ async fn run(state: ScanState, imei: String) {
         stale: stale.clone(),
     });
 
-    let body = serde_json::json!({ "imei": imei });
+    let body = edge_panel_api::ResetBody { imei: Some(imei) };
     let got: Load<ScanResult> = api::post("/api/scan", &body, "扫网").await;
     match got {
         Load::Ready(result) => state.scan.set(Scan::Done {
