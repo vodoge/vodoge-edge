@@ -10,6 +10,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # 🔴 面板产物必须先构建，否则**整个 job 编译不过**。
+      #
+      # `edge-panel` 用 `include_str!` / `include_bytes!` 把 `edge-ui/dist/`
+      # 嵌进二进制，而 `.gitignore` 忽略了 dist —— 全新检出上那三个文件根本
+      # 不存在，`cargo test --workspace` 第一步就死在
+      # `couldn't read edge-ui/dist/index.html`。
+      #
+      # 从 0d9df15（迁移阶段 0）到 2026-09-04 的 30 个提交里，这个 job 一直
+      # 是红的：735 个测试、下面三条守卫、契约检查，一条都没在 CI 里跑过。
+      # 「测试全绿」这句话在那段时间里只是某台工作站上的事实。
+      #
+      # ⚠️ 顺序不能换。反过来的话不会报「你忘了 trunk」，只会报一个看不出
+      # 根因的缺文件错误 —— README 的升级流程里为同一件事写着同一条警告。
+      - name: Install trunk
+        run: |
+          set -eux
+          ver=0.21.14
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${ver}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C /usr/local/bin trunk
+          trunk --version
+
+      - name: Build the panel bundle (edge-panel embeds it)
+        run: cd edge-ui && trunk build --release
+
       - name: Test
         run: cargo test --workspace
       - name: edge-core has no I/O runtime
