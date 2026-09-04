@@ -86,7 +86,13 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // ⚠️ WAL 设不上不是致命的（回退到 rollback journal 仍然能用），但
+        //    **必须留痕**：并发写的表现会完全不同，而紧邻上一行的
+        //    `busy_timeout` 是用 `?` 传播的——同一个函数里两种处理方式，其中
+        //    一种什么都不说，排查并发问题时会白找很久。
+        if let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
+            eprintln!("store: WAL not enabled, falling back to rollback journal: {error}");
+        }
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)

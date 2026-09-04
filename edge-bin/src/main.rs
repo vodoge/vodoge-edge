@@ -380,8 +380,16 @@ mod linux {
             // Undo before reporting.
             for step in edge_modem::bring_up(&interface, &view) {
                 if let Err(error) = run_step(&step) {
+                    // ⚠️ 回滚失败**必须留痕**。上一行注释写着「半配置的接口
+                    //    比没配置的更糟：它有地址，下游一律读成已连接」——而
+                    //    这正是回滚没跑完时的样子。静默吞掉的话，接口停在半
+                    //    配置状态，屏幕上和日志里都没有任何东西说过这件事。
                     for undo in edge_modem::tear_down(&interface, Some(&view.address)) {
-                        let _ = run_step(&undo);
+                        if let Err(undo_error) = run_step(&undo) {
+                            eprintln!(
+                                "data-plane rollback step failed on {interface}:                                  {undo_error} (interface may be half-configured)"
+                            );
+                        }
                     }
                     return Err(error);
                 }
@@ -1273,7 +1281,6 @@ mod linux {
     struct ProxyRuntime {
         runtime: tokio::runtime::Runtime,
         manager: Arc<edge_proxy::ProxyManager>,
-        radio: Radio,
     }
 
     impl ProxyRuntime {
@@ -1286,11 +1293,11 @@ mod linux {
             let manager = Arc::new(edge_proxy::ProxyManager::new(Arc::new(ModemInterfaces {
                 radio: radio.clone(),
             })));
-            Ok(Self {
-                runtime,
-                manager,
-                radio,
-            })
+            // ⚠️ `radio` **不**存进 `ProxyRuntime`。真正用到它的是上面那个
+            //    `ModemInterfaces`，多存一份从来没人读（rustc 的 dead_code
+            //    警告一直在说）。那份多余的克隆是「把射频操作收进代理侧」这个
+            //    没做完的打算留下的痕迹，不是接线漏了。
+            Ok(Self { runtime, manager })
         }
     }
 
@@ -7600,6 +7607,7 @@ mod linux {
         }
     }
 
+    #[cfg(test)]
     mod host_tests {
         use super::*;
 

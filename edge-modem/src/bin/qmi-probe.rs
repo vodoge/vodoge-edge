@@ -20,7 +20,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::{env, fs, path::PathBuf, process::ExitCode};
+    use std::{env, fs, path::PathBuf};
 
     use edge_modem::{
         retain_mobile_terminated, CdcWdmDevice, MessageMode, MessageTag, QmiClient, StorageType,
@@ -48,7 +48,6 @@ mod linux {
         if failed > 0 {
             Err(format!("{failed} device(s) failed"))
         } else {
-            let _ = ExitCode::SUCCESS;
             Ok(())
         }
     }

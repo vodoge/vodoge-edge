@@ -126,7 +126,13 @@ pub fn decode(raw: &str, dcs: Option<u8>) -> String {
     }
     let is_hex = raw.len() % 2 == 0 && raw.chars().all(|c| c.is_ascii_hexdigit());
     // 0x48 selects UCS2 in the CBS coding used by +CUSD.
-    if is_hex && matches!(dcs, Some(0x48) | Some(72)) {
+    //
+    // ⚠️ This used to read `Some(0x48) | Some(72)`. Those are the same number
+    // written twice — 0x48 *is* 72 — so the second arm was unreachable and
+    // rustc said so. Whoever wrote it likely meant "accept the decimal spelling
+    // too", which is not a thing a `u8` can distinguish. Do not add it back;
+    // if another DCS should be accepted, name it and say which module sends it.
+    if is_hex && dcs == Some(0x48) {
         if let Some(text) = decode_ucs2(raw) {
             return text;
         }

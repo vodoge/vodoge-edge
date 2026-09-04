@@ -24,7 +24,7 @@
 //! documented recipes work when a hand-written client does not.
 
 use crate::{
-    encode_tlvs, ClientAssignment, ClientId, MessageId, QmiRequest, QmiResponse, ServiceId, Tlv,
+    encode_tlvs, ClientAssignment, MessageId, QmiRequest, QmiResponse, ServiceId, Tlv,
     TransactionId, WireError,
 };
 
@@ -123,7 +123,8 @@ mod tests {
     use super::*;
 
     fn assignment(service: ServiceId) -> ClientAssignment {
-        ClientAssignment::new(service, ClientId::allocated(7).expect("client")).expect("assignment")
+        ClientAssignment::new(service, crate::ClientId::allocated(7).expect("client"))
+            .expect("assignment")
     }
 
     /// 🔴 Four bytes, little endian. A single byte is accepted by some
