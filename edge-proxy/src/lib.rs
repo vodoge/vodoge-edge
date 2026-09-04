@@ -50,8 +50,29 @@ pub struct InstanceSpec {
     pub enabled: bool,
 }
 
+/// 这个构建唯一会说的代理协议。
+///
+/// 🔴 精确匹配、大小写敏感，不收 "SOCKS5"、也不收 "socks" 这种简写。判断依据是
+/// 契约本身，不是口味：`contract/schema/edge-cloud.v1.schema.json` 里
+/// `ProxyInstanceSpec.protocol` 和 `ProxyUpstreamSpec.protocol` 都写死
+/// `{"type":"string","enum":["socks5","http"]}`——全小写、两个值、没有别名。
+/// 所以：
+///
+/// - "SOCKS5"/"Socks5"/"socks" 根本不是合法的契约值，云端网关那侧会先被
+///   `collect_constraints()` 生成的检查挡掉。这里放宽成大小写不敏感，只会让边缘
+///   收下一个网关都不放行的值，等于两侧对同一个字段有两套词表。
+/// - "http" 反过来是**合法**值，只是这个构建提供不了。所以下面那条不是断言、
+///   是一条真会走到的拒绝路径：云端今天就可以下发它。
+///
+/// ⚠️ 还有一条不能忽略的耦合：`differs()` 是用 `!=` 比 protocol 来决定要不要
+/// 重建监听器的。这里一旦放宽，云端把 "socks5" 改写成 "SOCKS5" 就会白白拆一次
+/// 监听器、掐断它上面所有连接，而校验这边却说「认识，没问题」——两处必须同一种比法。
+const SUPPORTED_PROTOCOL: &str = "socks5";
+
+/// 从 `SUPPORTED_PROTOCOL` 取，别写第二遍字面量：默认值一旦和真正支持的协议
+/// 拼写不一致，省略该字段的配置就会被自己的校验拒掉。
 fn default_protocol() -> String {
-    "socks5".to_string()
+    SUPPORTED_PROTOCOL.to_string()
 }
 
 fn default_listen_addr() -> String {
@@ -244,6 +265,34 @@ impl ProxyManager {
     /// Starts one listener, reporting rather than raising when it cannot bind.
     pub async fn start(&self, spec: InstanceSpec) -> InstanceStatus {
         let listen_addr = format!("{}:{}", spec.listen_addr, spec.listen_port);
+
+        // 上游在这里就取，比原来提前到 bind 之前，只是为了协议校验能一次看完
+        // 「我要说什么」和「我要对上游说什么」。取的内容和时机之外没有变化。
+        let upstream = match self.upstreams.lock().await.get(&spec.upstream_id) {
+            Some(found) if found.enabled => Some(found.clone()),
+            _ => None,
+        };
+
+        // 🔴 协议排在接口检查前面：协议不认识是配置错，只有云端改配置才会好；
+        // 接口没有是运行时状态，下一次数据拨号就可能自己好了。两个同时错的时候
+        // 报配置错，否则运维会被支去查模组，而模组根本没毛病。
+        // ⚠️ 也排在 bind 前面：先占端口再退回去，会让同一秒重试的实例撞上一个
+        // 马上就要释放的端口，把配置错误伪装成端口冲突。
+        if let Some(reason) = unsupported_protocol(&spec, upstream.as_ref()) {
+            self.failed
+                .lock()
+                .await
+                .insert(spec.id.clone(), (spec.clone(), reason.clone()));
+            return InstanceStatus {
+                id: spec.id,
+                listening: false,
+                listen_addr,
+                interface: None,
+                error: Some(reason),
+                counters: CounterSnapshot::default(),
+            };
+        }
+
         let interface = self.resolver.interface_for(&spec.modem_imei);
         // No interface means no way to honour "leave over this SIM", and a
         // listener that silently used the default route would send traffic out
@@ -287,10 +336,6 @@ impl ProxyManager {
         });
 
         let counters = Arc::new(Counters::default());
-        let upstream = match self.upstreams.lock().await.get(&spec.upstream_id) {
-            Some(found) if found.enabled => Some(found.clone()),
-            _ => None,
-        };
         let task_counters = Arc::clone(&counters);
         let task_spec = spec.clone();
         let task_interface = interface.clone();
@@ -435,6 +480,37 @@ impl ProxyManager {
         }
         out.sort_by(|left, right| left.id.cmp(&right.id));
         out
+    }
+}
+
+/// 这份配置里有没有这个构建说不出来的协议；能说就是 None。
+///
+/// 存在的理由是 `negotiate()` 和 `upstream_handshake()` 都无条件按 SOCKS5 收发，
+/// 谁也不读 `protocol`。所以配 `protocol="http"` 的实例从前照样起监听、状态回报
+/// `listening:true`、`error` 是空的，但端口上说的仍然是 SOCKS5：HTTP 客户端第一个
+/// 字节 'C'(0x43) 会被判成 NotSocks5 断开，面板上于是同时出现「监听正常」和
+/// 「客户端连不上」，中间没有任何东西指向协议不匹配。
+///
+/// 🔴 这里只负责把「配了我不支持的协议」变成一次说得出口的失败，不负责去实现
+/// 别的协议。真要支持 HTTP 代理是另一件事，那时候改的是 `negotiate()`，
+/// 不是把这里的校验放松掉。
+fn unsupported_protocol(spec: &InstanceSpec, upstream: Option<&UpstreamSpec>) -> Option<String> {
+    if spec.protocol != SUPPORTED_PROTOCOL {
+        return Some(format!(
+            "protocol {:?} is not supported; this build serves {SUPPORTED_PROTOCOL} only",
+            spec.protocol,
+        ));
+    }
+    // 上游同样是被无条件当成 SOCKS5 握手的。不在这里挡住的话，配了 http 的上游
+    // 会在每一条连接上各失败一次，报出来的还是「上游拒绝了所有认证方式」——
+    // 离「上游根本不是 SOCKS5」还隔着一轮排查。
+    match upstream {
+        Some(upstream) if upstream.protocol != SUPPORTED_PROTOCOL => Some(format!(
+            "upstream {} speaks protocol {:?}, which is not supported; \
+             this build chains through {SUPPORTED_PROTOCOL} only",
+            upstream.id, upstream.protocol,
+        )),
+        _ => None,
     }
 }
 

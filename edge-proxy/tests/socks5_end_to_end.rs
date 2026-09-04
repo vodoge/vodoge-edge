@@ -235,6 +235,139 @@ async fn a_disabled_instance_is_reported_but_not_listening() {
     assert!(statuses[0].error.is_none());
 }
 
+/// 拿一个刚释放的端口号，用来证明被拒绝的实例真的没有占过它。
+async fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    port
+}
+
+// 这个构建只会说 SOCKS5，而 "http" 是契约允许云端下发的另一个合法值——这条路
+// 今天就走得到，不是防御性断言。配了它以前照样起监听、回报 listening:true、
+// error 是空的，端口上说的却还是 SOCKS5——面板于是同时显示「监听正常」和
+// 「客户端连不上」，没有任何线索指向协议不匹配。
+#[tokio::test]
+async fn an_unsupported_protocol_is_refused_with_a_reason_rather_than_a_socks5_listener() {
+    let manager = ProxyManager::new(Arc::new(Loopback));
+    let port = free_port().await;
+    let mut wrong = spec(port);
+    wrong.protocol = "http".into();
+
+    let statuses = manager.apply(vec![wrong], vec![]).await;
+    assert_eq!(statuses.len(), 1);
+    assert!(
+        !statuses[0].listening,
+        "an instance whose protocol this build cannot serve claimed to be listening",
+    );
+    let reason = statuses[0]
+        .error
+        .clone()
+        .expect("refused, but with no reason an operator could act on");
+    assert!(
+        reason.contains("http"),
+        "the reason should name what was asked for: {reason}",
+    );
+    assert!(
+        reason.contains("socks5"),
+        "the reason should name what this build does serve: {reason}",
+    );
+
+    // 拒绝要在 bind 之前发生。占了端口再退回去，配置错误会被下一次重试
+    // 伪装成端口冲突。
+    let free = TcpListener::bind(("127.0.0.1", port)).await;
+    assert!(free.is_ok(), "the refused instance left a listener on the port");
+
+    // ⚠️ 理由必须同时进 failed 表，但**不是**为了「面板刷新」。
+    //
+    //    这里原先写的是「面板读 apply 的返回值，后续刷新读 status_of/statuses」
+    //    ——那条刷新路径不存在：`statuses()` 全 workspace 零调用者，`status_of()`
+    //    只在 `apply()` 内部和测试里被调；唯一周期性上报的
+    //    `report_proxy_traffic` 走 `drain_traffic()`，只遍历 `running`，
+    //    一个被拒的实例什么都不贡献。
+    //
+    //    真正承重的是 `restart()`：它回落到 failed 表取原因，而
+    //    `proxy_lifecycle` 的 start/restart 会走到那里。不写这张表的话，
+    //    一次启动尝试拿到的是 `not_configured`，而不是「你配了个我不认识的
+    //    协议」——把一个配置错误说成一个没配置。
+    let later = manager
+        .status_of("instance-1")
+        .await
+        .expect("the refused instance vanished from the statuses instead of keeping its reason");
+    assert!(
+        !later.listening,
+        "a refused instance turned into a listening one on the next read",
+    );
+    assert_eq!(later.error.as_deref(), Some(reason.as_str()));
+}
+
+// 大小写和简写都不收。依据是契约 schema 把 protocol 写死成
+// enum ["socks5","http"]——全小写、没有别名，所以下面这些拼写压根不是合法的
+// 契约值；放宽只会让边缘收下网关都不放行的东西。完整理由在 `SUPPORTED_PROTOCOL`
+// 的注释上，其中包括 `differs()` 必须和这里同一种比法。
+#[tokio::test]
+async fn only_the_exact_spelling_socks5_is_accepted() {
+    // 对照组先跑：校验不能把本来好好的配置一起挡掉。放在前面是为了让
+    // 「校验写反了」这一类错误报在这一行，而不是报成某个拼写被接受了。
+    let manager = ProxyManager::new(Arc::new(Loopback));
+    let statuses = manager.apply(vec![spec(0)], vec![]).await;
+    assert!(
+        statuses[0].listening,
+        "the spelling this build does serve was refused: {:?}",
+        statuses[0].error,
+    );
+
+    for spelling in ["SOCKS5", "Socks5", "socks", "socks5 ", ""] {
+        let manager = ProxyManager::new(Arc::new(Loopback));
+        let mut variant = spec(0);
+        variant.protocol = spelling.into();
+        let statuses = manager.apply(vec![variant], vec![]).await;
+        assert!(
+            !statuses[0].listening,
+            "{spelling:?} was accepted as a protocol this build can serve",
+        );
+        assert!(statuses[0].error.is_some(), "{spelling:?} was refused without a reason");
+    }
+}
+
+// 上游也是被无条件当成 SOCKS5 握手的。不在 apply 时挡住，配了 http 的上游会在
+// 每条连接上各失败一次，而报出来的是「上游拒绝了所有认证方式」。
+#[tokio::test]
+async fn an_upstream_that_is_not_socks5_stops_the_instance_chained_through_it() {
+    let manager = ProxyManager::new(Arc::new(Loopback));
+    let mut chained = spec(0);
+    chained.upstream_id = "up-1".into();
+
+    let statuses = manager
+        .apply(
+            vec![chained],
+            vec![UpstreamSpec {
+                id: "up-1".into(),
+                address: "127.0.0.1:1".into(),
+                protocol: "http".into(),
+                enabled: true,
+                ..UpstreamSpec::default()
+            }],
+        )
+        .await;
+    assert!(
+        !statuses[0].listening,
+        "an instance chained through an upstream this build cannot speak to claimed to be listening",
+    );
+    let reason = statuses[0]
+        .error
+        .clone()
+        .expect("refused, but with no reason an operator could act on");
+    assert!(
+        reason.contains("up-1"),
+        "the reason should name the upstream, not just the instance: {reason}",
+    );
+    assert!(
+        reason.contains("http"),
+        "the reason should name the upstream's protocol: {reason}",
+    );
+}
+
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn traffic_goes_through_an_upstream_when_one_is_configured() {
