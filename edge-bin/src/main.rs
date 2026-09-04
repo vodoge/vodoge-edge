@@ -2683,6 +2683,43 @@ mod linux {
         }
     }
 
+    /// QMI 那一次失败之后，该不该回落到 AT。
+    ///
+    /// 🔴 **只在「这一根根本没有 QMI 口」时回落。**
+    ///
+    /// 其他任何失败都是一根**有** QMI 的模组上的真故障。回落等于用一次注定也
+    /// 做不成的尝试把原因盖掉——`set_data_network` 的注释写的是同一条规矩：
+    /// 「Any other failure is a real fault on a module that does have QMI, and
+    /// swallowing it would hide the reason behind a second attempt that cannot
+    /// work either.」
+    ///
+    /// ⚠️ 尤其是 2026-08-25 那次：QMI 模式切换被 **error 60** 拒在半路，模组
+    /// 停在 `+CFUN: 7`。那种时候屏幕上必须显示 error 60，而不是显示一条
+    /// 「AT 也没成」——后者会把人引到完全错的方向。
+    fn radio_falls_back_to_at(reason_code: &str) -> bool {
+        reason_code == "modem_not_found"
+    }
+
+    /// 没有 QMI 口的模组，开关射频该发哪条 AT。
+    ///
+    /// 🔴 **绝不能是 `AT+CFUN=1,1`。** 那是**带复位**的形式：模组会重启并重新
+    /// 枚举 USB。守卫表把它单列一行，措辞是「也是 +CFUN: 7 唯一量到过的解药，
+    /// 但只有一次观测」——那是一条最后手段，不是一个按钮该发的东西。
+    ///
+    /// 🔴 **也绝不能是 `AT+CFUN=7`。** 守卫表原话：「7 是『进去容易、记录在案
+    /// 的出路全部失败』的那个值」。
+    ///
+    /// 关用 `0` 不用 `4`：守卫表写着 `0/4` 都是立刻脱网、**回程都是同一个口上
+    /// 的 `AT+CFUN=1`**，对这里等价，取更常见的那个。回程在同一个口上这件事
+    /// 是这条路能做成按钮的前提——关掉射频之后 AT 口还在，开回来的手段没丢。
+    fn radio_at_command(online: bool) -> &'static str {
+        if online {
+            "AT+CFUN=1"
+        } else {
+            "AT+CFUN=0"
+        }
+    }
+
     /// 数据面这一次请求，动手之前要不要先问能力矩阵，问哪一条。
     ///
     /// 🔴 **只在「开」的时候问。** 矩阵说「这个组合不支持数据」是**别去拉起来**
@@ -3804,13 +3841,36 @@ mod linux {
             } else {
                 OperatingMode::LowPower
             };
-            self.radio
-                .with_client(imei.as_deref(), |client| {
-                    client
-                        .set_operating_mode(mode)
-                        .map_err(|error| SendError::new("radio_failed", error.to_string()))
-                })
-                .map_err(|error| PanelError::Action(error.to_string()))
+            let attempt = self.radio.with_client(imei.as_deref(), |client| {
+                client
+                    .set_operating_mode(mode)
+                    .map_err(|error| SendError::new("radio_failed", error.to_string()))
+            });
+            // 🔴 **只在「这一根根本没有 QMI 口」时回落到 AT。**
+            //
+            // 和 `set_data_network` 同一条规矩，那里的注释写得很清楚：其他任何
+            // 失败都是一根**有** QMI 的模组上的真故障，吞掉它会把原因藏在一次
+            // 注定也做不成的重试后面。
+            //
+            // 为什么值得加这条回落：EC200U-CN 只说 AT，没有 QMI 口。在此之前
+            // 它在面板上**根本没有射频开关**——2026-09-04 它发完一条短信把自己
+            // 的 AT 通道挂死时，操作员手上一个恢复动作都没有。
+            //
+            // ⚠️ AT 这条路在一处上**比 QMI 那条更安全**：`AT+CFUN=0` 之后模组
+            // 仍然在总线上、AT 口仍然应答，回程就在同一个口上；而 QMI 的
+            // LowPower 在 2026-08-25 有一次被 error 60 拒在半路，把模组停在
+            // `+CFUN: 7` 出不来。
+            let result = match attempt {
+                Err(error) if radio_falls_back_to_at(&error.reason_code) => {
+                    self.radio.with_at_port(imei.as_deref(), |port| {
+                        port.command(radio_at_command(online))
+                            .map(|_| ())
+                            .map_err(|error| SendError::new("radio_failed", error.to_string()))
+                    })
+                }
+                other => other,
+            };
+            result.map_err(|error| PanelError::Action(error.to_string()))
         }
 
         fn ussd(&self, imei: Option<String>, code: String) -> Result<UssdResult, PanelError> {
@@ -7531,6 +7591,54 @@ mod linux {
 
     fn env(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
+    }
+
+    #[cfg(test)]
+    mod radio_at_tests {
+        use super::radio_at_command;
+
+        /// 🔴 **不许出现带复位的形式。**
+        ///
+        /// `AT+CFUN=1,1` 会让模组重启并重新枚举 USB。守卫表把它单列一行、
+        /// 措辞是「只有一次观测」的最后手段——一个按钮不该发这种东西。
+        /// `AT+CFUN=7` 同理：进去容易，记录在案的出路全部失败过。
+        #[test]
+        fn the_radio_toggle_never_sends_the_resetting_form() {
+            for online in [true, false] {
+                let cmd = radio_at_command(online);
+                assert!(!cmd.contains(','), "带逗号就是带复位的形式：{cmd}");
+                assert!(!cmd.contains('7'), "7 是那个出不来的值：{cmd}");
+            }
+        }
+
+        /// 🔴 只有「根本没有 QMI 口」才回落，别的失败要原样报出来。
+        #[test]
+        fn only_a_missing_qmi_port_falls_back_to_at() {
+            assert!(
+                super::radio_falls_back_to_at("modem_not_found"),
+                "AT-only 的模组必须能走 AT 那条路"
+            );
+            for real_fault in ["radio_failed", "modem_open_failed", "qmi_error_60"] {
+                assert!(
+                    !super::radio_falls_back_to_at(real_fault),
+                    "{real_fault} 是一根**有** QMI 的模组上的真故障 —— \
+                     回落会用一次注定也做不成的尝试把原因盖掉，\
+                     而 2026-08-25 那次屏幕上必须显示的正是 error 60 本身"
+                );
+            }
+        }
+
+        /// 关得掉，也开得回来——而且回程就在同一个口上。
+        #[test]
+        fn both_directions_exist_and_are_different() {
+            assert_eq!(radio_at_command(false), "AT+CFUN=0");
+            assert_eq!(radio_at_command(true), "AT+CFUN=1");
+            assert_ne!(
+                radio_at_command(true),
+                radio_at_command(false),
+                "开和关发同一条命令 —— 那个按钮会变成单向的"
+            );
+        }
     }
 
     #[cfg(test)]

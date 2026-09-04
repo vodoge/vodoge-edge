@@ -86,7 +86,36 @@ fn confirmed(message: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn radio_ask(imei: &str, go_online: bool) -> String {
+fn radio_ask(imei: &str, go_online: bool, manageable: bool) -> String {
+    if !manageable {
+        // 🔴 AT-only 的那条路，代价和退路都和 QMI 那条不一样，不能共用一段文案。
+        //
+        // ⚠️ 这条路在一处上**比 QMI 更安全**：`AT+CFUN=0` 之后模组仍然在总线
+        // 上、AT 口仍然应答，回程就在同一个口上。而 QMI 的 LowPower 在
+        // 2026-08-25 被 error 60 拒在半路，把模组停在 +CFUN: 7 出不来。
+        return if go_online {
+            format!(
+                "恢复射频（AT 路径）\n\n\
+                 目标：{imei}\n\
+                 动作：/api/radio → 这一根没有 QMI 口，发 AT+CFUN=1\n\n\
+                 模组会重新搜网并注册，这要几十秒。\n\n\
+                 确定要恢复吗？"
+            )
+        } else {
+            format!(
+                "关闭射频（AT 路径）\n\n\
+                 目标：{imei}\n\
+                 动作：/api/radio → 这一根没有 QMI 口，发 AT+CFUN=0\n\
+                 （**不带复位**。带复位的 AT+CFUN=1,1 会让模组重启并重新枚举 USB，\n\
+                 那是最后手段，不是按钮该发的东西。）\n\n\
+                 这一根会立刻脱网：收不到短信、没有数据。\n\n\
+                 回来的路是同一个按钮（AT+CFUN=1），而且**关掉之后 AT 口还在、\n\
+                 模组也不离开总线**——恢复通道不会跟着射频一起消失。这一点上它\n\
+                 比 QMI 那条路稳：LowPower 曾经把一根模组停在 +CFUN: 7 出不来。\n\n\
+                 确定要关吗？"
+            )
+        };
+    }
     if go_online {
         format!(
             "恢复射频\n\n\
@@ -115,7 +144,12 @@ fn radio_ask(imei: &str, go_online: bool) -> String {
 
 async fn toggle_radio(state: DangerState, status: StatusState, imei: String) {
     let go_online = !radio_online(&state.radio.get_untracked(), &imei);
-    if !confirmed(&radio_ask(&imei, go_online)) {
+    // 走哪条路决定确认框说什么。⚠️ 读的是**此刻**的状态：模组可能刚掉了 QMI。
+    let manageable_now = match status.load.get_untracked() {
+        Load::Ready(body) => manageable(&body, &imei),
+        _ => true,
+    };
+    if !confirmed(&radio_ask(&imei, go_online, manageable_now)) {
         state.note.set(Some(DangerNote::Refused(format!(
             "已取消{}射频 {imei} —— 没有发出，射频没有被碰过。",
             if go_online { "恢复" } else { "关闭" }
@@ -214,6 +248,39 @@ async fn unregister(
     }
 }
 
+/// 危险区里哪几个按钮该出现。
+///
+/// 🔴 **USB 复位不看 `manageable`。**
+///
+/// 它写的是设备的 `authorized` 属性，全程不碰 QMI —— 服务端 `recover_usb` 的
+/// 路径是「IMEI → USB 位置 → 写 sysfs」，`/api/usb-reset` 也没有任何 QMI 前置
+/// 条件。把它和「关射频」（那个确实走 QMI 工作模式）一起藏在 `manageable`
+/// 后面，是搬迁时按"危险操作"归类归错了。
+///
+/// 代价在 2026-09-04 兑现了：电信那根 EC200U（AT-only）发完一条短信之后
+/// **AT 通道挂死、USB 仍然在线**，而这正是 USB 复位唯一能救的形态 ——
+/// 面板上却连按钮都没有，旁边还写着一句「USB 恢复不可用」，那句话是错的。
+///
+/// ⚠️ AT-only 的模组反而**更需要**它：它们没有 QMI 那条备用通道，AT 一死就
+/// 什么都不剩了。
+pub struct DangerButtons {
+    /// 关/开射频。**也永远可用。**
+    ///
+    /// 以前它跟着 `manageable` 走，因为面板只知道 QMI 那条路。现在服务端在
+    /// 「这一根根本没有 QMI 口」时回落到 `AT+CFUN=0/1`，所以 AT-only 的模组
+    /// 也有射频开关了。
+    pub radio: bool,
+    /// USB 复位。**永远可用。**
+    pub usb_reset: bool,
+}
+
+pub fn danger_buttons(_manageable: bool) -> DangerButtons {
+    DangerButtons {
+        radio: true,
+        usb_reset: true,
+    }
+}
+
 #[component]
 pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
     view! {
@@ -254,46 +321,58 @@ pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
                             })
                     }}
 
-                    {if is_manageable {
+                    {
+                        let buttons = danger_buttons(is_manageable);
                         let imei_radio = imei.clone();
                         let imei_usb = imei.clone();
                         view! {
                             <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
-                                <Button
-                                    disabled=state.busy
-                                    on_click=move |_| {
-                                        let imei = imei_radio.clone();
-                                        leptos::task::spawn_local(async move {
-                                            toggle_radio(state, status, imei).await
-                                        });
-                                    }
-                                >
-                                    {if online { "关射频" } else { "开射频" }}
-                                </Button>
-                                <Button
-                                    disabled=state.busy
-                                    on_click=move |_| {
-                                        let imei = imei_usb.clone();
-                                        leptos::task::spawn_local(async move {
-                                            usb_reset(state, status, imei).await
-                                        });
-                                    }
-                                >
-                                    "USB 复位"
-                                </Button>
+                                {buttons
+                                    .radio
+                                    .then(|| {
+                                        view! {
+                                            <Button
+                                                disabled=state.busy
+                                                on_click=move |_| {
+                                                    let imei = imei_radio.clone();
+                                                    leptos::task::spawn_local(async move {
+                                                        toggle_radio(state, status, imei).await
+                                                    });
+                                                }
+                                            >
+                                                {if online { "关射频" } else { "开射频" }}
+                                            </Button>
+                                        }
+                                    })}
+                                {buttons
+                                    .usb_reset
+                                    .then(|| {
+                                        view! {
+                                            <Button
+                                                disabled=state.busy
+                                                on_click=move |_| {
+                                                    let imei = imei_usb.clone();
+                                                    leptos::task::spawn_local(async move {
+                                                        usb_reset(state, status, imei).await
+                                                    });
+                                                }
+                                            >
+                                                "USB 复位"
+                                            </Button>
+                                        }
+                                    })}
                             </Flex>
-                            <Caption1>"两个操作都会让这根模组暂时从机队消失。"</Caption1>
-                        }
-                            .into_any()
-                    } else {
-                        view! {
                             <Caption1>
-                                "该设备经 AT 控制口管理。查询与短信收发都走这条路；\
-                                 需要 QMI 的射频开关、eSIM 操作与 USB 恢复不可用。"
+                                {if is_manageable {
+                                    "两个操作都会让这根模组暂时从机队消失。"
+                                } else {
+                                    "该设备经 AT 控制口管理。射频开关走 AT+CFUN（不带复位），\
+                                     USB 复位写的是 USB 授权位 —— 两者都不经过 QMI，都可用。\
+                                     只有 eSIM 操作需要 QMI，不可用。"
+                                }}
                             </Caption1>
                         }
-                            .into_any()
-                    }}
+                    }
 
                     <Button
                         appearance=ButtonAppearance::Primary
@@ -357,6 +436,31 @@ mod tests {
         );
     }
 
+    /// 🔴 AT-only 的模组也必须能按 USB 复位。
+    ///
+    /// 2026-09-04：电信那根 EC200U 发完一条短信之后 AT 通道挂死、USB 仍然在
+    /// 线——那正是 USB 复位唯一能救的形态。而面板上连按钮都没有，旁边还写着
+    /// 一句「USB 恢复不可用」。那句话是错的：服务端 `/api/usb-reset` 写的是
+    /// 设备的 `authorized` 属性，没有任何 QMI 前置条件。
+    ///
+    /// ⚠️ AT-only 反而**更需要**它：没有 QMI 那条备用通道，AT 一死就什么都
+    /// 不剩了。
+    #[test]
+    fn an_at_only_modem_can_still_be_usb_reset() {
+        let at_only = danger_buttons(false);
+        assert!(
+            at_only.usb_reset,
+            "AT-only 拿不到 USB 复位 —— 而它没有 QMI 备用通道，AT 一死就没有任何恢复入口"
+        );
+        assert!(
+            at_only.radio,
+            "AT-only 拿不到射频开关 —— 服务端已经会在没有 QMI 口时回落到 AT+CFUN=0/1"
+        );
+
+        let full = danger_buttons(true);
+        assert!(full.usb_reset && full.radio);
+    }
+
     /// 找不到模组时按「可管理」处理，这是防御性默认值不是业务规则。
     #[test]
     fn an_unknown_modem_defaults_to_manageable() {
@@ -370,7 +474,7 @@ mod tests {
 
     #[test]
     fn the_dialog_names_both_the_cost_and_the_only_way_back() {
-        let off = radio_ask("867018069509705", false);
+        let off = radio_ask("867018069509705", false, true);
         assert!(off.contains("867018069509705"));
         assert!(off.contains("立刻脱网"), "要说清代价：{off}");
         assert!(
@@ -378,8 +482,30 @@ mod tests {
             "要说清退路只有软件：{off}"
         );
 
-        let on = radio_ask("867018069509705", true);
+        let on = radio_ask("867018069509705", true, true);
         assert!(on.contains("几十秒"), "要说清要等多久：{on}");
         assert!(!on.contains("立刻脱网"), "恢复射频不该用关闭那份文案：{on}");
+    }
+
+    /// 🔴 AT 那条路的确认框必须说清它是 AT，而且**不带复位**。
+    ///
+    /// 两条路的退路不一样：QMI 的 LowPower 在 2026-08-25 被 error 60 拒在半路，
+    /// 把模组停在 `+CFUN: 7` 出不来；而 `AT+CFUN=0` 之后模组还在总线上、AT 口
+    /// 还应答，回程就在同一个口上。共用一段文案会把这个差别抹掉，而那正是
+    /// 操作员按下去之前该知道的。
+    #[test]
+    fn the_at_path_dialog_names_the_command_and_rules_out_the_resetting_form() {
+        let off = radio_ask("868019060490134", false, false);
+        assert!(off.contains("AT+CFUN=0"), "没说清发的是哪条命令：{off}");
+        assert!(off.contains("不带复位"), "没排除带复位那种形式：{off}");
+        assert!(off.contains("AT 口还在"), "没说清退路还在：{off}");
+
+        let on = radio_ask("868019060490134", true, false);
+        assert!(on.contains("AT+CFUN=1"));
+
+        // 可管理的模组仍然走 QMI，文案不能被换成 AT 的。
+        let qmi = radio_ask("867018069514820", false, true);
+        assert!(qmi.contains("QMI"), "可管理的模组该走 QMI：{qmi}");
+        assert!(!qmi.contains("AT+CFUN=0"));
     }
 }
