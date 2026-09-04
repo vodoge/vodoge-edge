@@ -332,6 +332,24 @@ fn FleetLine(state: StatusState) -> impl IntoView {
     }
 }
 
+/// 控制口那一行怎么写。
+///
+/// 🔴 **掉线模组的 `control_port` 是「上一次应答时」的值，不是现在的。**
+///
+/// 2026-09-04 把这个字段画上卡之后，立刻在生产上撞见：`867018069509705`
+/// 掉线 4.8 小时，卡上仍写着 `/dev/cdc-wdm0`，而那个插座早就被
+/// `867018069514820` 接管了（日志里 `poll /dev/cdc-wdm0 imei=…514820 ok`）。
+/// 屏幕上**两张卡写着同一个端口**，看的人没法知道哪张是真的。
+///
+/// 端口会易主正是这个字段存在的理由；那就更不能把陈旧的那个说成当前的。
+fn port_label(port: Option<&str>, answering: bool) -> String {
+    match (port, answering) {
+        (Some(p), true) => p.to_string(),
+        (Some(p), false) => format!("最后见于 {p}"),
+        (None, _) => "控制口 —".to_string(),
+    }
+}
+
 /// 舰队总览里画多少格：整条轨迹（1 小时）。中栏够宽，不必截。
 const TRACE_COLS_WIDE: usize = crate::trace::TRACE_KEEP;
 
@@ -382,6 +400,8 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                             .map(|m| {
                                 let imei = m.imei.clone();
                                 let flip = crate::trace::flips(&t, &imei);
+                                let up = answering(&m.state);
+                                let port = port_label(m.control_port.as_deref(), up);
                                 view! {
                                     <div class="vd-fleetrow">
                                         <span class="vd-fleetrow-head">
@@ -395,9 +415,7 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                             <span class="vd-faint">
                                                 {m.home.clone().unwrap_or_else(|| "卡归属未知".into())}
                                             </span>
-                                            <span class="vd-log-port">
-                                                {m.control_port.clone().unwrap_or_else(|| "—".into())}
-                                            </span>
+                                            <span class="vd-log-port">{port}</span>
                                             <span class="vd-faint vd-fleetrow-flip">
                                                 {if window < 60_000.0 {
                                                     String::new()
@@ -469,6 +487,8 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
     let family = modem.family.clone();
     let last_seen = modem.last_seen;
     let control_port = modem.control_port.clone();
+    // 在 view! 之前算成 bool：`state_raw` 会被 move 进闭包。
+    let up = answering(&modem.state);
     let discovery = discovery_label(&modem.discovery).to_string();
     let manageable = modem.manageable;
     let fallback = matches!(
@@ -519,7 +539,7 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
             // 而节点在重新枚举时会在模组之间**重新分配**——不写在卡上，
             // 操作员永远拼不出这条因果。agent 一直在给这个字段，只是没人画。
             <span class="vd-modem-line vd-faint">
-                {control_port.clone().unwrap_or_else(|| "控制口 —".into())}
+                {port_label(control_port.as_deref(), up)}
             </span>
 
             // 最近十分钟的应答轨迹。快照说「现在怎么样」，这条说「一直怎么样」。
@@ -746,6 +766,33 @@ pub fn answering(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::port_label;
+
+    /// 🔴 掉线模组卡上的端口是**旧值**，不能说成当前的。
+    ///
+    /// 2026-09-04 生产实测：两根模组同时写着 `/dev/cdc-wdm0`，一根心跳 10 秒、
+    /// 一根心跳 4.8 小时。不标年龄的话，看的人没法知道哪一根真的在那个插座上。
+    #[test]
+    fn a_silent_modems_port_is_marked_as_where_it_was_last_seen() {
+        assert_eq!(
+            port_label(Some("/dev/cdc-wdm0"), true),
+            "/dev/cdc-wdm0",
+            "还在应答的，端口就是当前的"
+        );
+        assert_eq!(
+            port_label(Some("/dev/cdc-wdm0"), false),
+            "最后见于 /dev/cdc-wdm0",
+            "不应答的，端口是上一次应答时的值——插座可能已经易主"
+        );
+    }
+
+    /// 没有端口就说没有，不编造。
+    #[test]
+    fn a_missing_port_is_never_invented() {
+        assert_eq!(port_label(None, true), "控制口 —");
+        assert_eq!(port_label(None, false), "控制口 —");
+    }
+
     use super::*;
 
     /// 🔴 这些值不是编出来的，是 2026-09-04 从生产 `/api/status` 抓下来的。
