@@ -726,6 +726,12 @@ pub async fn poll(state: StatusState) {
         Load::Ready(body) => {
             state.last_ok.set(at);
             state.stale.set(Some((body.clone(), at)));
+            // 🔴 选中的那一根要是从机队里消失了，就地取消选中——理由见
+            //    `selection_after`。只在读成功的这一帧做。
+            let kept = selection_after(&body.modems, state.active.get_untracked().as_deref());
+            if kept != state.active.get_untracked() {
+                state.active.set(kept);
+            }
             let seen = body
                 .modems
                 .iter()
@@ -754,6 +760,28 @@ pub async fn poll(state: StatusState) {
     state.in_flight.set(false);
 }
 
+/// 读到新列表之后，选中的那一根还该不该留着。
+///
+/// 🔴 **从机队里消失的模组必须取消选中。** 关射频、USB 复位、扫网这三件事，
+/// 面板自己都写着「这一根会暂时从机队消失」。消失期间选中项还挂在那儿，而
+/// `manageable()` 对找不到的 IMEI 默认返回 `true` —— 于是 eSIM 切换和危险区
+/// 按钮全是亮的，点下去打到一根不存在的模组上。旧面板每次 `load()` 都做这个
+/// 核对（`if (activeImei && !modems.some(...)) select(null)`），搬迁时漏了。
+///
+/// ⚠️ **「掉线」不算消失。** 2026-09-04 起这批模组一直在轮流掉线，一根
+/// `Offline` 但仍在列表里的模组，恰恰是你可能想给它做 USB 复位的那一根。
+/// 判据只有一个：它还在不在 `modems` 里。
+///
+/// ⚠️ 只在**读成功**的那一帧调用。读失败时列表是空的，拿它去核对等于每次
+/// 网络抖动都把操作员的选中项清掉。
+pub fn selection_after(modems: &[ModemBody], active: Option<&str>) -> Option<String> {
+    let want = active?;
+    modems
+        .iter()
+        .any(|m| m.imei == want)
+        .then(|| want.to_string())
+}
+
 /// 这一帧里，这根模组算不算「答了」。
 ///
 /// ⚠️ `Offline` 是 agent 按 `last_seen` 超过 60 秒判的（`edge-panel` 的
@@ -767,6 +795,56 @@ pub fn answering(raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::port_label;
+
+    fn modem(imei: &str, state: &str) -> ModemBody {
+        ModemBody {
+            imei: imei.to_string(),
+            family: "EC20".into(),
+            state: state.to_string(),
+            discovery: "qmi".into(),
+            manageable: true,
+            capability_origin: edge_panel_api::CapabilityOrigin::Rule,
+            carrier_profile: String::new(),
+            control_port: None,
+            firmware: None,
+            home: None,
+            home_numeric: None,
+            iccid: None,
+            imsi: None,
+            last_seen: None,
+            msisdn: None,
+            network: None,
+            network_numeric: None,
+        }
+    }
+
+    /// 🔴 从机队里消失的模组要取消选中，否则之后每个操作都瞄着一根不在的棒子。
+    #[test]
+    fn a_modem_that_left_the_fleet_stops_being_selected() {
+        let fleet = vec![modem("111", "registered")];
+        assert_eq!(
+            super::selection_after(&fleet, Some("222")),
+            None,
+            "222 已经不在机队里了"
+        );
+        assert_eq!(
+            super::selection_after(&fleet, Some("111")),
+            Some("111".to_string())
+        );
+        assert_eq!(super::selection_after(&fleet, None), None, "本来就没选");
+    }
+
+    /// ⚠️ 掉线**不算**消失。这批模组一直在轮流掉线，而一根掉线但还在列表里的
+    /// 模组，恰恰是你可能想给它做 USB 复位的那一根。
+    #[test]
+    fn going_offline_is_not_the_same_as_leaving_the_fleet() {
+        let fleet = vec![modem("111", "Offline")];
+        assert_eq!(
+            super::selection_after(&fleet, Some("111")),
+            Some("111".to_string()),
+            "掉线的模组还在列表里，选中项不该被清掉"
+        );
+    }
 
     /// 🔴 掉线模组卡上的端口是**旧值**，不能说成当前的。
     ///
