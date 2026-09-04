@@ -27,13 +27,13 @@
 //! 出去的命令」。USB 复位的确认框却是 `if (!confirm(...)) return;`，悄悄
 //! 什么都不做。这条理由对三个按钮同样成立，看起来是遗漏不是故意的，这里补上。
 
-use edge_panel_api::{RegistrationResult, StatusBody, UsbResetResult};
+use edge_panel_api::{RegistrationResult, UsbResetResult};
 use leptos::prelude::*;
 use std::collections::HashMap;
 use thaw::*;
 
 use crate::api::{self, Load};
-use crate::status::StatusState;
+use crate::status::{manageable, StatusState};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DangerNote {
@@ -59,6 +59,19 @@ impl DangerState {
             note: RwSignal::new(None),
             busy: RwSignal::new(false),
         }
+    }
+
+    /// 换了一根模组，上一次操作的结果作废。
+    ///
+    /// 🔴 `note` 是全局一条而且文案里不含 IMEI，留着就会被安在新模组头上：
+    /// 一条绿色的「射频已关闭。」配着一个写着「关射频」的按钮，两者互相矛盾，
+    /// 而这批硬件没人能物理接触——把一次脱网操作记到错的模组上，是要人去救
+    /// 错模组的。
+    ///
+    /// ⚠️ `radio` **不清**。它本来就是按 IMEI 分开记的（这一半一直是对的），
+    /// 清掉反而会让每根模组的射频状态在切换后忘记。
+    pub fn forget_modem(&self) {
+        self.note.set(None);
     }
 }
 
@@ -198,17 +211,6 @@ async fn unregister(
     }
 }
 
-/// 当前选中的模组是不是 QMI 可管理的。⚠️ 找不到模组时按「可管理」处理——
-/// 原版 `activeManageable()` 是同样的防御性默认值，覆盖的是选中和数据到达
-/// 之间那个短暂的间隙，不是一条业务规则。
-fn manageable(body: &StatusBody, imei: &str) -> bool {
-    body.modems
-        .iter()
-        .find(|m| m.imei == imei)
-        .map(|m| m.manageable)
-        .unwrap_or(true)
-}
-
 #[component]
 pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
     view! {
@@ -317,6 +319,27 @@ pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
 mod tests {
     use super::*;
 
+    /// 🔴 「射频已关闭。」不含 IMEI，留在另一根模组下面就是在说那一根被关了。
+    #[test]
+    fn switching_modems_forgets_the_previous_result_but_not_the_radio_map() {
+        let state = DangerState::new();
+        state
+            .note
+            .set(Some(DangerNote::Done("射频已关闭。".into())));
+        state.radio.update(|m| {
+            m.insert("867018069509705".to_string(), false);
+        });
+
+        state.forget_modem();
+
+        assert_eq!(state.note.get_untracked(), None, "上一根的操作结果必须清掉");
+        assert!(
+            !radio_online(&state.radio.get_untracked(), "867018069509705"),
+            "⚠️ 射频状态是按 IMEI 记的，**不能**跟着清——清了每根模组的射频状态\
+             都会在切换后被忘掉"
+        );
+    }
+
     /// 🔴 每根模组各自记，不能把 A 的操作结果安在 B 头上。
     #[test]
     fn radio_state_does_not_leak_across_modems() {
@@ -335,7 +358,7 @@ mod tests {
     /// 找不到模组时按「可管理」处理，这是防御性默认值不是业务规则。
     #[test]
     fn an_unknown_modem_defaults_to_manageable() {
-        let body = StatusBody {
+        let body = edge_panel_api::StatusBody {
             mode: edge_panel_api::PanelMode::Local,
             modems: Vec::new(),
             discoveries: Vec::new(),

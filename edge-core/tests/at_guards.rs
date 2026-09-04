@@ -137,3 +137,53 @@ fn the_sweep_form_of_cops_is_never_guarded_only_the_manual_selection_is() {
     assert_eq!(guarded("AT+COPS=1,2,\"46000\""), Some(Guarded::Cops(1)));
     assert_eq!(guarded("AT+COPS=2"), Some(Guarded::Cops(2)));
 }
+
+/// 🔴 中文输入不能把匹配器打崩。
+///
+/// 这一整块面板是中文的，而 `guarded()` 是「发出」按下之后走的**第一步**。
+/// 早先 `strip_ci` 用 `s[..prefix.len()]` 做字节切片，只检查长度不检查字符
+/// 边界；八条守卫前缀全是 7 字节，所以每条命令都先在第 7 字节切一刀——
+/// 「重启模组」的第 7 字节正落在第三个汉字中间，直接 panic。三个汉字以上的
+/// 输入必炸，而 AT 与 USSD 共用同一个输入框，两种模式都走这一步。
+///
+/// wasm 上 panic 就是 trap：操作员看不到任何错误（只有 devtools 里一行），
+/// 命令也没发出去，屏幕上什么都不显示。对一块「故障时最后一道可视窗口」
+/// 来说这是最坏的失败方式——而这次部署顺手删掉了旧面板，没有回退的那一份。
+///
+/// 这条测试不关心这些输入**判成什么**，只关心它们不炸。
+#[test]
+fn a_command_full_of_chinese_does_not_blow_up_the_matcher() {
+    for command in [
+        "重启模组",
+        "你好吗",
+        "查询信号",
+        "信号强度怎么样",
+        "AT+CSQ 信号",
+        "AT+CS信号",
+        "你好👋世界",
+        "模组重启一下试试",
+        // 两个临界点：八条守卫前缀是 7 字节，qprtpara 是 11 字节。
+        "重启模",
+        "重启模组信",
+    ] {
+        let _ = guarded(command);
+    }
+
+    // 逐个字符边界前缀扫一遍，任何一个切点都不能炸。
+    let text = "重启模组信号强度AT+CSQ查询";
+    for (at, _) in text.char_indices() {
+        let _ = guarded(&text[..at]);
+    }
+    let _ = guarded(text);
+}
+
+/// 修 panic 不能顺手放松匹配。
+#[test]
+fn chinese_around_a_guarded_command_does_not_change_the_verdict() {
+    assert_eq!(
+        guarded("请发送 AT+CFUN=1,1"),
+        None,
+        "前面带中文就不是那条命令"
+    );
+    assert_eq!(guarded("AT+CFUN=1,1"), Some(Guarded::CfunReset(1)));
+}

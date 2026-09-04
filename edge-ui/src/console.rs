@@ -137,6 +137,19 @@ impl ConsoleState {
             seq: RwSignal::new(0),
         }
     }
+
+    /// 换了一根模组，USSD 会话标记作废。
+    ///
+    /// 🔴 会话是**某一根模组和运营商之间**的。标记留着的话，「取消会话」那个
+    /// 按钮会挂在新模组下面，按下去把 `AT+CUSD=2` 发给一根根本没有会话的模组，
+    /// 而真正开着的那个会话被丢在那里——`lib.rs` 说得很清楚：被遗弃的会话会
+    /// 让网络一直等着，并挡住下一次请求。
+    ///
+    /// ⚠️ 记录和历史**不清**。它们是这次会话的排查记录，不是某一根模组的属性；
+    /// 每一条记录都有自己的时间戳，而记录本来就是拿来跨模组对照看的。
+    pub fn forget_modem(&self) {
+        self.ussd_open.set(false);
+    }
 }
 
 /// 往上翻一条历史。返回要放进输入框的内容**连同它当时的模式**。
@@ -211,12 +224,11 @@ fn update_entry(state: ConsoleState, seq: u64, next: Exchange) {
 ///
 /// ⚠️ 确认在这里做，不在按钮上。上下键调出来的命令、只读探针、手输的回车，
 /// 三条路都汇到这里 —— 守卫只放在其中一条路上，等于没放。
-pub async fn run(state: ConsoleState, active: Option<String>, command: String) {
+pub async fn run(state: ConsoleState, active: Option<String>, command: String, mode: Mode) {
     let command = command.trim().to_string();
     if command.is_empty() {
         return;
     }
-    let mode = state.mode.get_untracked();
 
     state.seq.update(|n| *n += 1);
     let seq = state.seq.get_untracked();
@@ -350,9 +362,28 @@ fn hhmmss(at: f64) -> String {
 
 #[component]
 pub fn ConsolePage(active: RwSignal<Option<String>>, state: ConsoleState) -> impl IntoView {
+    // 手输框那条路：用下拉框当前选的模式——那正是操作员刚刚亲手选的东西。
     let send = move |command: String| {
         let active = active.get_untracked();
-        leptos::task::spawn_local(async move { run(state, active, command).await });
+        let mode = state.mode.get_untracked();
+        leptos::task::spawn_local(async move { run(state, active, command, mode).await });
+    };
+
+    // 🔴 只读探针那一排**永远走 AT**，不看下拉框。
+    //
+    // 这一排按钮上方写着「这一排全是只读查询，不会改模组状态」。它们和手输框
+    // 共用同一个 `run()`，而 `run()` 原先是从 `state.mode` 取模式的——于是模式
+    // 停在 USSD 时，点「信号」会把 `AT+CSQ` 当成 USSD code 发出去：`/api/ussd`
+    // 那条路先无条件发一次 `AT+CUSD=2` 释放掉现有会话，再发
+    // `AT+CUSD=1,"AT+CSQ",15`。整个过程没有确认框（`guarded("AT+CSQ")` 是
+    // `None`），服务端也拦不住——`refuse_disruptive_at` 只装在 `/api/at` 上，
+    // `/api/ussd` 不经过它。
+    //
+    // 一排自称只读的按钮真的动了运营商侧的东西，这正是这块面板通篇在防的事。
+    // 探针是 AT 命令，所以它们发 AT，和下拉框无关。
+    let probe = move |command: String| {
+        let active = active.get_untracked();
+        leptos::task::spawn_local(async move { run(state, active, command, Mode::At).await });
     };
 
     view! {
@@ -378,11 +409,11 @@ pub fn ConsolePage(active: RwSignal<Option<String>>, state: ConsoleState) -> imp
                     .iter()
                     .map(|(label, command)| {
                         let command = command.to_string();
-                        let send = send.clone();
+                        let probe = probe.clone();
                         view! {
                             <Button
                                 size=ButtonSize::Small
-                                on_click=move |_| send(command.clone())
+                                on_click=move |_| probe(command.clone())
                             >
                                 {*label}
                             </Button>
@@ -727,6 +758,36 @@ fn Exchange(entry: Entry) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 USSD 会话是**某一根模组和运营商之间**的。标记跨模组留着，
+    /// 「取消会话」就会把 AT+CUSD=2 发给一根没有会话的模组。
+    #[test]
+    fn switching_modems_forgets_the_ussd_session_but_keeps_the_transcript() {
+        let state = ConsoleState::new();
+        state.ussd_open.set(true);
+        state.entries.update(|list| {
+            list.push(Entry {
+                seq: 1,
+                at: 0.0,
+                mode: Mode::Ussd,
+                command: "*100#".into(),
+                state: Exchange::Refused,
+            })
+        });
+        state.mode.set(Mode::Ussd);
+
+        state.forget_modem();
+
+        assert!(
+            !state.ussd_open.get_untracked(),
+            "会话标记必须清掉，否则「取消会话」会取消到错的模组"
+        );
+        assert_eq!(
+            state.entries.get_untracked().len(),
+            1,
+            "⚠️ 记录是这次排查的记录，不是某根模组的属性，不能清"
+        );
+    }
 
     /// 只读探针这一排里不能有任何改状态的命令。
     ///

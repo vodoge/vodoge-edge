@@ -68,6 +68,15 @@ impl ScanState {
             now: RwSignal::new(crate::status::now_ms()),
         }
     }
+
+    /// 换了一根模组，上一根扫到的运营商表作废。
+    ///
+    /// 🔴 扫网正是用来判断「这一根为什么注册不上」的。把 A 能看到三个网这件事
+    /// 读成 B 能看到，结论会正好反过来——而卡片上没有任何一处写着这份结果属于
+    /// 谁。
+    pub fn forget_modem(&self) {
+        self.scan.set(Scan::Idle);
+    }
 }
 
 fn status_label(status: &str) -> &str {
@@ -345,6 +354,22 @@ fn Operators(result: ScanResult) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 扫网结果是**某一根模组**看得见的网。留给下一根读，结论会正好相反。
+    #[test]
+    fn switching_modems_forgets_the_previous_sweep() {
+        // ⚠️ 不走 `ScanState::new()`：它读 `js_sys::Date` 取当前时间，那在
+        // host 上跑不了（wasm-bindgen 的导入函数只在 wasm 里有）。
+        let state = ScanState {
+            scan: RwSignal::new(Scan::Done {
+                result: result(),
+                at: 1.0,
+            }),
+            now: RwSignal::new(0.0),
+        };
+        state.forget_modem();
+        assert_eq!(state.scan.get_untracked(), Scan::Idle);
+    }
 
     fn op(numeric: &str, long: &str, short: &str, status: &str) -> ScannedOperatorBody {
         ScannedOperatorBody {

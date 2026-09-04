@@ -165,6 +165,23 @@ fn state_label(raw: &str) -> String {
     }
 }
 
+/// 这一根模组是不是 QMI 可管理的。
+///
+/// 🔴 住在这里而不是某一页里，是因为**不止一页需要它**：危险区靠它决定画
+/// 「危险区」还是「AT 通道」，eSIM 靠它决定按钮能不能点。这两处不一致过——
+/// 危险区写着「eSIM 操作不可用」，而同一屏下面的 eSIM「读取」按钮是亮的。
+///
+/// ⚠️ 找不到这根模组时按「可管理」处理。原版 `activeManageable()` 是同样的
+/// 防御性默认值，覆盖的是「选中了」和「状态数据到达」之间那个短暂的间隙，
+/// 不是一条业务规则。
+pub fn manageable(body: &StatusBody, imei: &str) -> bool {
+    body.modems
+        .iter()
+        .find(|m| m.imei == imei)
+        .map(|m| m.manageable)
+        .unwrap_or(true)
+}
+
 fn state_tone(raw: &str) -> BadgeColor {
     match state_key(raw).as_str() {
         "registered" | "home" => BadgeColor::Success,

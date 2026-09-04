@@ -143,12 +143,34 @@ fn take_u32(s: &str) -> Option<(u32, &str)> {
 }
 
 /// 大小写不敏感地剥掉前缀。
+///
+/// 🔴 **按字节比，不按字节切。** 早先这里写的是
+/// `s[..prefix.len()].eq_ignore_ascii_case(prefix)`，只检查了长度够不够，没检查
+/// 那个下标落不落在字符边界上——于是任何在偏移 7 或 11 处跨过一个多字节字符的
+/// 输入都会直接 panic。这不是理论问题：八条守卫前缀全是 7 字节（`at+qcfg`、
+/// `at+cfun` …），所以每条命令都会先在第 7 字节上切一刀，而这是一块**全中文**
+/// 的面板——「重启模组」四个汉字是 12 字节，第 7 字节正落在第三个字的中间。
+/// 三个汉字以上的输入必炸。
+///
+/// wasm 上 panic 就是 trap，操作员看不到任何错误（只有 devtools 里一行），而
+/// 这个面板的定位恰恰是「故障时最后一道可视窗口」。
+///
+/// 现在比的是字节：前缀本身全是 ASCII，`as_bytes()` 上逐字节忽略大小写比较，
+/// 既不会越界也不需要知道字符边界；只有确认匹配之后才切，而那时 `prefix.len()`
+/// 一定落在边界上（前面全是 ASCII 字节）。`crate::log_line` 里的匹配器一直是
+/// 这么写的，这里当初没照做。
 fn strip_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&s[prefix.len()..])
-    } else {
-        None
+    let bytes = s.as_bytes();
+    let want = prefix.as_bytes();
+    if bytes.len() < want.len() {
+        return None;
     }
+    if !bytes[..want.len()].eq_ignore_ascii_case(want) {
+        return None;
+    }
+    // 前缀全是 ASCII，匹配成功就意味着这个下标在字符边界上。
+    debug_assert!(s.is_char_boundary(want.len()));
+    Some(&s[want.len()..])
 }
 
 /// 这条命令要不要先问一次。

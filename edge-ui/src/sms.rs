@@ -71,6 +71,18 @@ impl SmsState {
             inflight: RwSignal::new(false),
         }
     }
+
+    /// 换了一根模组，上一次发送的结局作废。
+    ///
+    /// 🔴 一条「已提交给代理」留在另一根模组旁边，读起来就是那一根发出去了；
+    /// 而一条点名上一个 IMEI 的拒绝，读起来像是对**这一根**的拒绝。原版
+    /// `select()` 清 `sendStatus` 就是为了这个。
+    ///
+    /// ⚠️ 号码和内容**不清**。那是操作员正在打的字，换根模组重发是常事，
+    /// 原版也没有清它们。
+    pub fn forget_modem(&self) {
+        self.note.set(None);
+    }
 }
 
 pub async fn poll(state: SmsState) {
@@ -437,6 +449,25 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 一条「已提交给代理」留在另一根旁边，读起来就是那一根发出去了。
+    #[test]
+    fn switching_modems_forgets_the_last_send_but_keeps_what_is_being_typed() {
+        let state = SmsState::new();
+        state.note.set(Some(SendNote::Sent));
+        state.to.set("8613800100500".into());
+        state.body.set("还没发完的一句话".into());
+
+        state.forget_modem();
+
+        assert_eq!(state.note.get_untracked(), None, "上一次发送的结局必须清掉");
+        assert_eq!(
+            state.to.get_untracked(),
+            "8613800100500",
+            "⚠️ 号码是操作员正在打的字，换根模组重发是常事，不能清"
+        );
+        assert_eq!(state.body.get_untracked(), "还没发完的一句话", "内容同上");
+    }
 
     fn message(imei: Option<&str>) -> MessageBody {
         MessageBody {

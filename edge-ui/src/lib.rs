@@ -130,11 +130,36 @@ pub fn Panel() -> impl IntoView {
     // 体检的状态住在这里而不是页里：切换模组要清掉它（原版 select() 就是这么做的），
     // 而「切换模组」是状态页的事。
     let health = RwSignal::new(Health::Idle);
+
+    // 🔴 **换模组时的清场。加新页面的人：你的状态也要在这里清一次。**
+    //
+    // 原版 `select()` 做的就是这件事，注释写得很直白：「一次判决是关于一张卡的。
+    // 留在另一根模组旁边，它就被读成那一根的了。」搬迁时我只搬了体检那一条，
+    // 其余五处全漏了——2026-09-04 部署前的审查一次抓出五条，全是同一个根因：
+    //
+    //   eSIM      profile 表和切换回执跨模组残留，而表里的按钮会拿着**上一张卡的
+    //             ICCID** 和**当前选中的 IMEI** 去发真正的 ES10c 写操作
+    //   扫网      B 的名下画着 A 三分钟前扫到的运营商表，而扫网正是用来判断
+    //             「这一根为什么注册不上」的——读反了结论正好相反
+    //   危险区    A 的「射频已关闭。」挂在 B 的标题下，配着一个写「关射频」的按钮
+    //   短信      一条「已提交给代理」留在另一根旁边，读起来就是那一根发出去了
+    //   USSD      会话标记跨模组泄漏，「取消会话」把 AT+CUSD=2 发给一根没有会话
+    //             的模组，而真正开着的那个被丢在那里
+    //
+    // 这批硬件没有人能物理接触。把一根模组的状态安在另一根头上，代价是有人去
+    // 救错的那一根。
+    //
+    // ⚠️ 每个 `forget_modem()` 自己决定清什么、**留什么**——比如危险区按 IMEI
+    // 记的射频状态要留、控制台的记录和历史要留、短信正在打的号码和内容要留。
+    // 理由写在各自的方法上。
     Effect::new(move |_| {
-        // 只要选中的模组变了，上一根的体检结果就必须清掉——否则屏幕上会是
-        // 一根模组的名字配另一根模组的信号。
         let _ = state.active.get();
         health.set(Health::Idle);
+        esim.forget_modem();
+        scan.forget_modem();
+        danger.forget_modem();
+        sms.forget_modem();
+        console.forget_modem();
     });
 
     view! {
@@ -143,7 +168,7 @@ pub fn Panel() -> impl IntoView {
             <DangerZone status=state state=danger />
             <HealthPage active=state.active state=health />
             <ScanPage active=state.active state=scan />
-            <EsimPage active=state.active state=esim />
+            <EsimPage active=state.active state=esim status=state />
             <SmsPage state=sms status=state />
             <CandidatesPage state=state claims=claims rescan_state=rescan_state />
             <ConsolePage active=state.active state=console />

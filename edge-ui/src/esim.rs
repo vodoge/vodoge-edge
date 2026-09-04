@@ -26,6 +26,7 @@ use leptos::prelude::*;
 use thaw::*;
 
 use crate::api::{self, Load};
+use crate::status::StatusState;
 
 /// 等卡片多久再去问它。
 ///
@@ -218,6 +219,19 @@ impl EsimState {
             read: RwSignal::new(false),
         }
     }
+
+    /// 换了一根模组，这一栏手上的东西全部作废。
+    ///
+    /// 🔴 profile 列表是**某一张卡**的。留在屏幕上配着另一根模组的标题，它就被
+    /// 读成那一根的了——而这一栏的按钮会拿着表里的 ICCID 和当前选中的 IMEI 去
+    /// 发真正的 ES10c 写操作。切换回执同理：一次判决是关于一张卡的。
+    ///
+    /// `read` 也要清，否则按钮会写着「重新读取」，等于替新模组宣称「已经读过了」。
+    pub fn forget_modem(&self) {
+        self.profiles.set(Load::Loading);
+        self.receipt.set(None);
+        self.read.set(false);
+    }
 }
 
 fn confirmed(message: &str) -> bool {
@@ -363,14 +377,32 @@ async fn switch(state: EsimState, imei: Option<String>, iccid: String, enable: b
 }
 
 #[component]
-pub fn EsimPage(active: RwSignal<Option<String>>, state: EsimState) -> impl IntoView {
+pub fn EsimPage(
+    active: RwSignal<Option<String>>,
+    state: EsimState,
+    status: StatusState,
+) -> impl IntoView {
+    // 🔴 这一根走不走 QMI。eSIM 的每一个操作都走 QMI（ES10c 要开逻辑通道），
+    // 所以 AT-only 的模组在这里**一件事都做不了**——服务端会以
+    // `no matching QMI modem` 拒掉，而那是一块全中文面板上唯一的英文。
+    //
+    // 更要紧的是自相矛盾：同一屏上方的危险区对这根模组画的正是「AT 通道」，
+    // 正文写着「需要 QMI 的射频开关、eSIM 操作与 USB 恢复不可用」，而下面这个
+    // 「读取」按钮却是亮的。旧面板两处都挂了 `activeManageable()`，搬迁时漏了。
+    let usable = Memo::new(move |_| match (active.get(), status.load.get()) {
+        (Some(imei), Load::Ready(body)) => crate::status::manageable(&body, &imei),
+        // 还没选模组、或者状态还没到——按钮本来就该是灰的（下面 is_none 那一条），
+        // 这里不额外收紧，保持和危险区同样的防御性默认值。
+        _ => true,
+    });
+
     view! {
         <Card>
             <CardHeader>
                 <Body1><b>"eSIM profile"</b></Body1>
                 <CardHeaderAction slot>
                     <Button
-                        disabled=Signal::derive(move || active.get().is_none())
+                        disabled=Signal::derive(move || active.get().is_none() || !usable.get())
                         on_click=move |_| {
                             let imei = active.get_untracked();
                             leptos::task::spawn_local(async move {
@@ -400,6 +432,15 @@ pub fn EsimPage(active: RwSignal<Option<String>>, state: EsimState) -> impl Into
             {move || {
                 if active.get().is_none() {
                     return view! { <Caption1>"先在左边选一根模组。"</Caption1> }.into_any();
+                }
+                if !usable.get() {
+                    // 和危险区那一段说同一件事，用同样的话。
+                    return view! {
+                        <Caption1>
+                            "这一根由 AT 控制口管理，没有 QMI 通道 —— eSIM 的读取与切换都做不了。"
+                        </Caption1>
+                    }
+                    .into_any();
                 }
                 match state.profiles.get() {
                     Load::Loading if !state.read.get() => {
@@ -542,6 +583,88 @@ fn Profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 AT-only 的模组在这一栏一件事都做不了，按钮不能是亮的。
+    ///
+    /// 生产机队里有一根 EC200U-CN（`manageable=false`、`discovery="at"`），
+    /// 压根没有 cdc-wdm 接口。eSIM 的每一个操作都走 QMI，服务端会以
+    /// `no matching QMI modem` 拒掉——那是一块全中文面板上唯一的英文。
+    ///
+    /// 更要紧的是自相矛盾：同一屏上方的危险区对这根模组画的正是「AT 通道」，
+    /// 正文写着「eSIM 操作不可用」。旧面板两处都挂了 `activeManageable()`。
+    #[test]
+    fn an_at_only_modem_is_not_offered_esim_actions() {
+        use edge_core::CapabilityOrigin;
+        use edge_panel_api::{ModemBody, PanelMode, StatusBody};
+
+        let at_only = ModemBody {
+            imei: "868019060490134".into(),
+            family: "EC200U-CN".into(),
+            iccid: None,
+            state: "online".into(),
+            last_seen: Some(0),
+            home: None,
+            home_numeric: None,
+            imsi: None,
+            network: None,
+            network_numeric: None,
+            discovery: "at".into(),
+            manageable: false,
+            control_port: Some("/dev/ttyUSB4".into()),
+            firmware: None,
+            msisdn: None,
+            carrier_profile: String::new(),
+            capability_origin: CapabilityOrigin::Rule,
+        };
+        let mut qmi = at_only.clone();
+        qmi.imei = "867018069509705".into();
+        qmi.manageable = true;
+        qmi.discovery = "qmi".into();
+
+        let body = StatusBody {
+            mode: PanelMode::Cloud,
+            modems: vec![at_only.clone(), qmi.clone()],
+            discoveries: Vec::new(),
+        };
+
+        assert!(
+            !crate::status::manageable(&body, &at_only.imei),
+            "EC200U-CN 走 AT，eSIM 够不到它"
+        );
+        assert!(
+            crate::status::manageable(&body, &qmi.imei),
+            "QMI 那几根照常可用——修这条不能把所有人一起关掉"
+        );
+    }
+
+    /// 🔴 换模组必须把这一栏清空——留着的 profile 表配着新模组的标题，就是
+    /// 在说「这些卡在这根模组里」，而按钮会拿表里的 ICCID 去发真的写操作。
+    #[test]
+    fn switching_modems_forgets_the_previous_cards_profiles() {
+        let state = EsimState::new();
+        state.profiles.set(Load::Ready(ProfilesResult {
+            imei: Some("867018069509705".into()),
+            profiles: vec![profile("8986001", true)],
+        }));
+        state.read.set(true);
+        state.receipt.set(Some(receipt("8986001", true, false)));
+
+        state.forget_modem();
+
+        assert!(
+            matches!(state.profiles.get_untracked(), Load::Loading),
+            "上一张卡的 profile 表必须清掉"
+        );
+        assert_eq!(
+            state.receipt.get_untracked(),
+            None,
+            "切换回执是关于一张卡的"
+        );
+        assert!(
+            !state.read.get_untracked(),
+            "read 留着的话按钮会写「重新读取」，等于替新模组宣称已经读过了"
+        );
+    }
 
     fn profile(iccid: &str, enabled: bool) -> ProfileBody {
         ProfileBody {
