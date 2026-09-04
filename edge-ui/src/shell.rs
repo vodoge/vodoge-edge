@@ -304,6 +304,26 @@ mod layout_wiring {
         }
     }
 
+    /// 🔴 滚的必须是 pane 的**身子**，不是整个栏子。
+    ///
+    /// 栏子整个滚的话，pane 的头会跟着走——往日志历史里翻的时候，级别筛选、
+    /// 搜索框、连「暂停」按钮都一起滚出屏幕，想暂停得先滚回顶部。
+    /// `.vd-pane` 那段注释写着「头不动，身子滚」，而在改这里之前它一直是假的。
+    #[test]
+    fn the_pane_head_stays_put_because_the_body_is_what_scrolls() {
+        let body = top_level(".vd-pane-body");
+        assert!(
+            body.contains("overflow-y: auto"),
+            "`.vd-pane-body` 不滚了 —— 那就会变成整个栏子滚，pane 的头（标题、\
+             筛选、暂停按钮）跟着历史一起滚走"
+        );
+        assert!(
+            body.contains("min-height: 0"),
+            "`.vd-pane-body` 少了 min-height:0 —— flex 子项会被内容撑开，\
+             撑开就不产生滚动条，头照样被顶走"
+        );
+    }
+
     /// 🔴 deck 必须是普通 div，不能换回 `Layout has_sider=true`。
     ///
     /// 那个组件把 `flex-direction: row` 写成**行内样式**（要 `!important` 才掰得

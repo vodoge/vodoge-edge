@@ -105,11 +105,13 @@
       .vd-deck > .vd-rail { flex: 0 0 var(--vd-rail); min-width: var(--vd-rail); }
       .vd-deck > .vd-logs { flex: 0 0 var(--vd-logs); min-width: var(--vd-logs); }
       .vd-deck > .vd-main { flex: 1 1 auto; min-width: 0; }
-      .vd-deck > * { height: 100%; min-height: 0; }
+      /* 栏子本身**不滚**——滚的是每个 pane 的身子。这样标题、筛选、暂停按钮
+         这些「头」钉在原位，而不是跟着历史一起滚走。 */
+      .vd-deck > * { height: 100%; min-height: 0; overflow: hidden; }
 
       /* 一栏（或栏里的一块）：头不动，身子滚。头上是标题、新鲜度和这一栏的
          动作按钮——滚走了就要人先滚回去才能按。 */
-      .vd-pane { display: flex; flex-direction: column; min-height: 0; }
+      .vd-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
       .vd-pane-head {
         display: flex; align-items: center; gap: 8px;
         padding: 6px 10px;
@@ -117,7 +119,16 @@
         flex: 0 0 auto;
       }
       .vd-pane-head-end { margin-left: auto; display: flex; align-items: center; gap: 6px; }
-      .vd-pane-body { padding: 8px 10px; min-height: 0; }
+      /* 🔴 **这里才是滚动的地方。** 以前滚的是整个栏子（`LayoutSider` 自带的
+         `Scrollbar`），于是往日志历史里翻的时候，级别筛选、搜索框、连「暂停」
+         按钮都一起滚出屏幕——想暂停得先滚回顶部。上面那句「头不动，身子滚」
+         在改这里之前一直是假的。 */
+      .vd-pane-body {
+        padding: 8px 10px;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+      }
       .vd-tabs { padding: 0 6px; }
 
       /* ── 舰队一行 + 轨迹条带 ────────────────────────────────────────
@@ -170,6 +181,12 @@
 
       /* 上一次读到的列表。压暗，免得被读成当前状态——旁边那条警告条说明了年龄。 */
       .vd-stale { opacity: 0.55; }
+
+      /* 左栏里有两个 pane 加一个钉底的危险区，整栏一起滚才对（它们是同一个
+         上下文）。所以左栏是例外：它自己滚，而不是各 pane 分别滚。 */
+      .vd-deck > .vd-rail { overflow-y: auto; display: flex; flex-direction: column; }
+      .vd-rail .vd-pane { height: auto; }
+      .vd-rail .vd-pane-body { overflow: visible; }
 
       .vd-rail-foot {
         border-top: 1px solid var(--colorNeutralStroke2);

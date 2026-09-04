@@ -202,13 +202,16 @@ pub fn Panel() -> impl IntoView {
                 // 还留在原地——「关射频」按钮孤零零挂在那儿，唯一能说明
                 // 它对准哪一根的模组列表已经不在屏幕上了。
                 //
-                // `LayoutSider` 自带 `Scrollbar`，所以只要把高度约束接上，
-                // 三栏就各自独立滚动。这里只需要一个普通 flex 行。
+                // 三栏也都是普通 div。`LayoutSider` 自带的 `Scrollbar` 滚的是
+                // **整个栏子**，包括 pane 的头——于是往日志历史里翻的时候，
+                // 级别筛选、搜索框、连「暂停」按钮都一起滚出屏幕，想暂停得先
+                // 滚回顶部。`.vd-pane` 那段注释写着「头不动，身子滚」，但一直
+                // 不是这样。改成让 `.vd-pane-body` 自己滚，那句话才成立。
                 <div class="vd-deck">
                     // ── 左栏：有哪几根 ─────────────────────────────────────
                     // 选中哪一根是这块面板唯一的全局上下文：中栏每一个操作都
                     // 瞄准它。所以它常驻，不做成标签。
-                    <LayoutSider class="vd-rail">
+                    <div class="vd-rail">
                         <Pane title="模组">
                             <ModemRail state=state />
                         </Pane>
@@ -224,10 +227,10 @@ pub fn Panel() -> impl IntoView {
                         <div class="vd-rail-foot">
                             <DangerZone status=state state=danger />
                         </div>
-                    </LayoutSider>
+                    </div>
 
                     // ── 中栏：对选中这一根做什么 ───────────────────────────
-                    <Layout class="vd-main">
+                    <div class="vd-main">
                         <div class="vd-pane">
                             <div class="vd-pane-head vd-tabs">
                                 <TabList selected_value=tab>
@@ -271,17 +274,17 @@ pub fn Panel() -> impl IntoView {
                                 }}
                             </div>
                         </div>
-                    </Layout>
+                    </div>
 
                     // ── 右栏：daemon 此刻在说什么 ──────────────────────────
                     // ⚠️ **不能**做成一个标签。中栏按下一个按钮之后要立刻看到
                     // daemon 说了什么；把两者藏进互斥的标签里，就等于每做一步
                     // 都要来回切一次。旧面板把它独立成一栏是对的。
-                    <LayoutSider class="vd-logs">
+                    <div class="vd-logs">
                         <Pane title="日志">
                             <LogsPage state=logs />
                         </Pane>
-                    </LayoutSider>
+                    </div>
                 </div>
             </Layout>
         </ConfigProvider>
