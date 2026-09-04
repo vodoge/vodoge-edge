@@ -30,6 +30,7 @@
 mod api;
 mod candidates;
 mod console;
+mod copy;
 mod danger;
 mod esim;
 mod health;

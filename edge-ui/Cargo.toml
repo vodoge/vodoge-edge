@@ -2,6 +2,7 @@
 name = "edge-ui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # `rlib` alongside `cdylib` so the crate can also be depended on by a test
 # target; `cdylib` is what wasm-bindgen needs.
@@ -22,7 +23,21 @@ gloo-net = { version = "0.7", default-features = false, features = ["http", "jso
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["KeyboardEvent", "Window"] }
+# ⚠️ `Document` / `HtmlTextAreaElement` / `HtmlElement` / `Navigator` 是给
+# `copy.rs` 的降级复制路径用的：面板在现场几乎总是从 `http://<lan-ip>:8743`
+# 打开，那**不是安全上下文**，`navigator.clipboard` 在那里根本不存在，
+# 只能靠 `document.execCommand("copy")`。理由写在 `copy.rs` 开头。
+web-sys = { version = "0.3", features = [
+    "Clipboard",
+    "Document",
+    "Element",
+    "HtmlDocument",
+    "HtmlElement",
+    "HtmlTextAreaElement",
+    "KeyboardEvent",
+    "Navigator",
+    "Window",
+] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 wasm-bindgen = "0.2"

@@ -145,7 +145,12 @@ fn hot_matrix_json() -> serde_json::Value {
     })
 }
 
-fn matrix_command(cmd_id: &str, version: &str, sha: &str, matrix: ContextValue) -> CommandDeliverPayload {
+fn matrix_command(
+    cmd_id: &str,
+    version: &str,
+    sha: &str,
+    matrix: ContextValue,
+) -> CommandDeliverPayload {
     CommandDeliverPayload {
         cmd_id: cmd_id.into(),
         issued_at: 1_000,
@@ -173,10 +178,17 @@ fn update_capability_matrix_changes_the_live_verdict() {
 
     let builtin = CapabilityMatrix::builtin().expect("builtin");
     let before = builtin.query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
-    assert!(matches!(before.capability.sms_mo, BearerSupport::Unsupported { .. }));
+    assert!(matches!(
+        before.capability.sms_mo,
+        BearerSupport::Unsupported { .. }
+    ));
 
     let outcome = executor
-        .deliver(DELIVERY_A, matrix_command(CMD_ID, "hot-1", &sha, matrix), 1_500)
+        .deliver(
+            DELIVERY_A,
+            matrix_command(CMD_ID, "hot-1", &sha, matrix),
+            1_500,
+        )
         .expect("install matrix");
 
     assert_eq!(outcome.receipt.status, RECEIPT_ACCEPTED);
@@ -186,10 +198,17 @@ fn update_capability_matrix_changes_the_live_verdict() {
     let after = executor
         .matrix()
         .query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
-    assert_eq!(after.capability.sms_mo, BearerSupport::Supported(Bearer::Cellular));
+    assert_eq!(
+        after.capability.sms_mo,
+        BearerSupport::Supported(Bearer::Cellular)
+    );
 
     let replay = executor
-        .deliver(DELIVERY_B, matrix_command(CMD_ID, "hot-1", &sha, serde_json::from_value(json).unwrap()), 1_800)
+        .deliver(
+            DELIVERY_B,
+            matrix_command(CMD_ID, "hot-1", &sha, serde_json::from_value(json).unwrap()),
+            1_800,
+        )
         .expect("redelivery");
     assert_eq!(replay.receipt.status, RECEIPT_DUPLICATE);
     assert!(!replay.executed);
@@ -263,7 +282,10 @@ fn self_update_keeps_the_new_binary_after_resume() {
     executor
         .deliver(DELIVERY_A, self_update_payload(CMD_ID, "1.1.0"), 1_500)
         .expect("stage update");
-    assert!(executor.confirm_handshake(true).expect("handshake").is_none());
+    assert!(executor
+        .confirm_handshake(true)
+        .expect("handshake")
+        .is_none());
     assert_eq!(executor.running_version(), "1.1.0");
     assert!(executor.updater().restored().is_empty());
 }
@@ -292,8 +314,9 @@ impl edge_agent::SendPort for RecordingPort {
         timeout_ms: Option<i64>,
         force: bool,
     ) -> Result<serde_json::Value, edge_agent::SendError> {
-        self.calls
-            .push(format!("run_at {imei} {command} {timeout_ms:?} force={force}"));
+        self.calls.push(format!(
+            "run_at {imei} {command} {timeout_ms:?} force={force}"
+        ));
         Ok(serde_json::json!({"lines": ["+CSQ: 24,99"], "ok": true}))
     }
 
@@ -401,10 +424,7 @@ impl edge_agent::SendPort for RecordingPort {
         Ok(serde_json::Value::Null)
     }
 
-    fn read_esim_info(
-        &mut self,
-        _imei: &str,
-    ) -> Result<serde_json::Value, edge_agent::SendError> {
+    fn read_esim_info(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
         self.calls.push("read_esim_info".into());
         Ok(serde_json::json!({"eid": "89086030202200000026000178339240"}))
     }
@@ -414,7 +434,8 @@ impl edge_agent::SendPort for RecordingPort {
         _imei: &str,
         sequence_number: i64,
     ) -> Result<serde_json::Value, edge_agent::SendError> {
-        self.calls.push(format!("retrieve_esim_notification {sequence_number}"));
+        self.calls
+            .push(format!("retrieve_esim_notification {sequence_number}"));
         Ok(serde_json::json!({"delivered": false}))
     }
 
@@ -719,7 +740,10 @@ fn an_unimplemented_action_fails_with_its_name() {
         .expect("deliver");
 
     assert_eq!(outcome.result.status, RESULT_FAILED);
-    assert_eq!(outcome.result.reason_code.as_deref(), Some("unsupported_command"));
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("unsupported_command")
+    );
     assert!(
         outcome
             .result
@@ -823,10 +847,7 @@ impl edge_agent::SendPort for EsimPort {
         Ok(serde_json::Value::Null)
     }
 
-    fn read_esim_info(
-        &mut self,
-        _imei: &str,
-    ) -> Result<serde_json::Value, edge_agent::SendError> {
+    fn read_esim_info(&mut self, _imei: &str) -> Result<serde_json::Value, edge_agent::SendError> {
         self.answer()
     }
 
@@ -1187,7 +1208,11 @@ fn an_installed_matrix_is_handed_to_the_port_for_storage() {
     let mut executor = CommandExecutor::new(FakeSendPort::new());
 
     let outcome = executor
-        .deliver(DELIVERY_A, matrix_command(CMD_ID, "hot-1", &sha, matrix), 1_500)
+        .deliver(
+            DELIVERY_A,
+            matrix_command(CMD_ID, "hot-1", &sha, matrix),
+            1_500,
+        )
         .expect("install matrix");
     assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
 
@@ -1211,18 +1236,44 @@ fn a_restored_matrix_replaces_the_built_in_one() {
     let before = executor
         .matrix()
         .query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
-    assert!(matches!(before.capability.sms_mo, BearerSupport::Unsupported { .. }));
+    assert!(matches!(
+        before.capability.sms_mo,
+        BearerSupport::Unsupported { .. }
+    ));
 
     let json = hot_matrix_json();
     let value: ContextValue = serde_json::from_value(json).expect("context");
-    let parsed = CapabilityMatrix::from_json_value(
-        &serde_json::to_value(&value).expect("json"),
-    )
-    .expect("parse");
+    let parsed = CapabilityMatrix::from_json_value(&serde_json::to_value(&value).expect("json"))
+        .expect("parse");
     executor.restore_matrix(parsed);
 
     let after = executor
         .matrix()
         .query(&ModemFamily::EC20, &CarrierProfile::CN_TELECOM);
-    assert_eq!(after.capability.sms_mo, BearerSupport::Supported(Bearer::Cellular));
+    assert_eq!(
+        after.capability.sms_mo,
+        BearerSupport::Supported(Bearer::Cellular)
+    );
+}
+
+/// 🔴 `CommandExecutor::new` 的占位版本号必须**看得出是假的**。
+///
+/// 它原来是 `"0.1.0"` —— 一个长得完全像真版本的字符串，而生产路径当时正好
+/// 走的就是 `new()`。于是云端从上行 hello 收到 `env!("CARGO_PKG_VERSION")`
+/// 的真版本、从更新守卫的 `running_version()` 收到 `0.1.0`，两个数字长期对不
+/// 上，而没有任何人能看出哪一个是假的。
+///
+/// 占位值就该长得像占位值：一眼认出来，比对上号更重要。
+#[test]
+fn the_placeholder_version_cannot_be_mistaken_for_a_real_one() {
+    let executor = CommandExecutor::new(FakeSendPort::new());
+    let version = executor.running_version();
+    let looks_real = !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    assert!(
+        !looks_real,
+        "占位版本号 `{version}` 长得像一个真的版本 —— 云端分不出它是假的"
+    );
 }

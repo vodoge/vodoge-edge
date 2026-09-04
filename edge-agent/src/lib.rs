@@ -9,7 +9,8 @@ use std::error::Error;
 use std::fmt;
 
 use edge_core::{
-    builtin_strategy_registry, CapabilityMatrix, OperatingContext, Operation, RefusedBy, SupportLedger,
+    builtin_strategy_registry, CapabilityMatrix, OperatingContext, Operation, RefusedBy,
+    SupportLedger,
 };
 use edge_uplink::update::UpdateGuard;
 use edge_uplink::{EnvelopeId, RetentionClass, UplinkError, UplinkState};
@@ -160,7 +161,12 @@ pub trait SendPort {
     }
 
     /// `stage` is one of `start`, `continue` or `cancel`.
-    fn send_ussd(&mut self, _imei: &str, _code: &str, _stage: &str) -> Result<JsonValue, SendError> {
+    fn send_ussd(
+        &mut self,
+        _imei: &str,
+        _code: &str,
+        _stage: &str,
+    ) -> Result<JsonValue, SendError> {
         Err(unsupported("send_ussd"))
     }
 
@@ -451,7 +457,10 @@ impl FakeSendPort {
     }
 
     /// Declare what the plan on this card is sold as doing.
-    pub fn with_subscription(&mut self, subscription: edge_core::SubscriptionCapability) -> &mut Self {
+    pub fn with_subscription(
+        &mut self,
+        subscription: edge_core::SubscriptionCapability,
+    ) -> &mut Self {
         self.context.subscription = subscription;
         self
     }
@@ -491,8 +500,7 @@ impl SendPort for FakeSendPort {
         sha256: &str,
         document: &str,
     ) -> Result<(), SendError> {
-        self.persisted_matrix =
-            Some((version.to_owned(), sha256.to_owned(), document.to_owned()));
+        self.persisted_matrix = Some((version.to_owned(), sha256.to_owned(), document.to_owned()));
         Ok(())
     }
 
@@ -599,7 +607,10 @@ impl UpdatePort for FakeUpdatePort {
             return Err(error);
         }
         if request.sha256.trim().is_empty() {
-            return Err(SendError::new("update_sha256_missing", "self-update sha256 is required"));
+            return Err(SendError::new(
+                "update_sha256_missing",
+                "self-update sha256 is required",
+            ));
         }
         self.staged.push(request.clone());
         self.current = request.version.clone();
@@ -660,8 +671,16 @@ enum Phase {
 }
 
 impl<P: SendPort> CommandExecutor<P, RejectUpdate> {
+    /// 🔴 版本号是个**看得出是假的**占位值，因为这个 crate 不可能知道调用它的
+    /// 二进制是哪一版。生产侧必须用 `with_updater` 传
+    /// `env!("CARGO_PKG_VERSION")`（`edge-bin` 就是这么做的）。
+    ///
+    /// ⚠️ 这里原来写的是 `"0.1.0"` —— 一个**看起来像真的**版本号，而生产路径
+    /// 当时正好走的就是 `new()`。于是云端从上行 hello 收到真版本、从更新守卫
+    /// 的 `running_version()` 收到 `0.1.0`，两个数字长期对不上而没人看得出哪个
+    /// 是假的。占位值就该长得像占位值。
     pub fn new(port: P) -> Self {
-        Self::with_updater(port, RejectUpdate::new("0.1.0"))
+        Self::with_updater(port, RejectUpdate::new("0.0.0-version-not-supplied"))
     }
 }
 
@@ -717,7 +736,9 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             .validate_sequence()
             .map_err(CommandError::InvalidEnvelope)?;
         if envelope.kind != MessageKind::CommandDeliver {
-            return Err(CommandError::UnexpectedKind(envelope.kind.as_str().to_string()));
+            return Err(CommandError::UnexpectedKind(
+                envelope.kind.as_str().to_string(),
+            ));
         }
         let payload: CommandDeliverPayload = serde_json::from_value(envelope.payload.clone())
             .map_err(|err| CommandError::InvalidEnvelope(err.to_string()))?;
@@ -740,7 +761,11 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
         }
 
         let first_seen = !self.commands.contains_key(&payload.cmd_id);
-        match self.commands.get(&payload.cmd_id).map(|stored| stored.phase) {
+        match self
+            .commands
+            .get(&payload.cmd_id)
+            .map(|stored| stored.phase)
+        {
             Some(Phase::Terminal) => {
                 return self
                     .replay(&payload.cmd_id, &delivery_id, now_ms)
@@ -804,12 +829,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
         })
     }
 
-    fn replay(
-        &self,
-        cmd_id: &str,
-        delivery_id: &str,
-        now_ms: i64,
-    ) -> Option<DeliveryOutcome> {
+    fn replay(&self, cmd_id: &str, delivery_id: &str, now_ms: i64) -> Option<DeliveryOutcome> {
         let stored = self.commands.get(cmd_id)?;
         let result = stored.result.clone()?;
         let sequence = stored.result_sequence?;
@@ -849,16 +869,16 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 // refusal names which of the three layers withheld it, so the
                 // reader is told whether the fix is a test, a different
                 // module, or a form somebody has to fill in.
-                let outcome = match self.refuse_unsupported(modem_imei.as_deref(), Operation::SmsSend)
-                {
-                    Some(refusal) => Err(refusal),
-                    // Same shape as the diagnostic relays: whatever the port
-                    // reported travels back in `details`. For a send that is
-                    // the message reference, which the cloud stores against
-                    // the message so a later status report settles the right
-                    // one.
-                    None => self.port.send_sms(&send),
-                };
+                let outcome =
+                    match self.refuse_unsupported(modem_imei.as_deref(), Operation::SmsSend) {
+                        Some(refusal) => Err(refusal),
+                        // Same shape as the diagnostic relays: whatever the port
+                        // reported travels back in `details`. For a send that is
+                        // the message reference, which the cloud stores against
+                        // the message so a later status report settles the right
+                        // one.
+                        None => self.port.send_sms(&send),
+                    };
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
@@ -1335,17 +1355,16 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
                 ))
-            }
-            // No catch-all. `update_card_policy` was the last kind the
-            // contract carried and this match did not, and while the arm was
-            // missing the cloud's push came back `unsupported_command` -- a
-            // runtime answer to what is really a build-time question.
-            //
-            // Exhaustiveness is the guard now: a kind added to the contract
-            // stops the build here until somebody decides what it does. A
-            // *port* that cannot perform an action it was handed still refuses
-            // at run time, through the trait defaults, which is a different
-            // fact and keeps its own reason code.
+            } // No catch-all. `update_card_policy` was the last kind the
+              // contract carried and this match did not, and while the arm was
+              // missing the cloud's push came back `unsupported_command` -- a
+              // runtime answer to what is really a build-time question.
+              //
+              // Exhaustiveness is the guard now: a kind added to the contract
+              // stops the build here until somebody decides what it does. A
+              // *port* that cannot perform an action it was handed still refuses
+              // at run time, through the trait defaults, which is a different
+              // fact and keeps its own reason code.
         }
     }
 
@@ -1384,7 +1403,11 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
     /// deliberate direction to fail: the whole point of the ledger is that
     /// nothing runs on hardware nobody has measured, and "we could not work
     /// out what this is" is the strongest possible case of that.
-    fn refuse_unsupported(&mut self, imei: Option<&str>, operation: Operation) -> Option<SendError> {
+    fn refuse_unsupported(
+        &mut self,
+        imei: Option<&str>,
+        operation: Operation,
+    ) -> Option<SendError> {
         let context = match self.port.operating_context(imei) {
             Ok(context) => context,
             Err(error) => {
@@ -1515,8 +1538,7 @@ fn install_matrix(
     matrix_sha256: &str,
     matrix: &ContextValue,
 ) -> Result<CapabilityMatrix, (&'static str, String)> {
-    let bytes = serde_json::to_vec(matrix)
-        .map_err(|err| ("matrix_invalid", err.to_string()))?;
+    let bytes = serde_json::to_vec(matrix).map_err(|err| ("matrix_invalid", err.to_string()))?;
     let digest = hex_sha256(&bytes);
     if !digest.eq_ignore_ascii_case(matrix_sha256.trim()) {
         return Err((
@@ -1524,8 +1546,7 @@ fn install_matrix(
             "capability matrix sha256 does not match".to_string(),
         ));
     }
-    let value = serde_json::to_value(matrix)
-        .map_err(|err| ("matrix_invalid", err.to_string()))?;
+    let value = serde_json::to_value(matrix).map_err(|err| ("matrix_invalid", err.to_string()))?;
     let parsed = CapabilityMatrix::from_json_value(&value)
         .map_err(|err| ("matrix_invalid", err.to_string()))?;
     if parsed.version() != matrix_version {

@@ -126,6 +126,7 @@ mod request_bodies_are_typed {
     const SOURCES: &[(&str, &str)] = &[
         ("candidates.rs", include_str!("candidates.rs")),
         ("console.rs", include_str!("console.rs")),
+        ("copy.rs", include_str!("copy.rs")),
         ("danger.rs", include_str!("danger.rs")),
         ("esim.rs", include_str!("esim.rs")),
         ("health.rs", include_str!("health.rs")),

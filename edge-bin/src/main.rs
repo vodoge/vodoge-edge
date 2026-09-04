@@ -1947,6 +1947,16 @@ mod linux {
         }
 
         fn set_data_network(&mut self, imei: &str, enabled: bool) -> Result<JsonValue, SendError> {
+            // 🔴 拉数据面之前问一次能力矩阵。以前这条路直奔
+            //    `apn_for_data` → `start_data`，中间**一次都不问**：云端把某个
+            //    (模组, 运营商) 组合的 data 标成 unsupported，边缘侧照样去拉，
+            //    改矩阵没有任何效果、也没有报错。整个 SupportLedger
+            //    「未测即不支持」的约束当时只在发短信那一条路上生效。
+            //
+            // ⚠️ 只在**开**的时候问，理由见 `data_capability_gate`。
+            if let Some(operation) = data_capability_gate(enabled) {
+                self.refuse_unsupported(Some(imei), operation)?;
+            }
             // The QMI path first, because it is the one that produces a usable
             // interface. `AT+CGACT` attaches the bearer and stops there: it
             // leaves the `wwan` device down with no address, which is how this
@@ -2671,6 +2681,19 @@ mod linux {
             (Err(error), Ok(())) => Err(SendError::new("rotate_failed", error.to_string())),
             (Ok(()), Ok(())) => Ok(()),
         }
+    }
+
+    /// 数据面这一次请求，动手之前要不要先问能力矩阵，问哪一条。
+    ///
+    /// 🔴 **只在「开」的时候问。** 矩阵说「这个组合不支持数据」是**别去拉起来**
+    /// 的理由，不是**拒绝把它关掉**的理由 —— 关不掉比开不起来严重得多，而且
+    /// 关数据面本身就是一条恢复路径。这批模组经 USB/IP 接入，没人能物理接触，
+    /// 一个「因为不支持所以不给你关」的判决会把人堵在没有出路的地方。
+    ///
+    /// ⚠️ 接线只有一行（`set_data_network` 里那个 `if let`），宿主机上测不了
+    /// ——它要一个真的 `Radio`。这里能钉住的是**策略**：开才问、关不问。
+    fn data_capability_gate(enabled: bool) -> Option<edge_core::Operation> {
+        enabled.then_some(edge_core::Operation::Data)
     }
 
     fn json_details<T: serde::Serialize>(value: &T) -> Result<JsonValue, SendError> {
@@ -4053,12 +4076,32 @@ mod linux {
             }
         };
         let live_matrix = Arc::new(Mutex::new(startup_matrix.clone()));
-        let executor = Arc::new(Mutex::new(CommandExecutor::new(RadioPort {
-            radio: radio.clone(),
-            proxies: proxies.clone(),
-            store: shared.clone(),
-            matrix: live_matrix.clone(),
-        })));
+        // 🔴 版本号要用**这个二进制真实的**版本，不是 `CommandExecutor::new`
+        //    里那个占位值。更新守卫拿 `running_version()` 判「刷进去的是不是
+        //    新的」，而上行的 hello 另走一路报 `env!("CARGO_PKG_VERSION")`
+        //    ——两边不同源的话，云端看到的版本和守卫用来判回滚的版本对不上。
+        //
+        // ⚠️ **自更新（OTA）在这台机器上是不存在的**，这里给的是
+        //    `RejectUpdate`：它对任何 `SelfUpdate` 命令一律回
+        //    `update_not_configured`。整条链路（下载、校验 sha256、验签、落盘、
+        //    握手确认、失败回滚）只有契约层和分发层，没有实现。
+        //
+        //    因此 `confirm_handshake()` / `rollback_if_handshake_failed()`
+        //    现在**故意没有接线**：没有任何东西会被 stage，接上去是一段永远
+        //    不执行的代码，比缺口更难发现。要补 OTA 的人从这里开始：先实现一个
+        //    真的 `UpdatePort`，用 `with_updater` 换掉下面这个 `RejectUpdate`，
+        //    **然后**才把 `confirm_handshake` 接到 Resume 之后。
+        //    🔴 在那之前不要接 —— 这批硬件不能拔插，一个刷进去起不来又没有
+        //    回滚的版本就是永久变砖。
+        let executor = Arc::new(Mutex::new(CommandExecutor::with_updater(
+            RadioPort {
+                radio: radio.clone(),
+                proxies: proxies.clone(),
+                store: shared.clone(),
+                matrix: live_matrix.clone(),
+            },
+            edge_agent::RejectUpdate::new(env!("CARGO_PKG_VERSION")),
+        )));
         // The executor keeps the authoritative copy, so it has to start from
         // the same place `live_matrix` does -- otherwise a restart would route
         // by the built-in rules while reporting the stored version upstream.
@@ -7488,6 +7531,31 @@ mod linux {
 
     fn env(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
+    }
+
+    #[cfg(test)]
+    mod capability_gate_tests {
+        use super::data_capability_gate;
+
+        /// 🔴 开数据面要过矩阵；以前这条路一次都不问。
+        #[test]
+        fn bringing_data_up_has_to_clear_the_matrix_first() {
+            assert_eq!(
+                data_capability_gate(true),
+                Some(edge_core::Operation::Data),
+                "开数据面必须先问矩阵——否则云端改矩阵去关某批模组的数据面，改完没有任何效果"
+            );
+        }
+
+        /// 🔴 关数据面**不问**。「不支持」是别拉起来的理由，不是不许关的理由。
+        #[test]
+        fn taking_data_down_is_never_refused_for_being_unsupported() {
+            assert_eq!(
+                data_capability_gate(false),
+                None,
+                "关数据面是恢复路径 —— 拿「不支持」拦住它，会把人堵在没有出路的地方"
+            );
+        }
     }
 
     #[cfg(test)]

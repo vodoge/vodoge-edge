@@ -424,6 +424,19 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                                 }}
                                             </span>
                                         </span>
+                                        // agent 一直在送这三个字段，而卡片一个
+                                        // 都没画——以前想看只能跑一次「体检」，
+                                        // 那要真的去摸一次模组。它们是偶尔查的
+                                        // 参考信息，放在这里而不是左栏：左栏要
+                                        // 保持能一眼扫完。
+                                        <span class="vd-fleetrow-ref vd-faint">
+                                            {format!(
+                                                "固件 {} · IMSI {} · 本机号 {}",
+                                                m.firmware.clone().unwrap_or_else(|| "—".into()),
+                                                m.imsi.clone().unwrap_or_else(|| "—".into()),
+                                                m.msisdn.clone().unwrap_or_else(|| "—".into()),
+                                            )}
+                                        </span>
                                         <TraceStripWide state=st imei=imei />
                                     </div>
                                 }

@@ -306,6 +306,9 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
         rows[from..].to_vec()
     });
 
+    // 复制回馈。⚠️ 只在**真的复制成功**时说「已复制」——见 `copy.rs`。
+    let copy_note = RwSignal::new(String::new());
+
     // 有哪些模组在已收到的行里出现过——下拉框只列真出现过的，不列一堆空选项。
     let imeis = Memo::new(move |_| {
         let mut seen: Vec<String> = state
@@ -381,6 +384,29 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
 
                     // 「包含文本」而不是「正则」：见模块开头。写着什么就做什么。
                     <Input value=state.query placeholder="包含文本" />
+
+                    // 🔴 复制**筛选后**的全部行，不是画出来的那些。
+                    //    `drawn` 只有最新 RENDER 行，而人筛完之后想要的是筛出来
+                    //    的整段证据。这块面板存在的理由就是「操作员没有 SSH 和
+                    //    journalctl」——证据拿不走的话，这个理由只兑现了一半。
+                    <Button on_click=move |_| {
+                        let lines = shown
+                            .get_untracked()
+                            .iter()
+                            .map(|row| {
+                                format!("{}  {}", hhmmss(row.line.at as f64), row.line.text)
+                            })
+                            .collect::<Vec<_>>();
+                        let count = lines.len();
+                        let text = lines.join("\n");
+                        leptos::task::spawn_local(async move {
+                            let ok = crate::copy::copy_text(&text).await;
+                            copy_note.set(crate::copy::copy_note(ok, &format!(" {count} 行")));
+                        });
+                    }>
+                        {move || format!("复制 {} 行", shown.get().len())}
+                    </Button>
+                    <span class="vd-faint">{move || copy_note.get()}</span>
 
                     {move || {
                         if state.paused.get() {
