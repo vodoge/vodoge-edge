@@ -227,6 +227,99 @@ queued — real messages the modems collected — as delivered, and drop it.
 > under `VODOGE_EDGE_DATA`. Carry the whole directory if you can; if you cannot,
 > the two steps above are the minimum.
 
+## Upgrading a running agent
+
+The section above installs onto a fresh box. This one replaces the binary under
+a fleet that is already being managed — a different job, because the modems are
+on USB/IP and **nobody can reach them physically**. Rolling back has to be a
+thing you can do in one command at 3am, not something you reconstruct.
+
+### 1. Build and check before touching anything
+
+```sh
+cd edge-ui && trunk build --release && cd ..   # panel bundle first: edge-panel embeds it
+cargo test --workspace
+cargo build --release -p edge-bin
+```
+
+⚠️ The `trunk build` has to come first. `edge-panel` pulls `edge-ui/dist/` in
+with `include_bytes!`, so building in the other order silently ships whatever
+bundle was lying around — or fails with a missing-file error that says nothing
+about trunk.
+
+Confirm the binary really contains the panel you just built, rather than a
+stale one:
+
+```sh
+strings target/release/vodoge-edge | grep -c edge-ui_bg.wasm   # expect > 0
+```
+
+### 2. Keep the way back
+
+```sh
+cp -a /usr/local/bin/vodoge-edge /usr/local/bin/vodoge-edge.prev
+sha256sum /usr/local/bin/vodoge-edge.prev target/release/vodoge-edge
+```
+
+Keep that output. `.prev` is the rollback, and the two hashes are how you tell
+afterwards which one is actually running — size alone is not enough, and on
+2026-08-29 a deploy on the cloud half went out with a matching size and corrupt
+content.
+
+### 3. Swap and restart
+
+```sh
+install -m 0755 target/release/vodoge-edge /usr/local/bin/vodoge-edge
+systemctl restart vodoge-edge
+```
+
+The service is `Restart=always` with `RestartSec=5`, so a binary that crashes on
+start will loop rather than stop — which looks like "running" in
+`systemctl is-active`. Check the log, not the unit state.
+
+### 4. Prove it came back
+
+```sh
+systemctl status vodoge-edge --no-pager
+journalctl -u vodoge-edge -n 30 --no-pager
+curl -s localhost:8743/api/status | head -c 200      # modems still enumerated?
+```
+
+Give it a poll cycle (about ten seconds) and look for `poll /dev/... ok` lines
+naming the IMEIs you expect. **The panel loading is not the test** — the panel
+is a browser artefact, and the agent managing modems is the thing that matters.
+`/api/status` answers even when the browser half is broken, which is exactly why
+it stays a plain JSON endpoint.
+
+### Rolling back
+
+```sh
+install -m 0755 /usr/local/bin/vodoge-edge.prev /usr/local/bin/vodoge-edge
+systemctl restart vodoge-edge
+```
+
+**Downgrading does not corrupt the store, and cannot be made to.** `migrate()`
+is forward-only: it walks `MIGRATIONS[user_version..]` upward and stops. Put an
+older binary on a newer database and its loop simply does not run, because
+`user_version` is already past the end of the migrations it knows about. The
+one destructive path, `Store::rollback_to`, drops eleven tables — and it is
+reachable from tests only. `main()` takes no arguments, there are no
+subcommands, and `Store::open` calls `migrate()` and nothing else, so no
+startup can reach it.
+
+What downgrading *can* do is leave an old binary reading a schema built by a
+newer one. That is fine for additive changes and is not something this
+mechanism checks for you, so the honest rule is: **check whether the release
+you are leaving touched `edge-store/` or `contract/`.**
+
+```sh
+git diff <old-tag>..<new-tag> --stat -- edge-store/ contract/   # empty = free rollback
+```
+
+For the panel rewrite specifically (`e22380d..763d3a3`, the Leptos migration),
+that command is empty — those two crates were not touched at all, so rolling
+back across it is unconditionally safe.
+
 ## Development
 
 ```sh
