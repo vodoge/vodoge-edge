@@ -262,6 +262,7 @@ fn TraceStrip(state: StatusState, #[prop(into)] imei: String) -> impl IntoView {
                             crate::trace::Cell::Silent => "vd-tick vd-tick--down",
                             crate::trace::Cell::Absent => "vd-tick vd-tick--gone",
                             crate::trace::Cell::Unread => "vd-tick vd-tick--unread",
+                            crate::trace::Cell::Unobserved => "vd-tick vd-tick--none",
                         };
                         view! { <i class=cls></i> }
                     })
@@ -328,6 +329,117 @@ fn FleetLine(state: StatusState) -> impl IntoView {
                 </span>
             }.into_any()
         }}
+    }
+}
+
+/// 舰队总览里画多少格：整条轨迹（1 小时）。中栏够宽，不必截。
+const TRACE_COLS_WIDE: usize = crate::trace::TRACE_KEEP;
+
+/// 中栏在**没选模组**时画什么。
+///
+/// 🔴 以前这里是一句「先在左边选一根模组。」，占着半个屏幕什么都不说——而这
+/// 正是每次打开面板落地的第一眼。五个标签里有三个在没选模组时毫无意义。
+///
+/// 现在放舰队总览：三根模组的轨迹**对齐**铺开一小时。轮换是三根之间的相位
+/// 关系，单看一根看不出来；这块地方够宽，正好画得下。
+#[component]
+pub fn FleetOverview(state: StatusState) -> impl IntoView {
+    view! {
+        <div class="vd-fleetview">
+            <FleetLine state=state />
+
+            // 颜色是承重的，所以图例不能省——尤其「读不到 agent」那一格，
+            // 它长得不像故障，因为它**不是**故障。
+            <div class="vd-legend">
+                <span><i class="vd-tick vd-tick--up"></i>"答了"</span>
+                <span><i class="vd-tick vd-tick--down"></i>"没答"</span>
+                <span><i class="vd-tick vd-tick--gone"></i>"不在列表里"</span>
+                <span><i class="vd-tick vd-tick--unread"></i>"没问到 agent（不是模组的事）"</span>
+            </div>
+
+            {move || {
+                let t = state.trace.get();
+                if t.is_empty() {
+                    return view! {
+                        <Caption1>"还没有观测。状态每 10 秒读一次，轨迹从第一次读到时开始攒。"</Caption1>
+                    }.into_any();
+                }
+                let body = match state.load.get() {
+                    Load::Ready(b) => Some(b),
+                    _ => state.stale.get().map(|(b, _)| b),
+                };
+                let Some(body) = body else {
+                    return view! { <Caption1>"还没读到模组列表。"</Caption1> }.into_any();
+                };
+                let window = crate::trace::window_ms(&t);
+                let mins = (window / 60_000.0).round() as i64;
+                let st = state;
+                view! {
+                    <div class="vd-fleetrows">
+                        {body
+                            .modems
+                            .into_iter()
+                            .map(|m| {
+                                let imei = m.imei.clone();
+                                let flip = crate::trace::flips(&t, &imei);
+                                view! {
+                                    <div class="vd-fleetrow">
+                                        <span class="vd-fleetrow-head">
+                                            <b>{m.imei.clone()}</b>
+                                            <Badge
+                                                color=state_tone(&m.state)
+                                                size=BadgeSize::Small
+                                            >
+                                                {state_label(&m.state)}
+                                            </Badge>
+                                            <span class="vd-faint">
+                                                {m.home.clone().unwrap_or_else(|| "卡归属未知".into())}
+                                            </span>
+                                            <span class="vd-log-port">
+                                                {m.control_port.clone().unwrap_or_else(|| "—".into())}
+                                            </span>
+                                            <span class="vd-faint vd-fleetrow-flip">
+                                                {if window < 60_000.0 {
+                                                    String::new()
+                                                } else {
+                                                    format!("近 {mins} 分钟翻转 {flip} 次")
+                                                }}
+                                            </span>
+                                        </span>
+                                        <TraceStripWide state=st imei=imei />
+                                    </div>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                }.into_any()
+            }}
+        </div>
+    }
+}
+
+/// 总览里那条更宽的轨迹。和左栏那条同源，只是格数不同。
+#[component]
+fn TraceStripWide(state: StatusState, #[prop(into)] imei: String) -> impl IntoView {
+    view! {
+        <span class="vd-trace vd-trace--wide" aria-hidden="true">
+            {move || {
+                let t = state.trace.get();
+                crate::trace::strip(&t, &imei, TRACE_COLS_WIDE)
+                    .into_iter()
+                    .map(|c| {
+                        let cls = match c {
+                            crate::trace::Cell::Answering => "vd-tick vd-tick--up",
+                            crate::trace::Cell::Silent => "vd-tick vd-tick--down",
+                            crate::trace::Cell::Absent => "vd-tick vd-tick--gone",
+                            crate::trace::Cell::Unread => "vd-tick vd-tick--unread",
+                            crate::trace::Cell::Unobserved => "vd-tick vd-tick--none",
+                        };
+                        view! { <i class=cls></i> }
+                    })
+                    .collect_view()
+            }}
+        </span>
     }
 }
 

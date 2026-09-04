@@ -52,7 +52,7 @@ use logs::{LogState, LogsPage, LOGS_EVERY_MS};
 use scan::{ScanPage, ScanState};
 use shell::{Pane, Panel};
 use sms::{SmsPage, SmsState, INBOX_EVERY_MS};
-use status::{Freshness, ModeLabel, ModemRail, StatusState, STATUS_EVERY_MS};
+use status::{FleetOverview, Freshness, ModeLabel, ModemRail, StatusState, STATUS_EVERY_MS};
 
 #[component]
 pub fn Panel() -> impl IntoView {
@@ -229,8 +229,32 @@ pub fn Panel() -> impl IntoView {
                         </div>
                     </div>
 
-                    // ── 中栏：对选中这一根做什么 ───────────────────────────
+                    // ── 中栏：没选模组时是舰队总览，选了才是对这一根的操作 ──
+                    //
+                    // 🔴 以前没选模组时这里是一句「先在左边选一根模组。」，占着
+                    // 半个屏幕什么都不说——而这正是每次打开面板落地的第一眼，
+                    // 五个标签里有三个在那个状态下毫无意义。
+                    //
+                    // 换成舰队总览：轮换是三根之间的**相位关系**，单看一根看不
+                    // 出来，而这块地方够宽，正好把对齐的轨迹铺开一小时。
                     <div class="vd-main">
+                        {move || {
+                            if state.active.get().is_none() {
+                                return view! {
+                                    <div class="vd-pane">
+                                        <div class="vd-pane-head">
+                                            <span>"舰队"</span>
+                                            <span class="vd-pane-head-end vd-faint">
+                                                "选左边一根模组，这里换成对它的操作"
+                                            </span>
+                                        </div>
+                                        <div class="vd-pane-body">
+                                            <FleetOverview state=state />
+                                        </div>
+                                    </div>
+                                }.into_any();
+                            }
+                            view! {
                         <div class="vd-pane">
                             <div class="vd-pane-head vd-tabs">
                                 <TabList selected_value=tab>
@@ -274,6 +298,8 @@ pub fn Panel() -> impl IntoView {
                                 }}
                             </div>
                         </div>
+                            }.into_any()
+                        }}
                     </div>
 
                     // ── 右栏：daemon 此刻在说什么 ──────────────────────────

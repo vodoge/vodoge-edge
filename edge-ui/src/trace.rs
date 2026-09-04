@@ -55,19 +55,29 @@ pub enum Cell {
     Absent,
     /// 🔴 这一帧我们没问到 agent。**不是**模组的状态。
     Unread,
+    /// 🔴 这一格在**我们开始看之前**。不是任何人的状态，只是还没观察到。
+    ///
+    /// 没有它的话，短轨迹会被拉伸铺满整条带子——8 帧看起来和观察了一小时
+    /// 一模一样。这块面板通篇在防的就是这种「看着像结论、其实没有尺度」。
+    Unobserved,
 }
 
-/// 把最近 `cols` 帧摊成一根模组的条带，最老的在前。
+/// 把最近 `cols` 帧摊成一根模组的条带，最老的在前，**长度恒为 `cols`**。
 ///
 /// 🔴 **所有模组必须用同一段帧。** 轮换是三根之间的**相位关系**——第 0 格
 /// 不对齐，红段就错开了，互补看起来会像巧合。所以这里切的是「轨迹的最后
 /// `cols` 帧」，而不是「这一根有数据的最后 `cols` 帧」。
+///
+/// 🔴 **不足 `cols` 帧时左侧补 `Unobserved`，而不是返回一条短带子。**
+/// 返回短带子的话，渲染时会被拉伸铺满宽度——8 帧看起来和观察满一小时
+/// 一模一样。补齐之后「最新」永远在最右边，攒够之前左边是空的，一眼看得出
+/// 观察了多久。
 pub fn strip(frames: &VecDeque<Frame>, imei: &str, cols: usize) -> Vec<Cell> {
     let start = frames.len().saturating_sub(cols);
-    frames
-        .iter()
-        .skip(start)
-        .map(|f| {
+    let pad = cols.saturating_sub(frames.len());
+    std::iter::repeat(Cell::Unobserved)
+        .take(pad)
+        .chain(frames.iter().skip(start).map(|f| {
             if !f.ok {
                 return Cell::Unread;
             }
@@ -76,7 +86,7 @@ pub fn strip(frames: &VecDeque<Frame>, imei: &str, cols: usize) -> Vec<Cell> {
                 Some((_, false)) => Cell::Silent,
                 None => Cell::Absent,
             }
-        })
+        }))
         .collect()
 }
 
@@ -93,7 +103,7 @@ pub fn flips(frames: &VecDeque<Frame>, imei: &str) -> usize {
     let mut n = 0;
     for cell in strip(frames, imei, frames.len()) {
         let up = match cell {
-            Cell::Unread => continue,
+            Cell::Unread | Cell::Unobserved => continue,
             Cell::Answering => true,
             Cell::Silent | Cell::Absent => false,
         };
@@ -193,6 +203,57 @@ mod tests {
             strip(&t, "B", 3),
             vec![Cell::Absent, Cell::Silent, Cell::Answering],
             "B 的第 0 格必须是 Absent 占位，不能把后面的往前挤"
+        );
+    }
+
+    /// 🔴 帧数不够时左侧补空，长度恒等于要的格数。
+    ///
+    /// 否则渲染会把短带子拉伸铺满宽度——8 帧和观察满一小时长得一模一样。
+    #[test]
+    fn a_short_trace_is_padded_on_the_left_not_stretched() {
+        let t = ring(vec![
+            f(0.0, true, &[("A", true)]),
+            f(10.0, true, &[("A", false)]),
+        ]);
+        assert_eq!(
+            strip(&t, "A", 5),
+            vec![
+                Cell::Unobserved,
+                Cell::Unobserved,
+                Cell::Unobserved,
+                Cell::Answering,
+                Cell::Silent,
+            ],
+            "最新的一格永远在最右边，左边空着的是还没观察到的时间"
+        );
+        assert_eq!(strip(&t, "A", 5).len(), 5, "长度恒为要的格数");
+        assert_eq!(
+            strip(&ring(vec![]), "A", 4).len(),
+            4,
+            "一帧都没有也是满长度"
+        );
+    }
+
+    /// 🔴 翻转按**整条轨迹**算，不是按条带上画了几格。
+    ///
+    /// 左栏画 60 格、总览画 360 格。翻转次数要是跟着「画了几格」走，同一根
+    /// 模组在两个地方会给出**不同的数字**——而这个数字是会被拿去决定跑不跑
+    /// 一趟机房的。
+    ///
+    /// ⚠️ 这条同时也解释了 `flips` 里那个 `Cell::Unobserved` 分支为什么是
+    /// 防御性的：`cols == frames.len()` 时补位量恒为 0，补位进不到这里。
+    /// 我原先写过一条「补位不算翻转」的测试，它**永远不可能失败**——变异
+    /// 测试当场把它戳穿了。
+    #[test]
+    fn the_flip_count_uses_the_whole_trace_not_what_is_drawn() {
+        let mut t = VecDeque::new();
+        for i in 0..100 {
+            push(&mut t, f(i as f64 * 10.0, true, &[("A", i % 2 == 0)]));
+        }
+        assert_eq!(
+            flips(&t, "A"),
+            99,
+            "100 帧一答一不答 = 99 次翻转，和画多少格无关"
         );
     }
 

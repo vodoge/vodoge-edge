@@ -176,6 +176,34 @@
         color: var(--colorNeutralForeground3);
       }
 
+      /* 舰队总览（中栏未选模组时）。轮换是三根之间的相位关系，
+         单看一根看不出来——这里够宽，把对齐的轨迹铺开一小时。 */
+      .vd-fleetview { display: flex; flex-direction: column; gap: 10px; }
+      .vd-fleetview .vd-fleet { border-bottom: none; padding: 0; }
+
+      .vd-legend {
+        display: flex; flex-wrap: wrap; gap: 12px;
+        font-size: 11px; color: var(--colorNeutralForeground3);
+      }
+      .vd-legend span { display: flex; align-items: center; gap: 4px; }
+      .vd-legend .vd-tick { width: 10px; height: 10px; flex: 0 0 auto; }
+
+      .vd-fleetrows { display: flex; flex-direction: column; gap: 10px; }
+      .vd-fleetrow { display: flex; flex-direction: column; gap: 3px; }
+      .vd-fleetrow-head {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        font-size: 12px;
+      }
+      .vd-fleetrow-flip { margin-left: auto; }
+      /* 一小时 360 格。格子小到 1px 也无所谓——要看的是**段**，不是格。 */
+      .vd-trace--wide { height: 14px; gap: 0; }
+      .vd-trace--wide .vd-tick { border-radius: 0; }
+
+      /* 🔴 还没观察到的时间。**不是任何人的状态**，所以什么都不画——留白本身
+         就是「这段时间我们还没在看」。没有它的话，短轨迹会被拉伸铺满整条
+         带子，8 帧看起来和观察满一小时一模一样。 */
+      .vd-tick--none { background: transparent; }
+
       /* 翻转次数。没到一分钟观察量时组件返回空串，这一行自然不占位。 */
       .vd-modem-flip:empty { display: none; }
 
@@ -185,6 +213,11 @@
       /* 左栏里有两个 pane 加一个钉底的危险区，整栏一起滚才对（它们是同一个
          上下文）。所以左栏是例外：它自己滚，而不是各 pane 分别滚。 */
       .vd-deck > .vd-rail { overflow-y: auto; display: flex; flex-direction: column; }
+      /* 🔴 `flex: 0 0 auto` 里的 `0`（不收缩）是承重的。默认 `flex-shrink: 1`
+         会把两个 pane 压到装得下为止（867px 的栏子装 1511px 的内容），而
+         `overflow: visible` 让内容照样溢出被压扁的框——屏幕上就是模组卡和
+         USB 候选**叠在一起**。不收缩，让栏子自己滚。 */
+      .vd-rail > .vd-pane, .vd-rail > .vd-rail-foot { flex: 0 0 auto; }
       .vd-rail .vd-pane { height: auto; }
       .vd-rail .vd-pane-body { overflow: visible; }
 
