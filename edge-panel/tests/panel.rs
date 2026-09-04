@@ -879,6 +879,45 @@ async fn panel_requests_an_immediate_modem_rescan() {
 }
 
 /// 发一条短信，返回 (状态码, 响应体)。
+/// 用一份**注入的**封禁表发一次。
+///
+/// 🔴 生产表在 2026-09-04 之后是空的（见 `edge_core::sms_block` 的模块开头）。
+/// 而这道门是真正拦 `curl` 的地方 —— 表一空，它的接线在 HTTP 层面就一条测试
+/// 都覆盖不到了。所以这几条用 `SAMPLE_BLOCKS` 跑：测的是**门还在不在**，
+/// 不是「表里恰好有谁」。
+async fn post_send_blocked(payload: &str) -> (u16, serde_json::Value) {
+    post_send_in(payload, edge_core::SAMPLE_BLOCKS).await
+}
+
+async fn post_send_in(
+    payload: &str,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+) -> (u16, serde_json::Value) {
+    let actions = Arc::new(RecordingActions::new());
+    let app = edge_panel::router_with_blocks(
+        Arc::new(MemoryInbox::default()),
+        Some(actions.clone()),
+        blocks,
+    );
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/send")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
 async fn post_send(payload: &str) -> (u16, serde_json::Value) {
     let actions = Arc::new(RecordingActions::new());
     let app = router_with_actions(Arc::new(MemoryInbox::default()), Some(actions.clone()));
@@ -905,15 +944,32 @@ async fn post_send(payload: &str) -> (u16, serde_json::Value) {
 /// 几十秒。一个只活在 JS/wasm 里的拦截，对一个 `curl` 毫无作用。
 #[tokio::test]
 async fn a_blocked_modem_cannot_be_made_to_send_by_curl() {
-    let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
+    let imei = edge_core::SAMPLE_BLOCKS[0].0;
     let (status, body) =
-        post_send(&format!(r#"{{"to":"12345","body":"hi","imei":"{imei}"}}"#)).await;
+        post_send_blocked(&format!(r#"{{"to":"12345","body":"hi","imei":"{imei}"}}"#)).await;
     assert_eq!(status, 403, "被封禁的模组必须被拒");
     let error = body["error"].as_str().unwrap_or_default();
     assert!(error.contains(imei), "要指名是哪一根：{error}");
     assert!(
-        error.contains("bus") || error.contains("QMI"),
+        error.contains("总线") || error.contains("bus") || error.contains("QMI"),
         "要说清为什么，而不是只说不许：{error}"
+    );
+}
+
+/// 🔴 生产表现在是空的 —— 那道门不该再拦任何人。
+///
+/// 上面那条测的是「门还在」，这条测的是「门现在是开的」。两件事要分开，
+/// 否则谁往表里悄悄加一条，屏幕上没有任何地方会说。
+#[tokio::test]
+async fn with_the_production_table_empty_nobody_is_refused() {
+    let (status, _) = post_send_in(
+        r#"{"to":"12345","body":"hi","imei":"867018069509705"}"#,
+        edge_core::sms_blocks(),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "867018069509705 在 2026-09-04 解除了 —— 见 edge_core::sms_block 模块开头"
     );
 }
 
@@ -923,7 +979,7 @@ async fn a_blocked_modem_cannot_be_made_to_send_by_curl() {
 /// `curl -d '{"to":"x","body":"y"}'` 就可能打中它。
 #[tokio::test]
 async fn an_unnamed_send_cannot_be_used_to_reach_a_blocked_modem() {
-    let (status, body) = post_send(r#"{"to":"12345","body":"hi"}"#).await;
+    let (status, body) = post_send_blocked(r#"{"to":"12345","body":"hi"}"#).await;
     assert_eq!(status, 403);
     let error = body["error"].as_str().unwrap_or_default();
     assert!(
@@ -936,14 +992,14 @@ async fn an_unnamed_send_cannot_be_used_to_reach_a_blocked_modem() {
 /// 量出来的，复测做不到的话这张表就再也无法被修正。
 #[tokio::test]
 async fn commissioning_is_the_one_way_past_the_block() {
-    let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
-    let (status, _) = post_send(&format!(
+    let imei = edge_core::SAMPLE_BLOCKS[0].0;
+    let (status, _) = post_send_blocked(&format!(
         r#"{{"to":"12345","body":"hi","imei":"{imei}","commission":true}}"#
     ))
     .await;
     assert_eq!(status, 200, "明确写了 commission 就该放行");
 
-    let (status, _) = post_send(r#"{"to":"12345","body":"hi","commission":true}"#).await;
+    let (status, _) = post_send_blocked(r#"{"to":"12345","body":"hi","commission":true}"#).await;
     assert_eq!(status, 200, "commission 也越过「必须指名」这一条");
 }
 
@@ -1578,7 +1634,10 @@ async fn a_switch_receipt_says_where_and_when_to_read_the_card_back() {
     .await;
     assert_eq!(code, 200);
     assert_eq!(body["readback_after_ms"], edge_panel_api::ESIM_SETTLE_MS);
-    assert_ne!(body["readback_with"], "/api/esim/switch", "指回切换端点就是让人再切一次");
+    assert_ne!(
+        body["readback_with"], "/api/esim/switch",
+        "指回切换端点就是让人再切一次"
+    );
 
     // 🔴 **照着回执说的那条路真打一次。** 原来这里只 `assert_ne!` 了一下，
     //    于是「回读目标必须是路由表上真有的那条读端点」这句话是空的：路径写错

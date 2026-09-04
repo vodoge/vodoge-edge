@@ -272,6 +272,13 @@ struct PanelState {
     /// force, and a copy written into the row at probe time would go on
     /// claiming a rule that a later push removed.
     matrix: Arc<Mutex<CapabilityMatrix>>,
+    /// 不许从这几根发短信的表。
+    ///
+    /// 🔴 **可注入，是为了让那道门保持可测。** 生产表在 2026-09-04 之后是空的
+    /// （见 `edge_core::sms_block` 的模块开头），而这道门是真正拦 `curl` 的
+    /// 地方 —— 表一空，它的接线在 HTTP 层面就一条测试都覆盖不到了。测试用
+    /// `router_with_blocks` 装一份夹具进来。
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
 }
 
 /// HTTP router for the offline panel. Bind it on the LAN; it does not call the cloud.
@@ -314,11 +321,44 @@ pub fn router_with_uplink(
     build_router(inbox, actions, uplink_online, matrix)
 }
 
+/// 装一份自定的短信封禁表 —— **只给测试用**，理由见 `PanelState::blocks`。
+pub fn router_with_blocks(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+) -> Router {
+    build_router_with_blocks(
+        inbox,
+        actions,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(
+            CapabilityMatrix::builtin().expect("built-in capability matrix"),
+        )),
+        blocks,
+    )
+}
+
 fn build_router(
     inbox: Arc<dyn Inbox>,
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
+) -> Router {
+    build_router_with_blocks(
+        inbox,
+        actions,
+        uplink_online,
+        matrix,
+        edge_core::sms_blocks(),
+    )
+}
+
+fn build_router_with_blocks(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
+    matrix: Arc<Mutex<CapabilityMatrix>>,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
 ) -> Router {
     Router::new()
         .route("/", get(index))
@@ -351,6 +391,7 @@ fn build_router(
             actions,
             uplink_online,
             matrix,
+            blocks,
         }))
 }
 
@@ -563,19 +604,23 @@ async fn messages(State(state): State<Arc<PanelState>>) -> Response {
 /// 语义是现成的:「在账本没量过的组合上发一次,为了知道会怎样」。封禁表本身
 /// 就是这样量出来的,所以复测这件事必须做得到 —— 只是要明确说出口,而不是
 /// 默认发生。
-fn blocked_send(imei: Option<&str>, commission: bool) -> Option<String> {
+fn blocked_send(
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+    imei: Option<&str>,
+    commission: bool,
+) -> Option<String> {
     if commission {
         return None;
     }
     match imei {
-        Some(imei) => edge_core::sms_block(imei).map(|block| {
+        Some(imei) => edge_core::sms_block_in(blocks, imei).map(|block| {
             format!(
                 "{imei} is blocked from sending SMS by the panel: {}",
                 block.why
             )
         }),
         None => {
-            let mut blocked = edge_core::blocked_imeis().peekable();
+            let mut blocked = blocks.iter().map(|(imei, _)| *imei).peekable();
             blocked.peek()?;
             let list: Vec<&str> = blocked.collect();
             Some(format!(
@@ -595,7 +640,7 @@ async fn send_sms(State(state): State<Arc<PanelState>>, Json(body): Json<SendBod
     if body.to.trim().is_empty() || body.body.trim().is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "to and body are required");
     }
-    if let Some(refusal) = blocked_send(body.imei.as_deref(), body.commission) {
+    if let Some(refusal) = blocked_send(state.blocks, body.imei.as_deref(), body.commission) {
         return json_error(StatusCode::FORBIDDEN, refusal);
     }
     match actions.send_sms(body.to, body.body, body.imei, body.commission) {

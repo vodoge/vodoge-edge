@@ -1,27 +1,39 @@
 //! Sticks this fleet will not send a message from.
 //!
-//! 🔴 **Not a policy invented here, and not "SMS is broken on this stick".**
+//! 🔴 **这张表现在是空的，而且那不是「还没人填」。**
 //!
-//! `867018069509705` stalls its own QMI interrupt endpoint on every MO submit:
-//! the USB/IP session is torn down and the module leaves the bus for tens of
-//! seconds. Measured 2026-08-25 by replaying one WMS RAW_SEND frame with the
-//! agent stopped — the same frame succeeded on `cdc-wdm0`, was cleanly refused
-//! by `cdc-wdm1`, and only this stick disconnected. Both transports trigger it
-//! (QMI RAW_SEND and `AT+CMGS`), and a full `AT+CFUN=1,1` does not clear it.
+//! ## 曾经在表里的那一根，和它为什么出去了
 //!
-//! Two details decide the wording, and both cut against the obvious one:
+//! `867018069509705` 曾经在这里。**2026-08-25 实测**：停掉 agent 后重放同一个
+//! WMS RAW_SEND 帧，在 `867018069514820` 上成功、被 `862547055142811` 干净
+//! 拒绝，**只有这一根 disconnect** —— 它每次 MO 提交都挂掉自己的 QMI 中断端点，
+//! 离开总线几十秒；QMI 与 AT 两条路都触发，`AT+CFUN=1,1` 也清不掉。当时每小时
+//! 的保号短信任务因此被停掉。那次测量是受控的，结论在当时是对的。
 //!
-//! - **The message usually goes out.** The SIM's own MO reference counter in
-//!   `EF_SMSS` advanced by 34 over a day of sends the console recorded as
-//!   failures, and 10086 kept replying to them. Told "failed", an operator
-//!   resends and the recipient gets it twice. So the cost is not a lost
-//!   message, it is a lost module — and saying "发不出去" would be the same lie
-//!   the daemon was fixed for telling.
-//! - **There is no fix from this side**, which is why the hourly keepalive that
-//!   used to send on this stick was switched off rather than retried.
+//! **2026-09-04 它不再复现。** 从面板经 `commission` 发一条：模组全程没有离开
+//! 总线（那个时段内核 USB 事件数为 0），投递报告回来 `status=delivered`。
 //!
-//! Keyed by IMEI because that is what identifies the hardware; the card in it
-//! can be moved.
+//! ⚠️ **中间变了一个变量：这根模组换了 USB 口。** 同一天查 USB 掉线时量到
+//! `1-1.3` 的 1 号口带不动 500mA 的 EC20（插上四秒必掉，而 400mA 的 EC200U
+//! 正常）。所以「发短信就掉线」很可能从来不是这颗模组的毛病，是那个口在发射
+//! 电流冲击下塌了。**这一条没有被受控实验证实**，只是最能解释两次观测的读法。
+//!
+//! ## 🔴 什么时候该把它加回来
+//!
+//! 这张表的规矩没变：**只收实测事实，不许靠推断加条目**。反过来同样成立 ——
+//! 上面那次解除也是一次观测，不是证明。加回来的条件是**再量到一次**：
+//! 某一根在 MO 提交之后离开总线，而同一时刻别的模组没有。
+//!
+//! ⚠️ 尤其注意：如果把模组挪回一个供电勉强的口，很可能又能量到。那时候要判断
+//! 的是「这根模组坏了」还是「这个口坏了」—— 判据是**同一根模组换个好口还复不
+//! 复现**。8 月 25 日那次没有做这个对照，这是它留下的教训。
+//!
+//! ## 机制还在，而且必须保持可用
+//!
+//! 表空了不等于这条路可以烂掉。下一次真量到一根会掉的模组，加进 `BLOCKED`
+//! 就该立刻在三个地方同时生效。所以这里提供 [`SAMPLE_BLOCKS`] 和 [`sms_block_in`]：
+//! **守着这道门的测试用夹具跑，不依赖生产表里恰好有条目。** 否则表一空，
+//! 那些测试就跟着变成空测试 —— 而这个仓库已经因为「守卫悄悄失效」踩过好几次。
 //!
 //! ## Why this is in `edge-core` and not where it was
 //!
@@ -61,16 +73,24 @@ pub struct SmsBlock {
     pub source: &'static str,
 }
 
-const BLOCKED: &[(&str, SmsBlock)] = &[(
-    "867018069509705",
+/// 🔴 **空的，而且是有理由的空。** 见模块开头：唯一那条在 2026-09-04 解除了。
+///
+/// 加条目之前先读模块开头「什么时候该把它加回来」那一节。
+const BLOCKED: &[(&str, SmsBlock)] = &[];
+
+/// 一条**只给测试用**的条目。
+///
+/// 🔴 生产表是空的，而这条路必须仍然可测：它是真正拦 `curl` 的那道门。没有这
+/// 个夹具的话，表一空，守着它的测试就跟着变成空测试 —— 那正是这个仓库反复
+/// 踩过的坑（守卫悄悄失效，而且不报错）。
+///
+/// ⚠️ IMEI 是一个**不可能属于真硬件**的值，免得它被误当成一条真记录。
+pub const SAMPLE_BLOCKS: &[(&str, SmsBlock)] = &[(
+    "000000000000000",
     SmsBlock {
-        why: "每一次 MO 短信提交都会让它挂掉自己的 QMI 中断端点，USB/IP 会话被拆掉，\
-              模组离开总线几十秒。QMI 与 AT 两条路都会触发，完整的 AT+CFUN=1,1 也清不掉。",
-        also: "代价不是「发不出去」：短信多半真的发出去了 —— 卡上 EF_SMSS 的 MO 计数\
-               在被记成「失败」的那一天涨了 34，10086 一直在回。代价是每发一条就丢一次模组。",
-        source: "vowifi T028 实测 2026-08-25：停掉 agent 后同一个 RAW_SEND 帧在 \
-                 867018069514820 上成功、被 862547055142811 干净拒绝，只有这一根 disconnect。\
-                 每小时的保号短信任务也因此被停掉。",
+        why: "（测试夹具）每一次 MO 提交都会让它离开总线几十秒。",
+        also: "（测试夹具）短信多半真的发出去了，被告知失败的人会重发，对端收两次。",
+        source: "（测试夹具）不是实测事实，只用来让封禁这条路在生产表为空时仍然可测。",
     },
 )];
 
@@ -83,7 +103,18 @@ const BLOCKED: &[(&str, SmsBlock)] = &[(
 /// The list is per-IMEI *measured* fact, and nothing may be added to it by
 /// inference from a capability flag.
 pub fn sms_block(imei: &str) -> Option<&'static SmsBlock> {
-    BLOCKED
+    sms_block_in(BLOCKED, imei)
+}
+
+/// 同一套查表，但表由调用方给。
+///
+/// 🔴 测试用它配 [`SAMPLE_BLOCKS`]，这样「有一根被封禁」这条路在生产表为空时仍然测
+/// 得到。生产代码一律用 [`sms_block`]。
+pub fn sms_block_in(
+    table: &'static [(&'static str, SmsBlock)],
+    imei: &str,
+) -> Option<&'static SmsBlock> {
+    table
         .iter()
         .find(|(blocked, _)| *blocked == imei)
         .map(|(_, block)| block)
@@ -94,32 +125,64 @@ pub fn blocked_imeis() -> impl Iterator<Item = &'static str> {
     BLOCKED.iter().map(|(imei, _)| *imei)
 }
 
+/// 生产表本身。
+///
+/// 🔴 给的是**表**而不是查询函数，是为了让上层（`edge-panel` 的路由）能把它
+/// 换成 [`SAMPLE_BLOCKS`] 来测那道门。表空了之后，门的接线在 HTTP 层面就再也测不到
+/// 了 —— 除非表可以被注入。
+pub fn sms_blocks() -> &'static [(&'static str, SmsBlock)] {
+    BLOCKED
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 🔴 **生产表是空的，而且那是一个决定，不是遗漏。**
+    ///
+    /// 唯一那条（`867018069509705`）在 2026-09-04 解除 —— 理由、日期和「什么
+    /// 时候该加回来」都写在模块开头。这条测试守的是：谁想加条目，先去读那一段。
     #[test]
-    fn the_measured_stick_is_blocked_and_says_why() {
-        let block = sms_block("867018069509705").expect("the measured stick is on the list");
-        // The wording matters as much as the entry: an operator told "failed"
-        // resends, and the recipient gets it twice.
-        assert!(
-            block.also.contains("发出去了"),
-            "the note no longer says the message usually goes out, which is the \
-             half an operator gets wrong on their own"
+    fn the_production_table_is_deliberately_empty() {
+        assert_eq!(
+            blocked_imeis().count(),
+            0,
+            "有人往表里加了条目 —— 先读模块开头「什么时候该把它加回来」，\
+             那里写着加回来的条件是**再量到一次**，不是推断"
         );
-        assert!(
-            block.source.contains("2026-08-25"),
-            "the claim lost the date it was measured on"
-        );
+        assert!(sms_block("867018069509705").is_none(), "那一根已经解除了");
     }
 
+    /// 🔴 表空了，但这条路必须还能用。
+    ///
+    /// 下一次真量到一根会掉的模组，加进 `BLOCKED` 就该立刻生效。用夹具跑，
+    /// 这样这条测试不依赖生产表里恰好有条目 —— 否则它会跟着表一起变成空测试。
     #[test]
-    fn nothing_else_is_blocked_by_inference() {
-        assert_eq!(blocked_imeis().count(), 1);
-        assert!(sms_block("862547055142811").is_none());
-        // The stick that was cleanly refused on the bench is not blocked: a
-        // refusal is not a disconnect.
-        assert!(sms_block("867018069514820").is_none());
+    fn the_mechanism_still_works_when_a_stick_is_added() {
+        let imei = SAMPLE_BLOCKS[0].0;
+        let block = sms_block_in(SAMPLE_BLOCKS, imei).expect("夹具里的那条要查得到");
+        assert!(
+            sms_block_in(SAMPLE_BLOCKS, "867018069514820").is_none(),
+            "别的不受影响"
+        );
+
+        // 措辞的两半都要在：机制是什么，以及那句反直觉的。
+        assert!(!block.why.is_empty());
+        assert!(
+            block.also.contains("重发") || block.also.contains("发出去了"),
+            "少了那句反直觉的 —— 被告知「失败」的人会重发，对端收两次"
+        );
+        assert!(!block.source.is_empty(), "来源不能空：下一个人要能去复测");
+    }
+
+    /// ⚠️ 夹具的 IMEI 不能像一个真的。
+    #[test]
+    fn the_fixture_cannot_be_mistaken_for_a_real_record() {
+        let imei = SAMPLE_BLOCKS[0].0;
+        assert!(
+            imei.chars().all(|c| c == '0'),
+            "夹具的 IMEI 长得像真的，会被误读成一条实测记录：{imei}"
+        );
+        assert!(SAMPLE_BLOCKS[0].1.source.contains("测试夹具"));
     }
 }

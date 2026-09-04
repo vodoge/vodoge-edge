@@ -118,6 +118,19 @@ pub async fn poll(state: SmsState) {
 ///
 /// 抽成一个函数是为了能被测试直接调 —— 它是这一栏唯一会阻止硬件被触碰的东西。
 fn refusal(active: Option<&str>, commission: bool) -> Option<Refusal> {
+    refusal_in(active, commission, edge_core::sms_blocks())
+}
+
+/// 同一套拦截，但封禁表由调用方给。
+///
+/// 🔴 生产表在 2026-09-04 之后是空的（见 `edge_core::sms_block` 模块开头）。
+/// 测试用 `edge_core::SAMPLE_BLOCKS` 跑这条路 —— 否则表一空，这里守着的
+/// 「封禁的模组要在按钮上就说清楚」就跟着变成空测试。
+fn refusal_in(
+    active: Option<&str>,
+    commission: bool,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+) -> Option<Refusal> {
     let Some(imei) = active else {
         // 🔴 **这一条 `commission` 也越不过去。**
         //
@@ -137,7 +150,7 @@ fn refusal(active: Option<&str>, commission: bool) -> Option<Refusal> {
         // 操作员已经在勾选框旁边读过代价，并且明确选了承担它。
         return None;
     }
-    edge_core::sms_block(imei).map(|block| Refusal {
+    edge_core::sms_block_in(blocks, imei).map(|block| Refusal {
         title: "这一根发不了",
         why: format!("{imei} 被面板禁止发送短信。{}", block.why),
     })
@@ -149,7 +162,14 @@ fn refusal(active: Option<&str>, commission: bool) -> Option<Refusal> {
 /// 在此之前**一个地方都没显示过**，`refusal` 只用了 `why`。真要发的时候，
 /// 那才是操作员最需要知道的一句：被告知「失败」的人会重发，对方收两次。
 fn commission_ask(imei: &str) -> Option<String> {
-    let block = edge_core::sms_block(imei)?;
+    commission_ask_in(imei, edge_core::sms_blocks())
+}
+
+fn commission_ask_in(
+    imei: &str,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+) -> Option<String> {
+    let block = edge_core::sms_block_in(blocks, imei)?;
     Some(format!(
         "仍然发送 —— 我知道代价。{} {}",
         block.why, block.also
@@ -591,8 +611,9 @@ mod tests {
     /// 封禁表里的那一根，在这里也拦一次。
     #[test]
     fn a_blocked_modem_is_refused_here_too() {
-        let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
-        let refused = refusal(Some(imei), false).expect("封禁的模组必须被拦");
+        let imei = edge_core::SAMPLE_BLOCKS[0].0;
+        let refused =
+            refusal_in(Some(imei), false, edge_core::SAMPLE_BLOCKS).expect("封禁的模组必须被拦");
         let why = &refused.why;
         assert_eq!(refused.title, "这一根发不了");
         assert!(why.contains(imei), "要指名是哪一根：{why}");
@@ -654,16 +675,20 @@ mod tests {
     /// `also` 才是最要紧的一句：被告知「失败」的人会重发，对方收两次。
     #[test]
     fn commissioning_opens_the_path_and_states_the_whole_cost() {
-        let imei = edge_core::blocked_imeis().next().expect("封禁表不能是空的");
-        let block = edge_core::sms_block(imei).expect("有条目");
+        let blocks = edge_core::SAMPLE_BLOCKS;
+        let imei = blocks[0].0;
+        let block = &blocks[0].1;
 
-        assert!(refusal(Some(imei), false).is_some(), "没勾之前必须还是拦着");
         assert!(
-            refusal(Some(imei), true).is_none(),
+            refusal_in(Some(imei), false, blocks).is_some(),
+            "没勾之前必须还是拦着"
+        );
+        assert!(
+            refusal_in(Some(imei), true, blocks).is_none(),
             "勾了之后要放行 —— 否则这个入口是假的"
         );
 
-        let label = commission_ask(imei).expect("封禁的模组要给出这条路");
+        let label = commission_ask_in(imei, blocks).expect("封禁的模组要给出这条路");
         assert!(label.contains(block.why), "勾选框上没写清代价：{label}");
         assert!(
             label.contains(block.also),

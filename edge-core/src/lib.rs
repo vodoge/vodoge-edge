@@ -47,7 +47,7 @@ pub use settle::{
 pub use at_policy::{classify as classify_at_command, AtRisk, DisruptiveKind};
 pub use at_guard::{ask, guarded, Channel, GuardRow, Guarded, GUARDS};
 pub use log_line::{classify, Classified, Level, Topic, TOPIC_ORDER};
-pub use sms_block::{blocked_imeis, sms_block, SmsBlock};
+pub use sms_block::{blocked_imeis, sms_block, sms_block_in, sms_blocks, SmsBlock, SAMPLE_BLOCKS};
 pub use sms_draft::{
     draft, gsm7_value, is_gsm7, Draft, Encoding, GSM7_MAX_SEPTETS, UCS2_MAX_CHARS,
 };

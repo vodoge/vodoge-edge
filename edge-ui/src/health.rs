@@ -83,6 +83,17 @@ struct Verdict {
 /// ⚠️ CS 与 PS **分开说**是刻意的：一根模组可以只挂上数据域而没有电路域，
 /// 而那正是短信会安静地失败的状态。
 fn verdicts(r: &ReportResult) -> Vec<Verdict> {
+    verdicts_in(r, edge_core::sms_blocks())
+}
+
+/// 同一套判词，但封禁表由调用方给。
+///
+/// 🔴 生产表在 2026-09-04 之后是空的。测试用 `edge_core::SAMPLE_BLOCKS` 跑，
+/// 这样「封禁的模组要在体检页自己说话」这条路不会跟着表一起变成空测试。
+fn verdicts_in(
+    r: &ReportResult,
+    blocks: &'static [(&'static str, edge_core::SmsBlock)],
+) -> Vec<Verdict> {
     let cs = r.cs_registration.as_deref();
     let ps = r.ps_registration.as_deref();
     let mut said = Vec::new();
@@ -160,7 +171,7 @@ fn verdicts(r: &ReportResult) -> Vec<Verdict> {
     // 而体检页正是发短信之前有人会看的地方。表在 `edge-core`，不在这里——
     // 它是一条实测出来的硬件事实，不是这块 UI 的意见。
     if let Some(imei) = r.imei.as_deref() {
-        if let Some(block) = edge_core::sms_block(imei) {
+        if let Some(block) = edge_core::sms_block_in(blocks, imei) {
             said.push(Verdict {
                 key: "MO 短信",
                 tone: MessageBarIntent::Error,
@@ -524,13 +535,8 @@ mod tests {
     #[test]
     fn a_blocked_modem_says_so_on_the_health_page() {
         let mut r = report();
-        r.imei = Some(
-            edge_core::blocked_imeis()
-                .next()
-                .expect("封禁表不能是空的")
-                .to_string(),
-        );
-        let said = verdicts(&r);
+        r.imei = Some(edge_core::SAMPLE_BLOCKS[0].0.to_string());
+        let said = verdicts_in(&r, edge_core::SAMPLE_BLOCKS);
         let block = said
             .iter()
             .find(|v| v.key == "MO 短信")
