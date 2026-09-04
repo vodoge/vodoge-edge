@@ -63,6 +63,21 @@ pub struct Row {
     pub beat: bool,
     /// 确凿归属（行里写了 `imei=`）。
     pub imei: Option<String>,
+    /// 行里出现的 `/dev/…` 控制口。画在行首。
+    ///
+    /// 🔴 **端口是会易主的。** 2026-09-04 那次，USB 重新枚举之后
+    /// `/dev/cdc-wdm1` 换了一根模组当主人——这条因果的载体就是它。
+    /// 模组筛选跟着**模组**走，看不见「同一个插座换了人」；把端口写在行首，
+    /// 易主真发生时不用筛也看得见（`… cdc-wdm0 → 509705` 之后跟着
+    /// `… cdc-wdm0 → 514820`）。
+    ///
+    /// ⚠️ **没有**为它做下拉框。查过 500 行真实日志：端口在这个窗口里一次都
+    /// 没易主，而且现成的「包含文本」搜 `cdc-wdm1` 就能筛——一个不回答新问题
+    /// 的下拉框，只是在本就拥挤的筛选栏上多占一格。`classify` 一直在算这个
+    /// 字段，`Row` 以前直接扔掉了。
+    pub port: Option<String>,
+    /// 行里出现的裸 15 位数字。**是猜的**，所以和 `imei` 分开放，画法也要分开。
+    pub bare: Vec<String>,
 }
 
 /// 这一栏的全部状态。
@@ -164,6 +179,8 @@ pub async fn poll(state: LogState) {
                         topic: c.topic,
                         beat: c.beat,
                         imei: c.imei,
+                        port: c.port,
+                        bare: c.bare,
                     }
                 })
                 .collect();
@@ -431,6 +448,16 @@ pub fn LogsPage(state: LogState) -> impl IntoView {
                                                         {row.level.label()}
                                                     </Badge>
                                                     <span class="vd-faint">{row.topic.label()}</span>
+                                                    // 控制口。见 `Row::port`：
+                                                    // 同一个插座换主人是看得见的因果。
+                                                    {row
+                                                        .port
+                                                        .clone()
+                                                        .map(|p| {
+                                                            view! {
+                                                                <span class="vd-log-port">{p}</span>
+                                                            }
+                                                        })}
                                                 </div>
                                                 <div class="vd-log-text">{row.line.text.clone()}</div>
                                             </div>
@@ -547,7 +574,37 @@ mod tests {
             topic: c.topic,
             beat: c.beat,
             imei: c.imei,
+            port: c.port,
+            bare: c.bare,
         }
+    }
+
+    /// 🔴 `classify` 算好的两个字段，`Row` 以前直接扔掉。
+    ///
+    /// `port` 是「同一个插座换主人」这条因果的载体：2026-09-04 USB 重新枚举
+    /// 之后 `/dev/cdc-wdm1` 换了一根模组当主人。模组筛选跟着**模组**走，
+    /// 看不见这件事。
+    #[test]
+    fn a_row_carries_the_port_that_classify_already_worked_out() {
+        let r = row("poll /dev/cdc-wdm1 imei=862547055142811 ok", 1);
+        assert_eq!(r.port.as_deref(), Some("/dev/cdc-wdm1"));
+        assert_eq!(r.imei.as_deref(), Some("862547055142811"));
+
+        // 没有端口的行不许编一个出来。
+        let r = row("poll imei=867018069509705 absent from both enumerations", 2);
+        assert_eq!(r.port, None, "这一行确实没有 /dev/ 路径");
+        assert_eq!(r.imei.as_deref(), Some("867018069509705"));
+    }
+
+    /// ⚠️ 猜出来的归属和确凿的归属分开存，因为屏幕上也要分开画。
+    #[test]
+    fn a_guessed_imei_never_lands_in_the_confirmed_field() {
+        let r = row("uplink queued for 862547055142811 retry=2", 3);
+        assert_eq!(r.imei, None, "行里没写 imei=，就不算确凿归属");
+        assert!(
+            r.bare.contains(&"862547055142811".to_string()),
+            "但裸号要收进 bare，画法和确凿的分开"
+        );
     }
 
     /// 环满时丢的是**最旧**的，而且丢了多少要记下来。

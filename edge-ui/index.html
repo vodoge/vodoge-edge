@@ -158,6 +158,13 @@
         outline-offset: -1px;
       }
 
+      /* 控制口画在日志行首。端口会易主，而模组筛选跟着模组走、看不见这件事。 */
+      .vd-log-port {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--colorNeutralForeground3);
+      }
+
       /* 翻转次数。没到一分钟观察量时组件返回空串，这一行自然不占位。 */
       .vd-modem-flip:empty { display: none; }
 
