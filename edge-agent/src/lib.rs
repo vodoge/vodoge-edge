@@ -676,9 +676,16 @@ impl<P: SendPort> CommandExecutor<P, RejectUpdate> {
     /// `env!("CARGO_PKG_VERSION")`（`edge-bin` 就是这么做的）。
     ///
     /// ⚠️ 这里原来写的是 `"0.1.0"` —— 一个**看起来像真的**版本号，而生产路径
-    /// 当时正好走的就是 `new()`。于是云端从上行 hello 收到真版本、从更新守卫
-    /// 的 `running_version()` 收到 `0.1.0`，两个数字长期对不上而没人看得出哪个
-    /// 是假的。占位值就该长得像占位值。
+    /// 当时正好走的就是 `new()`。
+    ///
+    /// 🔴 **它当时是对的，而这正是它危险的地方。** workspace 的版本号恰好也是
+    /// `0.1.0`，所以守卫报的和上行 hello 报的
+    /// （`env!("CARGO_PKG_VERSION")`）**碰巧一致**——没有任何症状，没有任何人
+    /// 会去查。分叉会在**第一次升版本号**的那一刻发生：hello 报新版本，而守卫
+    /// 仍然报 `0.1.0`，然后拿这个陈旧的数字去判「刷进去的是不是新的」。
+    ///
+    /// 一个靠巧合正确的常量，比一个明显错的常量更难发现。占位值就该长得像
+    /// 占位值——`0.0.0-version-not-supplied` 泄漏到任何地方都会被一眼认出来。
     pub fn new(port: P) -> Self {
         Self::with_updater(port, RejectUpdate::new("0.0.0-version-not-supplied"))
     }
