@@ -287,3 +287,40 @@ sms_mo = { kind = "supported", bearer = "cellular" }
         })
     );
 }
+
+/// 标签是稳定的、不随实例变化的。
+///
+/// 它进退休记录的 reason 列，也进告警 context —— 云端按它分组统计。
+/// 把 USB 标识或型号拼进去会让每一次出现都成为独立的一类，
+/// 而那正是 `raise_alert` 的 code 必须是 `&'static str` 所要防的东西，
+/// 只不过换到了 context 里。
+#[test]
+fn refusal_labels_carry_no_instance_data() {
+    let labels = [
+        BindRefusal::UnreadableUsbIdentity.wire(),
+        BindRefusal::NoStrategy(UNDRIVEN).wire(),
+        BindRefusal::NotIdentifiedYet.wire(),
+        BindRefusal::NeverMeasured {
+            family: ModemFamily::EC25_CN,
+            carrier: CarrierProfile::CN_UNICOM,
+        }
+        .wire(),
+    ];
+    for label in labels {
+        assert!(
+            !label.contains("05c6") && !label.contains("EC25") && !label.contains("Unicom"),
+            "{label} 里带上了实例数据"
+        );
+        assert!(
+            label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "{label} 不是稳定的小写标签"
+        );
+    }
+    // 四个必须互不相同 —— 否则云端分不出「读不到」和「没测过」，
+    // 而这两件事在追溯执行里的动作是相反的。
+    let mut sorted = labels;
+    sorted.sort_unstable();
+    let mut deduped = sorted.to_vec();
+    deduped.dedup();
+    assert_eq!(deduped.len(), 4, "标签有重复：{sorted:?}");
+}

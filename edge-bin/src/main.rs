@@ -24,7 +24,7 @@ fn main() {
 mod linux {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
     use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
     use std::sync::MutexGuard;
 
@@ -997,6 +997,16 @@ mod linux {
         /// been restarted, so the two desynced sticks on 2026-08-23 could not
         /// be named at all and the recovery answered `modem_not_found`.
         store: Arc<SharedStore>,
+        /// 这份矩阵是**哪来的**：库里恢复的、云端刚推的，还是回落到内置的。
+        ///
+        /// 🔴 `CapabilityOrigin::Fallback` 回答不了这个问题 —— 它说的是
+        /// 「这一对没人写过规则」，和「矩阵丢了」共用一个词。追溯执行要靠
+        /// 这个值决定敢不敢删东西，所以权威性必须从矩阵**外面**带进来。
+        ///
+        /// 原子量而不是再加一把锁：这个值被启动路径、uplink 线程、poll 线程
+        /// 三边碰，而这个文件对锁序有过一次血的教训（见 `live_matrix` 那段
+        /// 「叶子锁」注释）。不参与任何锁序的原子量从根上没有这个问题。
+        matrix_authority: Arc<AtomicU8>,
         /// The capability matrix as it currently stands, including anything
         /// the cloud has pushed.
         ///
@@ -1030,6 +1040,7 @@ mod linux {
                     radio: self.radio.clone(),
                     proxies: self.proxies.clone(),
                     store: self.store.clone(),
+                    matrix_authority: self.matrix_authority.clone(),
                     matrix: self.matrix.clone(),
                 };
                 SendPort::operating_context(&mut port, imei)?
@@ -1520,7 +1531,15 @@ mod linux {
                 .lock()
                 .expect("store")
                 .save_capability_matrix(version, sha256, document, unix_ms())
-                .map_err(|error| SendError::new("matrix_not_stored", error.to_string()))
+                .map_err(|error| SendError::new("matrix_not_stored", error.to_string()))?;
+            // 🔴 只在**落库成功之后**才升级权威性。
+            //
+            // 落库失败时这份矩阵只活在内存里，重启就没了 —— 而追溯执行的删除
+            // 是不可逆的。用一份重启后会消失的矩阵去做不可逆的事，是这套设计
+            // 里最不该出现的组合。
+            self.matrix_authority
+                .store(edge_core::MatrixAuthority::Stored.as_u8(), Ordering::Relaxed);
+            Ok(())
         }
 
         /// What module this is, on whose network, with what plan on the card.
@@ -3852,6 +3871,7 @@ mod linux {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
                 store: self.store.clone(),
+                matrix_authority: self.matrix_authority.clone(),
                 matrix: self.matrix.clone(),
             };
             SendPort::send_sms(
@@ -3872,6 +3892,7 @@ mod linux {
                 radio: self.radio.clone(),
                 proxies: self.proxies.clone(),
                 store: self.store.clone(),
+                matrix_authority: self.matrix_authority.clone(),
                 matrix: self.matrix.clone(),
             };
             SendPort::restart_modem(&mut port, &imei)
@@ -4153,6 +4174,10 @@ mod linux {
             .expect("store")
             .capability_matrix()
             .map_err(|error| error.to_string())?;
+        // 这份矩阵敢不敢用来**删**东西。三个分支各自的答案写在下面。
+        let matrix_authority = Arc::new(AtomicU8::new(
+            edge_core::MatrixAuthority::BuiltinUnparsed.as_u8(),
+        ));
         let startup_matrix = match &stored_matrix {
             Some((version, _, document)) => {
                 match serde_json::from_str::<serde_json::Value>(document)
@@ -4163,18 +4188,54 @@ mod linux {
                         log_line(format!(
                             "capability matrix restored from store version={version}"
                         ));
+                        matrix_authority.store(
+                            edge_core::MatrixAuthority::Stored.as_u8(),
+                            Ordering::Relaxed,
+                        );
                         matrix
                     }
                     None => {
                         log_error(format!(
                             "stored capability matrix version={version} did not parse; using the built-in one"
                         ));
+                        // 🔴 这是一次**读失败**，不是一次「没测过」。
+                        //
+                        // 到这里为止它只写进了日志，而日志在这台机器上，
+                        // 云端看不见。内置矩阵 2026-09-05 之后只剩 3 条 EC20
+                        // 规则，所以这一支意味着这台机器对绝大多数「型号 ×
+                        // 运营商」的回答都变成了「没测过」—— 追溯执行会因此
+                        // 维持现状（见 MatrixAuthority），但云端得知道它为什么
+                        // 不动了，否则那就是一台悄悄停止执行的机器。
+                        //
+                        // Critical：这台机器现在按一份它自己都读不懂的配置在跑。
+                        raise_alert(
+                            &outbox,
+                            edge_core::AlertLevel::Critical,
+                            "capability_matrix_unparsed",
+                            format!(
+                                "stored capability matrix version={version} did not parse; \
+                                 running on the built-in one"
+                            ),
+                            serde_json::json!({
+                                "stored_version": version,
+                                "builtin_version": CapabilityMatrix::builtin()
+                                    .map(|matrix| matrix.version().to_owned())
+                                    .unwrap_or_default(),
+                            }),
+                            unix_ms(),
+                        );
                         CapabilityMatrix::builtin().map_err(|error| error.to_string())?
                     }
                 }
             }
             None => {
                 log_line("no stored capability matrix; using the built-in one".to_string());
+                // 从未收到过推送。和上一支同样不允许删东西，但它不是故障 ——
+                // 一台刚装好、还没连上云端的机器就是这个状态，不该吵。
+                matrix_authority.store(
+                    edge_core::MatrixAuthority::BuiltinNoRow.as_u8(),
+                    Ordering::Relaxed,
+                );
                 CapabilityMatrix::builtin().map_err(|error| error.to_string())?
             }
         };
@@ -4201,6 +4262,7 @@ mod linux {
                 radio: radio.clone(),
                 proxies: proxies.clone(),
                 store: shared.clone(),
+                matrix_authority: matrix_authority.clone(),
                 matrix: live_matrix.clone(),
             },
             edge_agent::RejectUpdate::new(env!("CARGO_PKG_VERSION")),
@@ -4235,12 +4297,23 @@ mod linux {
             radio: radio.clone(),
             proxies: proxies.clone(),
             store: shared.clone(),
+            matrix_authority: matrix_authority.clone(),
             matrix: live_matrix.clone(),
         });
 
         // The panel reads this to report cloud vs local, so what it shows is the
         // real uplink rather than a fixed assumption.
         let uplink_online = Arc::new(AtomicBool::new(false));
+        // 本次启动**曾经**连上过云端 —— 单调，断线不翻回。
+        //
+        // 🔴 和 `uplink_online` 是两个问题。追溯执行问的不是「现在通不通」，
+        // 而是「云端有没有过机会说话」：冷启动的头几秒里，一台矩阵不对的机器
+        // 还没来得及被纠正，此时开始删东西，就是把那几秒变成一个不可逆的窗口。
+        //
+        // 之后即使断线也不再阻止执行：那时用的是一份**云端真推过**的矩阵
+        // （见 MatrixAuthority），陈旧由 30 分钟的隔离期兜着。断线就停止执行
+        // 反而会让一台长期离线的机器永远无法自我纠正。
+        let uplink_ever_resumed = Arc::new(AtomicBool::new(false));
 
         let panel_bind = env("VODOGE_EDGE_PANEL", "0.0.0.0:8743");
         let panel_store = shared.clone();
@@ -4262,8 +4335,15 @@ mod linux {
         let uplink_outbox = outbox.clone();
         let uplink_executor = executor.clone();
         let uplink_matrix = live_matrix.clone();
+        let resumed_for_uplink = uplink_ever_resumed.clone();
         std::thread::spawn(move || {
-            uplink_loop(uplink_outbox, uplink_executor, uplink_matrix, uplink_online)
+            uplink_loop(
+                uplink_outbox,
+                uplink_executor,
+                uplink_matrix,
+                uplink_online,
+                resumed_for_uplink,
+            )
         });
 
         log_line(format!(
@@ -4280,7 +4360,15 @@ mod linux {
         // of all time since boot.
         let mut memory = PollMemory::default();
         loop {
-            if let Err(error) = poll_modems(&shared, &outbox, &radio, &live_matrix, &mut memory) {
+            if let Err(error) = poll_modems(
+                &shared,
+                &outbox,
+                &radio,
+                &live_matrix,
+                &matrix_authority,
+                &uplink_ever_resumed,
+                &mut memory,
+            ) {
                 log_error(format!("poll: {error}"));
             }
             // Measured rather than assumed to be the poll interval: a rescan
@@ -4548,6 +4636,8 @@ mod linux {
         outbox: &Arc<Mutex<DurableOutbox>>,
         radio: &Radio,
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
+        matrix_authority: &Arc<AtomicU8>,
+        uplink_ever_resumed: &Arc<AtomicBool>,
         memory: &mut PollMemory,
     ) -> Result<(), String> {
         let now = unix_ms();
@@ -4928,6 +5018,24 @@ mod linux {
                 None
             }
         };
+        // 追溯执行：已纳管的模组现在还过不过得了那两道闸。
+        //
+        // 放在这里而不是 `managed` 之后，是为了让同一趟上报的 `managed_imeis`
+        // 已经是执行**之后**的真值 —— 否则云端会先收到一份仍然列着它的名单，
+        // 下一趟才更正，中间那段时间里控制台和边缘对「谁被管着」的答案不一致。
+        //
+        // `matrix` 在这里已经克隆好了，而且是在本函数**所有** store 锁之前
+        // 克隆的，所以复用它不会产生 store→matrix 这条锁序边。
+        enforce_registration(
+            shared,
+            outbox,
+            &matrix,
+            edge_core::MatrixAuthority::from_u8(matrix_authority.load(Ordering::Relaxed)),
+            uplink_ever_resumed.load(Ordering::Relaxed),
+            discoveries.as_deref(),
+            now,
+        );
+
         // Read separately from the snapshots: the registry is the authority on
         // what is managed, and a module adopted but never yet seen has no
         // snapshot to be inferred from.
@@ -7329,6 +7437,594 @@ mod linux {
         payload
     }
 
+    /// 追溯执行敢做到哪一步。
+    ///
+    /// 🔴 默认 `Mark`：这个特性上线时**一行都不删**，只标记并告警。
+    ///
+    /// 这是整套设计里唯一让「自动做破坏」保有退路的地方。机队上先跑几周
+    /// 只标记模式，看 `retro_quarantined` 的误报率；误报为零之后，再逐台
+    /// 打开 `VODOGE_RETRO_ENFORCE=unbind`。而那一步是可逆的 ——
+    /// 改环境变量重启即可。
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum EnforceMode {
+        Mark,
+        Unbind,
+    }
+
+    fn enforce_mode() -> EnforceMode {
+        enforce_mode_from(&env("VODOGE_RETRO_ENFORCE", "mark"))
+    }
+
+    /// 🔴 只有逐字的 `unbind` 才开。拼错、留空、写 `true`、写 `UNBIND`
+    /// —— 全都落到 `Mark`。
+    ///
+    /// 一个会因为拼错而**打开**破坏性行为的开关，比没有开关更糟：
+    /// 运维以为自己写的是「关」，而它开着。所以这里既不做大小写归一，
+    /// 也不接受任何同义词 —— 只有一个字符串通往删除。
+    fn enforce_mode_from(value: &str) -> EnforceMode {
+        match value.trim() {
+            "unbind" => EnforceMode::Unbind,
+            _ => EnforceMode::Mark,
+        }
+    }
+
+    /// 一趟追溯执行要做的全部动作。
+    #[derive(Debug, Default)]
+    struct EnforcementPlan {
+        /// 闸又过了，清掉标记。
+        keep: Vec<String>,
+        /// 判不了，维持现状。
+        hold: Vec<(String, edge_core::HoldReason)>,
+        /// 真判定，隔离期未满。
+        quarantine: Vec<(String, edge_core::BindRefusal, i64, u32)>,
+        /// 真判定，隔离期满。
+        unbind: Vec<(String, edge_core::BindRefusal)>,
+    }
+
+    /// 把三张表拼成每根模组的证据。
+    ///
+    /// ⚠️ 每一个 `None` 都表示「读不到」，不表示「没有」——
+    /// `enforce_one` 依赖这个约定。
+    fn build_evidence(
+        registered: &[edge_store::RegisteredModem],
+        gates: &std::collections::BTreeMap<String, edge_store::GateFailure>,
+        observed: &[edge_store::LocalModem],
+        discoveries: &[edge_store::LocalModemDiscovery],
+        now: i64,
+    ) -> Vec<edge_core::GateEvidence> {
+        registered
+            .iter()
+            .map(|row| {
+                let seen = observed.iter().find(|modem| modem.imei == row.imei);
+                let discovery = discoveries
+                    .iter()
+                    .find(|candidate| candidate.imei.as_deref() == Some(row.imei.as_str()));
+                let gate = gates.get(&row.imei);
+                edge_core::GateEvidence {
+                    imei: row.imei.clone(),
+                    adopted_family: row
+                        .family
+                        .as_deref()
+                        .map(|name| ModemFamily::from(name)),
+                    observed_family: seen.map(|modem| ModemFamily::from(modem.family.as_str())),
+                    // 归属网络读不到就是 None —— 这里**没有**
+                    // `.unwrap_or("Generic-International")`，理由和
+                    // `register_modem` 里那处一样：那个兜底在报告和路由里
+                    // 说得通，在一道闸上它意味着一张还没读出 IMSI 的卡会被
+                    // 当成国际卡去过闸。
+                    carrier: seen.and_then(|modem| {
+                        let (mcc, mnc) = modem.home_mcc.zip(modem.home_mnc)?;
+                        Some(CarrierProfile::from(
+                            Network::new(mcc, mnc).carrier_profile(),
+                        ))
+                    }),
+                    usb: discovery.and_then(|candidate| {
+                        match (
+                            candidate.vendor_id.as_deref(),
+                            candidate.product_id.as_deref(),
+                        ) {
+                            (Some(vendor), Some(product)) => {
+                                edge_core::UsbIdentity::parse(vendor, product)
+                            }
+                            _ => None,
+                        }
+                    }),
+                    observation_age_ms: seen
+                        .and_then(|modem| modem.last_seen)
+                        .map(|seen| now.saturating_sub(seen).max(0)),
+                    failing_since_ms: gate.map(|gate| gate.since),
+                    failing_passes: gate.map(|gate| gate.passes).unwrap_or(0),
+                }
+            })
+            .collect()
+    }
+
+    /// 纯判定，不碰 store。
+    fn plan_enforcement(
+        matrix: &CapabilityMatrix,
+        authority: edge_core::MatrixAuthority,
+        uplink_ever_resumed: bool,
+        evidence: &[edge_core::GateEvidence],
+        now: i64,
+    ) -> EnforcementPlan {
+        let mut plan = EnforcementPlan::default();
+        for item in evidence {
+            match edge_core::enforce_one(
+                strategy_registry(),
+                matrix,
+                authority,
+                uplink_ever_resumed,
+                item,
+                now,
+            ) {
+                edge_core::Enforcement::Keep => plan.keep.push(item.imei.clone()),
+                edge_core::Enforcement::Hold(reason) => {
+                    plan.hold.push((item.imei.clone(), reason))
+                }
+                edge_core::Enforcement::Quarantine {
+                    refusal,
+                    elapsed_ms,
+                    passes,
+                } => plan
+                    .quarantine
+                    .push((item.imei.clone(), refusal, elapsed_ms, passes)),
+                edge_core::Enforcement::Unbind(refusal) => {
+                    plan.unbind.push((item.imei.clone(), refusal))
+                }
+            }
+        }
+        plan
+    }
+
+    /// 一条告警里最多列几根模组。
+    ///
+    /// 契约把 context 里的数组封在 64。超了就截断并置 `truncated` ——
+    /// 被云端拒收整封信意味着这条告警彻底消失，比截断严重得多。
+    const ALERT_MODEM_CAP: usize = 64;
+
+    fn modem_array(entries: Vec<serde_json::Value>) -> (serde_json::Value, bool) {
+        let truncated = entries.len() > ALERT_MODEM_CAP;
+        let kept: Vec<_> = entries.into_iter().take(ALERT_MODEM_CAP).collect();
+        (serde_json::json!(kept), truncated)
+    }
+
+    /// 已纳管的模组现在还过不过得了那两道闸。
+    ///
+    /// 🔴 唯一的失败模式是**删掉不该删的行**，所以每一次读失败都走
+    /// 「整趟作废 + 告警」，而不是「当成空的继续」。判定本身在
+    /// `edge_core::retro`，那里能在本机测。
+    ///
+    /// 落点是 `poll_modems` 的尾部，理由有三条：
+    ///   ① 只有它同时拿得到 store、outbox 和矩阵；
+    ///   ② 矩阵在这里已经被克隆好了，而且是在**所有 store 锁之前**克隆的，
+    ///      所以复用它就不会产生 store→matrix 这条锁序边（见 `live_matrix`
+    ///      创建处那段「叶子锁」注释）；
+    ///   ③ 它就是观测发生的地方，`last_seen` 在这一刻最新鲜。
+    fn enforce_registration(
+        shared: &Arc<SharedStore>,
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        matrix: &CapabilityMatrix,
+        authority: edge_core::MatrixAuthority,
+        uplink_ever_resumed: bool,
+        discoveries: Option<&[edge_store::LocalModemDiscovery]>,
+        now: i64,
+    ) {
+        // 候选列表读不到 → 整趟作废。
+        //
+        // 不是谨慎过头：USB 标识全部来自这张表，把「读不到」当成空表，
+        // 等于让每一根已纳管模组的闸 1 证据同时消失。
+        let Some(discoveries) = discoveries else {
+            raise_alert(
+                outbox,
+                edge_core::AlertLevel::Error,
+                "retro_inputs_unreadable",
+                "candidate list unreadable; registration gates not evaluated this pass",
+                serde_json::json!({ "reason": "discoveries" }),
+                now,
+            );
+            return;
+        };
+
+        let mode = enforce_mode();
+        let matrix_version = matrix.version().to_owned();
+
+        // 收集 → 判定 → 执行，全部在**同一次** store 锁内。
+        //
+        // 这样面板和云端的 `register_modem`（用的是同一把 mutex）无法与本趟
+        // 交错，判定与执行之间的时序问题从根上不存在 —— 不需要在 DELETE 上
+        // 加任何 compare-and-swap 谓词。
+        let plan = {
+            let mut store = shared.0.lock().expect("store");
+            let registered = match store.registered_modems() {
+                Ok(rows) => rows,
+                Err(error) => {
+                    log_error(format!("registry not read: {error}"));
+                    raise_alert(
+                        outbox,
+                        edge_core::AlertLevel::Error,
+                        "retro_inputs_unreadable",
+                        format!("registry unreadable: {error}"),
+                        serde_json::json!({ "reason": "registry" }),
+                        now,
+                    );
+                    return;
+                }
+            };
+            if registered.is_empty() {
+                return;
+            }
+            let observed = match store.list_local_modems() {
+                Ok(rows) => rows,
+                Err(error) => {
+                    log_error(format!("inventory not read: {error}"));
+                    raise_alert(
+                        outbox,
+                        edge_core::AlertLevel::Error,
+                        "retro_inputs_unreadable",
+                        format!("inventory unreadable: {error}"),
+                        serde_json::json!({ "reason": "inventory" }),
+                        now,
+                    );
+                    return;
+                }
+            };
+            let mut gates = std::collections::BTreeMap::new();
+            for row in &registered {
+                match store.gate_failure(&row.imei) {
+                    Ok(Some(gate)) => {
+                        gates.insert(row.imei.clone(), gate);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        // 读不到某一根的倒计时，这一趟就不判它 —— 但也不必
+                        // 因此作废整趟：缺了标记只会让它从头开始计数，
+                        // 而从头计数是往「更不容易删」的方向偏。
+                        log_error(format!("gate state not read for {}: {error}", row.imei));
+                    }
+                }
+            }
+
+            let evidence = build_evidence(&registered, &gates, &observed, discoveries, now);
+            let plan = plan_enforcement(matrix, authority, uplink_ever_resumed, &evidence, now);
+
+            // 执行。
+            for imei in &plan.keep {
+                if gates.contains_key(imei) {
+                    if let Err(error) = store.clear_gate_failure(imei) {
+                        log_error(format!("gate mark not cleared for {imei}: {error}"));
+                    }
+                }
+            }
+            for (imei, refusal, _, _) in &plan.quarantine {
+                if let Err(error) = store.mark_gate_failure(imei, refusal.wire(), now) {
+                    // 倒计时没推进就等于这一趟没发生 —— 往安全的方向偏。
+                    log_error(format!("gate mark not written for {imei}: {error}"));
+                }
+            }
+            let mut retired = Vec::new();
+            if mode == EnforceMode::Unbind {
+                for (imei, refusal) in &plan.unbind {
+                    let Some(row) = registered.iter().find(|row| &row.imei == imei) else {
+                        continue;
+                    };
+                    let record = edge_store::Retirement {
+                        imei: imei.clone(),
+                        registered_at: row.registered_at,
+                        registered_by: row.registered_by.clone(),
+                        family: row.family.clone(),
+                        usb_device: row.usb_device.clone(),
+                        retired_at: now,
+                        reason: refusal.wire().to_owned(),
+                        detail: Some(refusal.to_string()),
+                        matrix_version: Some(matrix_version.clone()),
+                    };
+                    // 🔴 先写日志再删。告警可能入不了队（outbox 满、磁盘坏），
+                    // 而那正是最需要留下痕迹的时刻。
+                    log_error(format!(
+                        "retiring {imei}: {} (matrix {matrix_version})",
+                        refusal
+                    ));
+                    match store.retire_modem(&record) {
+                        Ok(true) => retired.push((imei.clone(), refusal.clone())),
+                        Ok(false) => log_error(format!("{imei} was already gone; not retired")),
+                        // 没删成就不能说删了 —— 它不进告警的批次。
+                        Err(error) => log_error(format!("{imei} not retired: {error}")),
+                    }
+                }
+            }
+            EnforcementPlan {
+                keep: plan.keep,
+                hold: plan.hold,
+                quarantine: plan.quarantine,
+                unbind: retired,
+            }
+        };
+
+        emit_plan_alerts(outbox, &plan, authority, &matrix_version, mode, now);
+    }
+
+    /// 一趟一条，不是一根一条。
+    ///
+    /// 🔴 现有的 `modem_absent` 是逐根 `raise_alert`，共用一个常量 code。
+    /// 后果被低估了：掉线是持续状态，所以抢到发送名额的永远是同一根，
+    /// 其余几根的身份在 `Suppress` 分支里当场蒸发 —— 那个分支是 `return`，
+    /// payload 连构造都不构造。这里不照抄那九行。
+    fn emit_plan_alerts(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        plan: &EnforcementPlan,
+        authority: edge_core::MatrixAuthority,
+        matrix_version: &str,
+        mode: EnforceMode,
+        now: i64,
+    ) {
+        if !plan.hold.is_empty() {
+            // 判据整体不可信（回落到内置矩阵、uplink 没连上过）单独成一条：
+            // 它是一台机器的状态，不是几根模组各自的问题，而且它会持续复发，
+            // 节流对它是对的。
+            let systemic = plan.hold.iter().any(|(_, reason)| {
+                matches!(
+                    reason,
+                    edge_core::HoldReason::MatrixNotAuthoritative(_)
+                        | edge_core::HoldReason::UplinkNeverResumed
+                )
+            });
+            if systemic {
+                raise_alert(
+                    outbox,
+                    edge_core::AlertLevel::Warning,
+                    "retro_matrix_not_authoritative",
+                    "registration gates not evaluated: the running matrix is not authoritative",
+                    serde_json::json!({
+                        "authority": authority.wire(),
+                        "matrix_version": matrix_version,
+                        "held": plan.hold.len(),
+                    }),
+                    now,
+                );
+            } else {
+                let (modems, truncated) = modem_array(
+                    plan.hold
+                        .iter()
+                        .map(|(imei, reason)| {
+                            serde_json::json!({ "imei": imei, "hold": reason.wire() })
+                        })
+                        .collect(),
+                );
+                raise_alert(
+                    outbox,
+                    edge_core::AlertLevel::Warning,
+                    "retro_hold",
+                    format!("{} adopted modules could not be evaluated", plan.hold.len()),
+                    serde_json::json!({
+                        "count": plan.hold.len(),
+                        "modems": modems,
+                        "truncated": truncated,
+                    }),
+                    now,
+                );
+            }
+        }
+
+        if !plan.quarantine.is_empty() {
+            let (modems, truncated) = modem_array(
+                plan.quarantine
+                    .iter()
+                    .map(|(imei, refusal, elapsed, passes)| {
+                        serde_json::json!({
+                            "imei": imei,
+                            "refusal": refusal.wire(),
+                            "elapsed_ms": elapsed,
+                            "passes": passes,
+                        })
+                    })
+                    .collect(),
+            );
+            raise_alert(
+                outbox,
+                edge_core::AlertLevel::Error,
+                "retro_quarantined",
+                format!(
+                    "{} adopted modules no longer pass the registration gates",
+                    plan.quarantine.len()
+                ),
+                serde_json::json!({
+                    "count": plan.quarantine.len(),
+                    "modems": modems,
+                    "matrix_version": matrix_version,
+                    "mode": if mode == EnforceMode::Unbind { "unbind" } else { "mark" },
+                    "truncated": truncated,
+                }),
+                now,
+            );
+        }
+
+        if !plan.unbind.is_empty() {
+            let (modems, truncated) = modem_array(
+                plan.unbind
+                    .iter()
+                    .map(|(imei, refusal)| {
+                        serde_json::json!({ "imei": imei, "refusal": refusal.wire() })
+                    })
+                    .collect(),
+            );
+            // 🔴 不过节流。解绑是一次性的：删掉那一行之后下一趟不会再看它
+            // 第二眼，所以被压掉的这条**永远不会被补发**。
+            raise_alert_unthrottled(
+                outbox,
+                edge_core::AlertLevel::Critical,
+                "retro_unbound",
+                format!(
+                    "{} adopted modules were retired by the registration gates",
+                    plan.unbind.len()
+                ),
+                serde_json::json!({
+                    "count": plan.unbind.len(),
+                    "modems": modems,
+                    "matrix_version": matrix_version,
+                    "truncated": truncated,
+                }),
+                now,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod retro_tests {
+        use super::{build_evidence, enforce_mode_from, EnforceMode};
+
+        /// 🔴 只有一个字符串通往删除。
+        #[test]
+        fn only_the_exact_word_opens_the_destructive_mode() {
+            assert_eq!(enforce_mode_from("unbind"), EnforceMode::Unbind);
+            assert_eq!(enforce_mode_from("  unbind  "), EnforceMode::Unbind);
+            for other in ["mark", "", "true", "1", "yes", "UNBIND", "Unbind", "unbin", "unbind!"] {
+                assert_eq!(
+                    enforce_mode_from(other),
+                    EnforceMode::Mark,
+                    "{other:?} 打开了破坏性模式"
+                );
+            }
+        }
+
+        fn registered(imei: &str, family: Option<&str>) -> edge_store::RegisteredModem {
+            edge_store::RegisteredModem {
+                imei: imei.into(),
+                registered_at: 1,
+                registered_by: "panel".into(),
+                usb_device: None,
+                family: family.map(str::to_owned),
+                note: None,
+            }
+        }
+
+        fn observed(imei: &str, home: Option<(u16, u16)>, last_seen: Option<i64>) -> edge_store::LocalModem {
+            edge_store::LocalModem {
+                imei: imei.into(),
+                family: "EC20".into(),
+                firmware: None,
+                msisdn: None,
+                msisdn_iccid: None,
+                apn_contexts: None,
+                iccid: None,
+                state: "registered".into(),
+                last_seen,
+                mcc: None,
+                mnc: None,
+                home_mcc: home.map(|(mcc, _)| mcc),
+                home_mnc: home.map(|(_, mnc)| mnc),
+                imsi: None,
+                discovery: "qmi".into(),
+                manageable: true,
+                control_port: None,
+            }
+        }
+
+        fn candidate(imei: &str, vendor: Option<&str>, product: Option<&str>) -> edge_store::LocalModemDiscovery {
+            edge_store::LocalModemDiscovery {
+                candidate_key: "k".into(),
+                usb_device: None,
+                transport: "qmi".into(),
+                control_port: "/dev/cdc-wdm0".into(),
+                vendor_id: vendor.map(str::to_owned),
+                product_id: product.map(str::to_owned),
+                state: "manageable".into(),
+                imei: Some(imei.into()),
+                detail: String::new(),
+                last_seen: 1,
+            }
+        }
+
+        fn gates() -> std::collections::BTreeMap<String, edge_store::GateFailure> {
+            std::collections::BTreeMap::new()
+        }
+
+        /// 🔴 一根纳管了但本轮没被观测到的模组，证据里全是 `None` ——
+        /// 不是「零值」，也不是任何看起来合理的默认。
+        #[test]
+        fn a_registration_with_no_observation_yields_no_evidence() {
+            let evidence = build_evidence(
+                &[registered("1", Some("EC20"))],
+                &gates(),
+                &[],
+                &[],
+                1_000,
+            );
+            let item = &evidence[0];
+            assert!(item.observed_family.is_none());
+            assert!(item.carrier.is_none());
+            assert!(item.usb.is_none());
+            assert!(item.observation_age_ms.is_none(), "没观测过不该有年龄");
+        }
+
+        /// 🔴 归属网络只读到一半 → `carrier` 是 `None`，**不是**
+        /// Generic-International。
+        ///
+        /// 另外三处 `.unwrap_or("Generic-International")` 在报告和路由里说得
+        /// 通；在一道闸上它意味着一张还没读出 IMSI 的卡被当成国际卡去过闸，
+        /// 而国际卡那一对在矩阵里是有规则的。
+        #[test]
+        fn a_half_read_home_network_is_not_silently_international() {
+            for home in [None, Some((460u16, 0u16))] {
+                let mut row = observed("1", home, Some(900));
+                if home.is_some() {
+                    row.home_mnc = None; // 只读到 mcc
+                }
+                let evidence = build_evidence(
+                    &[registered("1", Some("EC20"))],
+                    &gates(),
+                    &[row],
+                    &[],
+                    1_000,
+                );
+                assert!(
+                    evidence[0].carrier.is_none(),
+                    "归属网络没读全却给出了一个运营商"
+                );
+            }
+        }
+
+        /// USB 标识缺一半就是读不到 —— 不能只凭 vendor 猜。
+        #[test]
+        fn half_a_usb_identity_is_no_identity() {
+            for (vendor, product) in [(Some("2c7c"), None), (None, Some("0125")), (None, None)] {
+                let evidence = build_evidence(
+                    &[registered("1", Some("EC20"))],
+                    &gates(),
+                    &[observed("1", Some((460, 2)), Some(900))],
+                    &[candidate("1", vendor, product)],
+                    1_000,
+                );
+                assert!(evidence[0].usb.is_none(), "{vendor:?}/{product:?} 拼出了一个标识");
+            }
+            // 阴性对照：两半都在就要认出来。
+            let evidence = build_evidence(
+                &[registered("1", Some("EC20"))],
+                &gates(),
+                &[observed("1", Some((460, 2)), Some(900))],
+                &[candidate("1", Some("2c7c"), Some("0125"))],
+                1_000,
+            );
+            assert_eq!(
+                evidence[0].usb,
+                Some(edge_core::UsbIdentity::new(0x2c7c, 0x0125))
+            );
+        }
+
+        /// 观测年龄不会是负数 —— 时钟往回跳时，一行「来自未来」的观测
+        /// 不该看起来格外新鲜从而绕过新鲜度关口。
+        #[test]
+        fn an_observation_from_the_future_is_not_extra_fresh() {
+            let evidence = build_evidence(
+                &[registered("1", Some("EC20"))],
+                &gates(),
+                &[observed("1", Some((460, 2)), Some(9_000))],
+                &[],
+                1_000,
+            );
+            assert_eq!(evidence[0].observation_age_ms, Some(0));
+        }
+    }
+
     fn enqueue_device_state(
         outbox: &Arc<Mutex<DurableOutbox>>,
         matrix: &CapabilityMatrix,
@@ -7530,6 +8226,48 @@ mod linux {
             edge_core::Decision::Send => 0,
             edge_core::Decision::Repeat { repeats } => repeats,
         };
+        emit_alert(outbox, level, code, message, context, now, repeats);
+    }
+
+    /// 不过节流地发一条告警。
+    ///
+    /// 🔴 只给「**一次性**、且总量天然有界」的 code 用。加新调用点之前，
+    /// 先证明这两条。
+    ///
+    /// 节流的前提是「同一个故障会在循环里反复出现」，所以压掉几条不损失信息
+    /// ——下一次出现会把 `repeats` 带出来。追溯执行的解绑**不满足这个前提**：
+    /// 删掉那一行之后 `registered_modems()` 不再返回它，下一趟根本不会再看它
+    /// 第二眼，所以被压掉的那条**永远不会被补发**。
+    ///
+    /// 而且 `AlertThrottle::consider` 只按 code 分组。真实的压制场景很具体：
+    /// 一根已纳管模组被拔掉，discovery 行被剪掉，于是每 8 秒产生一次
+    /// `retro_hold`；这时另一根因为矩阵推送真的被解绑 —— 如果共用一个 code，
+    /// 那条 Critical 会被这条 Warning 压住 15 分钟，然后永久消失。
+    /// 所以两件事既分成不同的 code，最响的那个还要绕开节流。
+    ///
+    /// 量是有界的：一个 IMEI 一生最多被追溯解绑一次，总量不超过曾被纳管的
+    /// 物理模组数，而重新纳管是人的动作。
+    fn raise_alert_unthrottled(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        level: edge_core::AlertLevel,
+        code: &'static str,
+        message: impl Into<String>,
+        context: serde_json::Value,
+        now: i64,
+    ) {
+        emit_alert(outbox, level, code, message, context, now, 0);
+    }
+
+    /// 两条路径共用的落地部分。
+    fn emit_alert(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        level: edge_core::AlertLevel,
+        code: &'static str,
+        message: impl Into<String>,
+        context: serde_json::Value,
+        now: i64,
+        repeats: u32,
+    ) {
         let mut context = context;
         if repeats > 0 {
             if let Some(map) = context.as_object_mut() {
@@ -7579,11 +8317,20 @@ mod linux {
         executor: Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: Arc<Mutex<CapabilityMatrix>>,
         online: Arc<AtomicBool>,
+        ever_resumed: Arc<AtomicBool>,
     ) {
         let url = env("VODOGE_UPLINK_URL", "wss://43.108.53.126:444/v1/edge");
         let cert_dir = env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge");
         loop {
-            let result = uplink_once(&url, &cert_dir, &outbox, &executor, &live_matrix, &online);
+            let result = uplink_once(
+                &url,
+                &cert_dir,
+                &outbox,
+                &executor,
+                &live_matrix,
+                &online,
+                &ever_resumed,
+            );
             online.store(false, Ordering::Relaxed);
             match result {
                 Ok(()) => log_error("uplink closed, reconnecting"),
@@ -7600,6 +8347,7 @@ mod linux {
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         online: &Arc<AtomicBool>,
+        ever_resumed: &Arc<AtomicBool>,
     ) -> Result<(), String> {
         let tls = load_tls(Path::new(cert_dir))?;
         let mut socket = Socket::connect(url, tls).map_err(|e| e.to_string())?;
@@ -7631,6 +8379,8 @@ mod linux {
         let now = Instant::now();
         worker.start(&mut socket, now).map_err(|e| e.to_string())?;
         online.store(true, Ordering::Relaxed);
+        // 单调：一旦为真就不再翻回。见它创建处的注释。
+        ever_resumed.store(true, Ordering::Relaxed);
         loop {
             match socket.recv_envelope() {
                 Ok(envelope) => {

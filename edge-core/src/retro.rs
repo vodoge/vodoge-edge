@@ -53,6 +53,32 @@ impl MatrixAuthority {
         matches!(self, Self::Stored)
     }
 
+    /// 装进 `AtomicU8` 用。
+    ///
+    /// 用原子量而不是再加一把互斥锁，是有意的：这个值要被启动路径写、被
+    /// uplink 线程写、被 poll 线程读，而这个代码库对锁序有过一次血的教训
+    /// （见 `live_matrix` 那段「叶子锁」注释）。一个不参与任何锁序的原子量
+    /// 从根上没有这个问题。
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Stored => 0,
+            Self::BuiltinNoRow => 1,
+            Self::BuiltinUnparsed => 2,
+        }
+    }
+
+    /// 🔴 认不出的字节读作 `BuiltinUnparsed`，不是 `Stored`。
+    ///
+    /// 这个函数唯一可能出错的方式，是把一个坏值读成「可以删东西」。
+    /// 默认值必须落在拒绝那一边。
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Stored,
+            1 => Self::BuiltinNoRow,
+            _ => Self::BuiltinUnparsed,
+        }
+    }
+
     pub fn wire(self) -> &'static str {
         match self {
             Self::Stored => "stored",

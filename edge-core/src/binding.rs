@@ -66,6 +66,21 @@ pub enum RefusalKind {
 }
 
 impl BindRefusal {
+    /// 稳定的短标签：进告警的 context，也进退休记录的 `reason` 列。
+    ///
+    /// ⚠️ 是判别式的名字，**不含**任何随实例变化的东西（USB 标识、型号、
+    /// 运营商都不在里面）。那些进 `detail` 或 context 的其它字段。
+    /// 云端会按这个值分组统计，而一个把 IMEI 拼进去的标签会让每一次出现
+    /// 都成为独立的一类。
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::UnreadableUsbIdentity => "unreadable_usb_identity",
+            Self::NoStrategy(_) => "no_strategy",
+            Self::NotIdentifiedYet => "not_identified_yet",
+            Self::NeverMeasured { .. } => "never_measured",
+        }
+    }
+
     /// 这条拒绝是证据不足，还是一个真判定。
     pub fn kind(&self) -> RefusalKind {
         // ⚠️ 穷举，不要加 `_ => `。给 `BindRefusal` 添新变体时这里必须

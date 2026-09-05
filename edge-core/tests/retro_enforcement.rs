@@ -333,3 +333,26 @@ fn the_live_fleet_is_kept() {
         assert_eq!(stored(&ev), Enforcement::Keep, "{label} 会被追溯执行动到");
     }
 }
+
+/// 🔴 认不出的字节读作「不能删」，不是「可以删」。
+///
+/// `from_u8` 唯一可能出错的方式，是把一个坏值读成 `Stored`。
+/// 原子量会被三个线程碰，而一个错误的默认值在这里的代价是整队被解绑。
+#[test]
+fn an_unknown_authority_byte_falls_to_the_refusing_side() {
+    for byte in [3u8, 7, 255] {
+        assert!(
+            !MatrixAuthority::from_u8(byte).may_unbind(),
+            "字节 {byte} 被读成了可以删东西"
+        );
+    }
+    // 阴性对照：三个真值必须往返一致，否则上面那条可以靠「永远返回
+    // BuiltinUnparsed」通过，而那会让这个特性永远不生效。
+    for authority in [
+        MatrixAuthority::Stored,
+        MatrixAuthority::BuiltinNoRow,
+        MatrixAuthority::BuiltinUnparsed,
+    ] {
+        assert_eq!(MatrixAuthority::from_u8(authority.as_u8()), authority);
+    }
+}
