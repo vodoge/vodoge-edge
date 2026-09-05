@@ -841,6 +841,28 @@
         }
       }
     },
+    "CreateModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei", "family"],
+      "properties": {
+        "kind": { "const": "CreateModem" },
+        "modem_imei": {
+          "description": "The module to adopt without waiting for the agent to discover it. The C in this catalogue's CRUD that RegisterModem does not cover: that one refuses an IMEI the agent has not seen, which is right when the hardware is on the bus and wrong when somebody is building the register ahead of the machine arriving.",
+          "$ref": "#/$defs/Imei"
+        },
+        "family": {
+          "description": "Required, because nothing can infer it here. The adoption gates look up rules by (family, carrier profile) and a manual entry has no observation to derive the family from, so leaving it blank creates a record that can never pass.",
+          "type": "string",
+          "maxLength": 64
+        },
+        "note": {
+          "description": "Why it is being created. Optional, but this is the one moment somebody can still answer it.",
+          "type": ["string", "null"],
+          "maxLength": 256
+        }
+      }
+    },
     "UnregisterModemCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -1110,6 +1132,7 @@
       { "$ref": "#/$defs/ClaimModemCandidateCommand" },
       { "$ref": "#/$defs/RevokeModemCandidateCommand" },
       { "$ref": "#/$defs/RegisterModemCommand" },
+      { "$ref": "#/$defs/CreateModemCommand" },
       { "$ref": "#/$defs/UnregisterModemCommand" },
       { "$ref": "#/$defs/ReconfirmModemCommand" },
       { "$ref": "#/$defs/UpdateModemCommand" },

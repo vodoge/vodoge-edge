@@ -38,7 +38,7 @@ mod linux {
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, CandidateClaimResult, CandidateRevokeResult,
-        AdoptionBody, Inbox, ModemUpdateResult, PanelError, ReconfirmResult,
+        AdoptionBody, Inbox, ModemCreateResult, ModemUpdateResult, PanelError, ReconfirmResult,
         ProfileBody, ProfilesResult, RegistrationResult, ReportResult, RescanResult, ScanResult,
         ScannedOperatorBody, UsbResetResult, UssdResult,
     };
@@ -1913,6 +1913,30 @@ mod linux {
         /// 「闸仍然不通过」回成成功的样子。云端看到的必须和现场看到的是
         /// 同一句话，否则控制台上一个绿色的「已完成」会让人以为修好了，
         /// 而下一轮它又被标记。
+        /// 手工建一条纳管记录，走面板那同一份实现。
+        fn create_modem(
+            &mut self,
+            imei: &str,
+            family: &str,
+            note: Option<&str>,
+        ) -> Result<JsonValue, SendError> {
+            let note = note
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let result = Actions::create_modem(self, imei.to_string(), family.to_string(), note)
+                .map_err(action_failed)?;
+            // 🔴 `gates_passed` 必须回上去。这一条没有过闸（无从过起），
+            //    而控制台上一个笼统的绿勾会让运维以为它已经被验过了。
+            Ok(serde_json::json!({
+                "modem_imei": result.adoption.imei,
+                "family": result.adoption.family,
+                "registered_by": result.adoption.registered_by,
+                "note": result.adoption.note,
+                "gates_passed": result.gates_passed,
+            }))
+        }
+
         /// 改一条纳管记录的备注，走面板那同一份实现。
         fn update_modem(&mut self, imei: &str, note: Option<&str>) -> Result<JsonValue, SendError> {
             let note = note
@@ -3911,6 +3935,58 @@ mod linux {
             })
         }
 
+        fn create_modem(
+            &self,
+            imei: String,
+            family: String,
+            note: Option<String>,
+        ) -> Result<ModemCreateResult, PanelError> {
+            let imei = imei.trim().to_string();
+            let family = family.trim().to_string();
+            let store = self.store.0.lock().expect("store");
+            let managed = store
+                .registered_modems()
+                .map_err(PanelError::Store)?
+                .into_iter()
+                .map(|row| row.imei)
+                .collect::<Vec<_>>();
+            if let Some(reason) = manual_create_refusal(&imei, &family, &managed) {
+                return Err(PanelError::Action(reason));
+            }
+            let now = unix_ms();
+            store
+                .register_modem(&edge_store::RegisteredModem {
+                    imei: imei.clone(),
+                    registered_at: now,
+                    // 🔴 和 panel / cloud / migration 分开。这一条**没有过闸**，
+                    //    而事后没有任何别的地方能回答「这一根当初是怎么进来的」。
+                    registered_by: "manual".into(),
+                    // 手工建的时候没有观测，所以这两样填不出来。硬件真出现的
+                    // 那一轮 poll 循环会把它们补上。
+                    usb_device: None,
+                    family: Some(family.clone()),
+                    note: note.clone(),
+                })
+                .map_err(PanelError::Store)?;
+            drop(store);
+            log_line(format!(
+                "modem {imei} created manually as {family} (gates not evaluated: never observed)"
+            ));
+            Ok(ModemCreateResult {
+                adoption: AdoptionBody {
+                    imei,
+                    registered_at: now,
+                    registered_by: "manual".into(),
+                    family: Some(family),
+                    usb_device: None,
+                    note,
+                },
+                // 恒 false，而且要画出来：没有观测就没有 USB 身份也没有归属网，
+                // 两道闸无从判起。硬件出现的那一轮才第一次被真正判定。
+                gates_passed: false,
+            })
+        }
+
         fn adoptions(&self) -> Result<Vec<AdoptionBody>, PanelError> {
             Ok(self
                 .store
@@ -5529,6 +5605,51 @@ mod linux {
                 ),
             },
         }
+    }
+
+    /// 手工建一条纳管记录之前的校验。CRUD 里的 C —— 不经发现的那一条。
+    ///
+    /// 「自动发现、手动纳管」那条路要求硬件此刻就在总线上。这一条不要求：
+    /// 棒子插在一台还没接进来的机器上，或者运维手里拿着一张写好 IMEI 的
+    /// 清单要先把册子建起来，都是现场真会发生的事。
+    ///
+    /// 🔴 代价是**没有观测可以对照**，所以这里的校验比发现那条路严：
+    ///
+    /// ① IMEI 必须是 15 位数字。发现那条路不需要这个校验，因为 IMEI 是模组
+    ///    自己报的；这里打错一位，册子里就凭空多出一根永远不会出现的模组，
+    ///    而追溯执行会一直为它告警 —— 那条告警指向的硬件根本不存在，没人能
+    ///    查出它是个笔误。
+    ///
+    /// ② 型号必填。闸 2 按 (型号 × 运营商) 查规则，而这一步没有观测能推出
+    ///    型号；留空就等于建了一条永远过不了闸的记录。
+    ///
+    /// ③ 已在册的拒。这是 C 不是 U —— 拿 C 去覆盖一条已有记录会把
+    ///    registered_at / registered_by 冲成今天，正是 0015 建这两列要保住的。
+    ///
+    /// 建出来的记录 `registered_by = "manual"`，和发现来的分得开：它**没有
+    /// 过闸**（无从过起），而追溯执行对没观测过的那一根返回
+    /// `Hold(NeverObserved)` —— 只告警不解绑。硬件真出现的那一轮它才第一次
+    /// 被真正判定，那时两道闸照常生效。
+    fn manual_create_refusal(imei: &str, family: &str, managed: &[String]) -> Option<String> {
+        let imei = imei.trim();
+        if imei.len() != 15 || !imei.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some(format!(
+                "{imei:?} 不是一个 15 位的 IMEI —— 手工建这条路没有观测能纠正打错的位"
+            ));
+        }
+        if family.trim().is_empty() {
+            return Some(
+                "型号是必填的：闸按 (型号 × 运营商) 查规则，而手工建这一步没有观测能推出它"
+                    .into(),
+            );
+        }
+        if managed.iter().any(|held| held == imei) {
+            return Some(format!(
+                "{imei} 已经在册了。要改它的备注请用「保存备注」，不要用新建 —— \
+                 新建会把纳管时间和纳管人冲成今天"
+            ));
+        }
+        None
     }
 
     /// 撤销一个串口的探测批准之前，先问这一步安不安全。
@@ -8724,6 +8845,58 @@ mod linux {
                 outcome.message.contains("仍"),
                 "没说清闸还是不通过：{}",
                 outcome.message
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod manual_create_tests {
+        use super::manual_create_refusal;
+
+        /// 手工建一根这台机器**从没见过**的模组 —— 这正是这个功能存在的理由。
+        ///
+        /// 现场常见的情形：棒子插在一台还没接进来的机器上、或者运维手里拿着
+        /// 一张写好 IMEI 的清单要先把册子建起来。发现-再纳管那条路要求硬件
+        /// 此刻就在总线上，这一条不要求。
+        #[test]
+        fn a_module_this_agent_has_never_seen_can_be_created() {
+            assert_eq!(manual_create_refusal("867018069509705", "EC20", &[]), None);
+        }
+
+        /// IMEI 必须是 15 位数字。
+        ///
+        /// 🔴 不是洁癖：这一条**没有观测可以对照**，打错一位就在册子里凭空
+        /// 多出一根永远不会出现的模组，而追溯执行会一直为它告警 —— 那条告警
+        /// 指向的硬件根本不存在，没人能查出它是个笔误。发现那条路不需要这个
+        /// 校验，因为 IMEI 是模组自己报的。
+        #[test]
+        fn a_typo_in_the_imei_is_refused_because_nothing_can_catch_it_later() {
+            for bad in ["86701806950970", "8670180695097055", "86701806950970a", "", " "] {
+                assert!(
+                    manual_create_refusal(bad, "EC20", &[]).is_some(),
+                    "{bad:?} 被放过了"
+                );
+            }
+        }
+
+        /// 型号是必填的：闸 2 按 (型号 × 运营商) 查规则，而手工建这一步
+        /// 没有观测能推出型号。留空就等于建了一根永远过不了闸的记录。
+        #[test]
+        fn the_family_is_required_because_nothing_can_infer_it() {
+            assert!(manual_create_refusal("867018069509705", "", &[]).is_some());
+            assert!(manual_create_refusal("867018069509705", "   ", &[]).is_some());
+        }
+
+        /// 已经在册的要拒。这是 C 不是 U —— 用 C 去覆盖一条已有记录，会把
+        /// registered_at / registered_by 冲成今天，而那正是 0015 要保住的。
+        #[test]
+        fn creating_one_that_is_already_adopted_is_refused_not_silently_replaced() {
+            let held = ["867018069509705".to_string()];
+            let refusal = manual_create_refusal("867018069509705", "EC20", &held)
+                .expect("已在册的必须拒绝");
+            assert!(
+                refusal.contains("改备注") || refusal.contains("已经在册"),
+                "拒绝的话没告诉运维该用哪条路：{refusal}"
             );
         }
     }

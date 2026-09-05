@@ -15,7 +15,7 @@ use edge_panel_api::{
     AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
     MessageBody, MessagesBody, ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody,
     RescanReceipt, ResetBody, RestartBody, RestartReceipt, RetirementBody, SendBody, SendReceipt,
-    ModemUpdateBody, RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody,
+    ModemCreateBody, ModemUpdateBody, RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody,
     UssdCancelReceipt,
 };
 
@@ -29,7 +29,7 @@ use edge_panel_api::{
 /// ergonomics for no gain — there is still exactly one definition.
 pub use edge_panel_api::{
     AtResult, CandidateClaimResult, CandidateRevokeResult, ProfileBody, ProfilesResult,
-    AdoptionBody, ModemUpdateResult, ReconfirmResult,
+    AdoptionBody, ModemCreateResult, ModemUpdateResult, ReconfirmResult,
     RegistrationResult, ReportResult, RescanResult, ScanResult, ScannedOperatorBody,
     UsbResetResult, UssdResult,
 };
@@ -175,6 +175,20 @@ pub trait Actions: Send + Sync {
     /// Persist an operator approval for one already discovered serial
     /// endpoint. Implementations must re-check the live endpoint rather than
     /// accepting a free-form port name from the panel.
+    /// 手工建一条纳管记录。CRUD 里的 C —— 不经发现的那一条。
+    ///
+    /// 发现那条路要求硬件此刻在总线上；这一条不要求，代价是没有观测可以
+    /// 对照，所以校验更严（IMEI 位数、型号必填），而且建出来的记录**没有
+    /// 过闸**：硬件真出现的那一轮才第一次被判定。
+    fn create_modem(
+        &self,
+        _imei: String,
+        _family: String,
+        _note: Option<String>,
+    ) -> Result<ModemCreateResult, PanelError> {
+        Err(PanelError::Action("manual modem creation is not configured".into()))
+    }
+
     /// 每一根在册模组的纳管记录。CRUD 里的 R —— 那个一直缺的一半。
     ///
     /// `list_modems` 回的是这一轮的观测；这个回的是当初的决定。
@@ -463,6 +477,7 @@ fn build_router_with_blocks(
         .route("/api/discoveries/claim", post(claim_modem_candidate))
         .route("/api/discoveries/revoke", post(revoke_modem_candidate))
         .route("/api/modems/reconfirm", post(reconfirm_modem))
+        .route("/api/modems/create", post(create_modem))
         .route("/api/modems/update", post(update_modem))
         .route("/api/modems/register", post(register_modem))
         .route("/api/modems/unregister", post(unregister_modem))
@@ -663,6 +678,29 @@ async fn claim_modem_candidate(
     };
     match actions.claim_modem_candidate(candidate_key) {
         Ok(result) => Json(ClaimReceipt::claimed(result.candidate_key)).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn create_modem(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ModemCreateBody>,
+) -> Response {
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "manual modem creation is not configured",
+        );
+    };
+    let note = body
+        .note
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if note.as_deref().is_some_and(|value| value.chars().count() > 256) {
+        return json_error(StatusCode::BAD_REQUEST, "note must be 256 characters or fewer");
+    }
+    match actions.create_modem(body.imei, body.family, note) {
+        Ok(result) => Json(result).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

@@ -238,6 +238,28 @@ pub trait SendPort {
         Err(unsupported("unregister_modem"))
     }
 
+    /// Adopt a module the agent has never seen. The C that `register_modem`
+    /// does not cover.
+    ///
+    /// That one refuses an IMEI nothing has observed, which is right when the
+    /// hardware is on the bus and wrong when somebody is building the register
+    /// ahead of the machine arriving. The cost is that no observation exists to
+    /// check the input against, so the family is required and the IMEI is
+    /// validated here rather than taken on trust.
+    ///
+    /// The record it writes has NOT passed the adoption gates -- there is
+    /// nothing to run them against. Retroactive enforcement answers
+    /// `Hold(NeverObserved)` for it: alerted, never unbound. The first real
+    /// verdict happens on the pass where the hardware finally appears.
+    fn create_modem(
+        &mut self,
+        _imei: &str,
+        _family: &str,
+        _note: Option<&str>,
+    ) -> Result<JsonValue, SendError> {
+        Err(unsupported("create_modem"))
+    }
+
     /// Edit an adopted module's record. The U in this catalogue's CRUD.
     ///
     /// Only the note moves. The adoption date and who made the decision are
@@ -1185,6 +1207,18 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::UnregisterModem { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.unregister_modem(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::CreateModem {
+                modem_imei,
+                family,
+                note,
+            } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.create_modem(modem_imei, family, note.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

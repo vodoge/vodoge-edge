@@ -492,6 +492,19 @@ pub struct RegisterModemCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CreateModemCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "family")]
+    pub family: String,
+    #[serde(rename = "note", default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnregisterModemCommand {
     #[serde(rename = "kind")]
     pub kind: String,
@@ -1198,6 +1211,15 @@ pub enum Command {
     RegisterModem {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
+        #[serde(rename = "note")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    CreateModem {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "family")]
+        family: String,
         #[serde(rename = "note")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,

@@ -288,6 +288,35 @@ pub struct AdoptionBody {
     pub note: Option<String>,
 }
 
+/// `POST /api/modems/create` 的请求体 —— 手工建一条纳管记录。
+///
+/// 「自动发现、手动纳管」那条路要求硬件此刻就在总线上；这一条不要求。
+/// 现场真会发生的两种情形：棒子插在一台还没接进来的机器上，或者运维手里
+/// 拿着一张写好 IMEI 的清单要先把册子建起来。
+#[derive(Serialize, Deserialize)]
+pub struct ModemCreateBody {
+    /// 15 位。这条路没有观测能纠正打错的位，所以校验比发现那条严。
+    pub imei: String,
+    /// 必填 —— 闸按 (型号 × 运营商) 查规则，而这一步没有观测能推出它。
+    pub family: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// `POST /api/modems/create` 的应答。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModemCreateResult {
+    pub adoption: AdoptionBody,
+    /// 🔴 恒为 false，而且必须画出来。
+    ///
+    /// 手工建的这一条**没有过闸** —— 无从过起，没有观测就没有 USB 身份也
+    /// 没有归属网。它在硬件真出现的那一轮才第一次被真正判定，在那之前
+    /// 追溯执行对它返回 `Hold(NeverObserved)`：只告警，不解绑。
+    ///
+    /// 回一个笼统的 ok 会让运维以为这一根已经被验过了。
+    pub gates_passed: bool,
+}
+
 /// `POST /api/modems/update` 的请求体。
 #[derive(Serialize, Deserialize)]
 pub struct ModemUpdateBody {

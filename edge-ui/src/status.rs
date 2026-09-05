@@ -418,6 +418,73 @@ const TRACE_COLS_WIDE: usize = crate::trace::TRACE_KEEP;
 ///
 /// 现在放舰队总览：三根模组的轨迹**对齐**铺开一小时。轮换是三根之间的相位
 /// 关系，单看一根看不出来；这块地方够宽，正好画得下。
+/// 手工建一条纳管记录。CRUD 里的 C —— 不经发现的那一条。
+///
+/// 「确认纳入探测 → 纳管」那条路要求硬件此刻就在总线上。这一条不要求：
+/// 棒子插在一台还没接进来的机器上、或者手里拿着一张写好 IMEI 的清单要先
+/// 把册子建起来，都是现场真会发生的事。
+///
+/// 🔴 屏幕上必须说清它**没有过闸** —— 没有观测就没有 USB 身份也没有归属网，
+/// 两道闸无从判起。硬件真出现的那一轮它才第一次被判定，在那之前追溯执行
+/// 对它只告警不解绑。
+#[component]
+fn CreateModem(state: StatusState) -> impl IntoView {
+    let imei = RwSignal::new(String::new());
+    let family = RwSignal::new(String::new());
+    let note = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let said = RwSignal::new(None::<String>);
+    view! {
+        <div class="vd-adoption">
+            <Caption1>"手工建一条 · 用于硬件还没接进来、先把册子建起来"</Caption1>
+            <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
+                <Input value=imei placeholder="IMEI（15 位）" />
+                <Input value=family placeholder="型号，例如 EC20" />
+                <Input value=note placeholder="为什么建它（可空）" />
+                <Button
+                    disabled=busy
+                    on_click=move |_| {
+                        let body = edge_panel_api::ModemCreateBody {
+                            imei: imei.get_untracked().trim().to_string(),
+                            family: family.get_untracked().trim().to_string(),
+                            note: {
+                                let value = note.get_untracked().trim().to_string();
+                                (!value.is_empty()).then_some(value)
+                            },
+                        };
+                        busy.set(true);
+                        leptos::task::spawn_local(async move {
+                            let got: Load<edge_panel_api::ModemCreateResult> =
+                                crate::api::post("/api/modems/create", &body, "手工新建").await;
+                            match got {
+                                Load::Ready(result) => {
+                                    // 建成了也要说清它还没过闸 —— 一句「已建立」
+                                    // 会让人以为这一根已经被验过。
+                                    said.set(Some(format!(
+                                        "已建立 {}（{}）· 尚未过闸：硬件出现的那一轮才第一次判定",
+                                        result.adoption.imei,
+                                        result.adoption.family.unwrap_or_default(),
+                                    )));
+                                    imei.set(String::new());
+                                    family.set(String::new());
+                                    note.set(String::new());
+                                    poll(state).await;
+                                }
+                                Load::Failed(why) => said.set(Some(format!("建不了 · {why}"))),
+                                Load::Loading => {}
+                            }
+                            busy.set(false);
+                        });
+                    }
+                >
+                    {move || if busy.get() { "建立中…" } else { "手工建立" }}
+                </Button>
+            </Flex>
+            {move || said.get().map(|text| view! { <span class="vd-faint">{text}</span> })}
+        </div>
+    }
+}
+
 /// 一条纳管记录：履历只读，备注可改。
 ///
 /// 这是 CRUD 里 U 的入口，也是 R 的后半 —— 前半（在册的有哪几根）一直有，
@@ -552,19 +619,22 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                     // 放在这里而不是模组卡上：整张卡是点击选中的，卡里塞一个输入框会让
                     // 「点一下选中」和「点一下改字」抢同一次点击。
                     {
+                        // 🔴 这一整块**不**按「有没有纳管记录」显示。
+                        //
+                        // 手工新建那个表单恰恰在一根都没有的时候最需要 ——
+                        // 一台刚装好、还没纳管过任何东西的机器，如果表单藏在
+                        // 「有记录才显示」的分支里，就永远建不出第一条。
                         let adoptions = body.adoptions.clone();
-                        (!adoptions.is_empty())
-                            .then(|| {
-                                view! {
-                                    <div class="vd-adoptions">
-                                        <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
-                                        {adoptions
-                                            .into_iter()
-                                            .map(|row| view! { <AdoptionRow row=row state=state /> })
-                                            .collect_view()}
-                                    </div>
-                                }
-                            })
+                        view! {
+                            <div class="vd-adoptions">
+                                <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
+                                <CreateModem state=state />
+                                {adoptions
+                                    .into_iter()
+                                    .map(|row| view! { <AdoptionRow row=row state=state /> })
+                                    .collect_view()}
+                            </div>
+                        }
                     }
                     <div class="vd-fleetrows">
                         {body
