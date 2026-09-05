@@ -4721,20 +4721,7 @@ mod linux {
         // was never about.
         let serial_candidates: Vec<_> = edge_modem::at_port_candidates()
             .into_iter()
-            .filter(|candidate| {
-                match (
-                    candidate.vendor_id.as_deref(),
-                    candidate.product_id.as_deref(),
-                ) {
-                    (Some(vendor), Some(product)) => {
-                        match edge_core::UsbIdentity::parse(vendor, product) {
-                            Some(identity) => strategy_registry().drives(identity),
-                            None => true,
-                        }
-                    }
-                    _ => true,
-                }
-            })
+            .filter(candidate_is_driven)
             .collect();
         let automatic_serial_usb: std::collections::BTreeSet<String> = serial_candidates
             .iter()
@@ -4854,10 +4841,20 @@ mod linux {
         // one `poll FAIL` line behind if it left anything at all. That is the
         // shape of the usbnet incident on this bench, and it is also what a
         // brand new module looks like before anybody has set it up.
-        let mut at_paths = edge_modem::at_control_ports();
-        at_paths.extend(approved_manual_ports);
-        at_paths.sort();
-        at_paths.dedup();
+        // 🔴 从**已过滤**的候选派生，不是 `at_control_ports()`。
+        //
+        // 那个函数是同一个选择器套在这台机器上的**全部**候选上，而下面这个
+        // 循环会真的打开每一个返回值并往里写 AT。`edge_core::strategies` 里
+        // 那条注释说的正是这种硬件——两根高通 MSM8916 棒子，能被枚举、
+        // 永远认不出，把候选列表刷满几个小时——它的结尾是
+        // 「Nothing drives them, so **nothing should open them**」。
+        //
+        // QMI 那半边早就在开之前过闸了（`driven_by_a_strategy`）。这半边没有，
+        // 而这半边才是会往陌生串口写字节的那一半。
+        //
+        // ⚠️ 手工批准的口不受这一闸约束，这是对的：运维明确点过头，
+        //    而候选过滤本来就是为「没人点过头的东西别碰」而设的。
+        let at_paths = at_paths_to_probe(&serial_candidates, approved_manual_ports);
         for at_path in at_paths {
             let usb = edge_modem::usb_device_of_at(&at_path);
             if let Some(usb) = usb.as_ref() {
@@ -7634,6 +7631,180 @@ mod linux {
             }
         }
         (judged, holds)
+    }
+
+    /// 这一趟要打开并写 AT 的那组串口。
+    ///
+    /// 🔴 从**已过滤**的候选派生，不是 `edge_modem::at_control_ports()`。
+    ///
+    /// 那个函数是同一个选择器套在这台机器上的**全部**候选上，而调用方会真的
+    /// 打开每一个返回值并往里写 AT。`edge_core::strategies` 里那条注释说的
+    /// 正是这种硬件 —— 两根高通 MSM8916 棒子，能被枚举、永远认不出，
+    /// 把候选列表刷满几个小时，在日志里和真故障分不开 —— 它的结尾是
+    /// 「Nothing drives them, so **nothing should open them**」。
+    ///
+    /// QMI 那半边早就在开之前过闸了（`driven_by_a_strategy`）。这半边没有，
+    /// 而这半边才是会往陌生串口写字节的那一半。
+    ///
+    /// ⚠️ 手工批准的口**不**受这一闸约束，这是对的：运维明确点过头，
+    ///    而这道闸本来就是为「没人点过头的东西别碰」而设的。
+    fn at_paths_to_probe(
+        candidates: &[edge_modem::AtPortCandidate],
+        approved_manual: Vec<PathBuf>,
+    ) -> Vec<PathBuf> {
+        let driven: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate_is_driven(candidate))
+            .cloned()
+            .collect();
+        let mut paths = edge_modem::select_control_ports(driven);
+        paths.extend(approved_manual);
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// 这个串口候选，本 build 有没有策略驱动它背后的硬件。
+    ///
+    /// 判据只看 USB 标识，因为那是开口之前唯一能知道的东西。
+    ///
+    /// ⚠️ **没有** USB 标识的一律保留，这是有意的，不是漏网：
+    /// 平台直挂的高速串口本来就没有 vid/pid，在这里拒掉它会丢掉这道闸从来
+    /// 就不针对的硬件。同理，vid/pid 存在却解析不出十六进制的也保留 ——
+    /// 那是 sysfs 给了个不认识的形状，不是「这块硬件我们不支持」。
+    ///
+    /// 🔴 和 `bind_gates` 的 `UnreadableUsbIdentity` 方向相反，而两边都对：
+    /// 那里在决定**要不要纳管**，证据不足就拒；这里在决定**要不要看一眼**，
+    /// 证据不足就看。看一眼的代价是一次 AT 探测，拒绝的代价是一块插着的
+    /// 硬件永远不出现在候选列表里。
+    fn candidate_is_driven(candidate: &edge_modem::AtPortCandidate) -> bool {
+        match (
+            candidate.vendor_id.as_deref(),
+            candidate.product_id.as_deref(),
+        ) {
+            (Some(vendor), Some(product)) => match edge_core::UsbIdentity::parse(vendor, product) {
+                Some(identity) => strategy_registry().drives(identity),
+                None => true,
+            },
+            _ => true,
+        }
+    }
+
+    #[cfg(test)]
+    mod serial_gate_tests {
+        use super::candidate_is_driven;
+        use edge_modem::{AtPortCandidate, AtPortKind, AtProbePolicy};
+        use std::path::PathBuf;
+
+        fn candidate(path: &str, usb: &str, vid: Option<&str>, pid: Option<&str>) -> AtPortCandidate {
+            AtPortCandidate {
+                path: PathBuf::from(path),
+                kind: AtPortKind::Usb,
+                usb_device: Some(usb.to_owned()),
+                interface: Some("1.2".into()),
+                interface_label: None,
+                driver: Some("option".into()),
+                vendor_id: vid.map(str::to_owned),
+                product_id: pid.map(str::to_owned),
+                policy: AtProbePolicy::Automatic,
+            }
+        }
+
+        /// 🔴 没有策略驱动的硬件，一个口都不该被打开。
+        ///
+        /// `edge_core::strategies` 里那条注释说的正是这种：两根高通 MSM8916
+        /// 棒子，能被枚举、永远认不出，把候选列表刷满几个小时，
+        /// 在日志里和真故障分不开。它的结尾是「Nothing drives them,
+        /// so nothing should open them」。
+        #[test]
+        fn hardware_no_strategy_drives_is_never_opened() {
+            assert!(!candidate_is_driven(&candidate(
+                "/dev/ttyUSB9",
+                "1-1.5",
+                Some("05c6"),
+                Some("90b4")
+            )));
+        }
+
+        /// 阴性对照：台架上真在跑的两种硬件都要通过。
+        ///
+        /// 没有它，上面那条可以靠「永远返回 false」通过 —— 而那会让整台机器
+        /// 的 AT 枚举当场停摆，包括只走 AT 的那根 EC200U。
+        #[test]
+        fn the_hardware_on_this_bench_still_gets_opened() {
+            for (vid, pid, what) in [
+                ("2c7c", "0125", "EC20 / EC25-CN / EG25-G"),
+                ("2c7c", "0901", "EC200U-CN"),
+            ] {
+                assert!(
+                    candidate_is_driven(&candidate("/dev/ttyUSB0", "1-1.2", Some(vid), Some(pid))),
+                    "{what} 被挡在外面了"
+                );
+            }
+        }
+
+        /// ⚠️ 没有 USB 标识的一律保留 —— 平台直挂的高速串口本来就没有
+        /// vid/pid，在这里拒掉它会丢掉这道闸从来就不针对的硬件。
+        #[test]
+        fn a_port_with_no_usb_identity_is_kept() {
+            let mut platform = candidate("/dev/ttyHS0", "-", None, None);
+            platform.usb_device = None;
+            platform.kind = AtPortKind::HighSpeed;
+            assert!(candidate_is_driven(&platform));
+        }
+
+        /// vid/pid 在、但解析不出十六进制的也保留：那是 sysfs 给了个不认识的
+        /// 形状，不是「这块硬件我们不支持」。
+        ///
+        /// 🔴 和 `bind_gates` 的 `UnreadableUsbIdentity` 方向相反，而两边都对：
+        /// 那里在决定要不要**纳管**，证据不足就拒；这里在决定要不要**看一眼**，
+        /// 证据不足就看。看一眼的代价是一次 AT 探测；拒绝的代价是一块插着的
+        /// 硬件永远不出现在候选列表里。
+        #[test]
+        fn an_unparseable_identity_is_kept_not_refused() {
+            assert!(candidate_is_driven(&candidate(
+                "/dev/ttyUSB1",
+                "1-1.3",
+                Some("zzzz"),
+                Some("0125")
+            )));
+        }
+
+        /// 🔴 会被打开的那组路径里，不该有未被驱动的口。
+        ///
+        /// 这条钉的是真正的行为改动。此前 `at_paths` 取的是
+        /// `at_control_ports()` —— 同一个选择器套在**全部**候选上 ——
+        /// 于是那根高通棒子每 8 秒被打开并写一次 AT。
+        #[test]
+        fn the_ports_that_get_opened_exclude_undriven_hardware() {
+            let all = vec![
+                candidate("/dev/ttyUSB0", "1-1.2", Some("2c7c"), Some("0125")),
+                candidate("/dev/ttyUSB9", "1-1.5", Some("05c6"), Some("90b4")),
+            ];
+            // 前提：不过滤的话这两个口都会被打开。前提不成立，
+            // 下面那句就不是在测过滤。
+            assert_eq!(edge_modem::select_control_ports(all.clone()).len(), 2);
+
+            assert_eq!(
+                super::at_paths_to_probe(&all, Vec::new()),
+                vec![PathBuf::from("/dev/ttyUSB0")]
+            );
+        }
+
+        /// ⚠️ 手工批准的口不受这一闸约束 —— 运维明确点过头了。
+        ///
+        /// 没有这条，上面那条可以靠「把手工批准的也一起过滤掉」通过，
+        /// 而那会让「批准」这个按钮变成一个不起作用的按钮。
+        #[test]
+        fn an_operator_approved_port_is_probed_even_if_nothing_drives_it() {
+            let undriven = vec![candidate("/dev/ttyUSB9", "1-1.5", Some("05c6"), Some("90b4"))];
+            let approved = vec![PathBuf::from("/dev/ttyUSB9")];
+            assert_eq!(
+                super::at_paths_to_probe(&undriven, approved),
+                vec![PathBuf::from("/dev/ttyUSB9")],
+                "运维批准过的口被自动过滤挡住了，那个按钮就成了摆设"
+            );
+        }
     }
 
     /// 纯判定，不碰 store。

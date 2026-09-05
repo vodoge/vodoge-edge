@@ -611,7 +611,15 @@ fn candidate_from_parts(
 /// Select exactly one automatic control port per USB device. The rank is
 /// deliberately based on sysfs meaning rather than tty number: tty numbers are
 /// recycled every time a USB serial driver rebinds.
-fn select_control_ports(candidates: Vec<AtPortCandidate>) -> Vec<PathBuf> {
+///
+/// Public so a caller can **filter the candidates first**. `at_control_ports`
+/// is this function over every candidate on the machine, and the poll loop
+/// must not use it: it opens and writes AT to whatever it returns, including
+/// hardware no strategy in this build drives. `edge_core::strategies` states
+/// the rule for exactly that case -- two Qualcomm MSM8916 sticks that answered
+/// just enough to enumerate and never enough to be identified -- and it ends
+/// "Nothing drives them, so nothing should open them."
+pub fn select_control_ports(candidates: Vec<AtPortCandidate>) -> Vec<PathBuf> {
     let mut usb_ports = BTreeMap::<String, AtPortCandidate>::new();
     let mut non_usb_ports = Vec::new();
     for candidate in candidates

@@ -53,6 +53,7 @@ pub use at_inbox::{
 pub use at_sms::{send_sms as send_sms_over_at, AtSendOutcome, AtSmsError, SEND_TIMEOUT};
 pub use at::{
     at_control_ports, at_port_candidates, at_port_for_qmi, first_bare_digits,
+    select_control_ports,
     handle_lease_request, lease_socket_path, usb_device_of_at, ArbiterWaiting, AtError,
     AtExchange, AtLease, AtPort, AtPortCandidate, AtPortKind, AtProbePolicy, LeaseFailure,
     ModemArbiter, ModemLease, ModemPriority, AT_CONTROL_INTERFACE, DEFAULT_LEASE_SOCKET,
