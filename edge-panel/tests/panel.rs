@@ -323,6 +323,9 @@ async fn every_endpoint_the_panel_calls_is_registered_on_the_router() {
         // 重新确认一根被闸标记的模组：重跑一遍闸，过了清标记，
         // 没过就把隔离期倒计时拨回起点。不碰纳管履历。
         "/api/modems/reconfirm",
+        // 改一条纳管记录的备注 —— CRUD 里的 U。
+        // 只有备注可改；registered_at / registered_by 是履历不是字段。
+        "/api/modems/update",
     ];
     for endpoint in KNOWN {
         assert!(

@@ -281,9 +281,20 @@ async fn claim(state: StatusState, claims: ClaimState, key: String) {
     }
 }
 
-async fn adopt(state: StatusState, claims: ClaimState, key: String, imei: String) {
+async fn adopt(
+    state: StatusState,
+    claims: ClaimState,
+    key: String,
+    imei: String,
+    note: Option<String>,
+) {
     claims.set(&key, ClaimNote::Pending);
-    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
+    // 「为什么纳管这一根」在按下按钮的那一刻记下来，是唯一还答得上的时刻。
+    // 事后再问，答案就只在某个人的记忆里 —— 0015 建 note 这一列正是为此。
+    let body = edge_panel_api::RegistrationBody {
+        imei: imei.clone(),
+        note,
+    };
     let got: Load<RegistrationResult> = api::post("/api/modems/register", &body, "纳管").await;
     match got {
         Load::Ready(result) => {
@@ -412,6 +423,9 @@ fn Row(
     // 插在哪」时用的东西。原版显示的就是它（`d.usb_device || candidateKey(d)`），
     // 搬迁时我错换成了控制口。控制口仍然画出来，只是降为次要信息。
     let key_for_revoke = key.clone();
+    // 每一行自己的备注草稿。放在行上而不是提上去：同时有好几个候选待纳管时，
+    // 一个共享的输入框会把上一行打了一半的理由带到下一行去。
+    let adopt_note = RwSignal::new(String::new());
     let identity = c
         .usb_device
         .clone()
@@ -560,6 +574,17 @@ fn Row(
                     }}
                     {adoptable
                         .then(|| {
+                            view! {
+                                // 纳管时顺手写下理由。不是必填 —— 逼着填会让人
+                                // 打一个句号了事，那比空着更坏。
+                                <Input
+                                    value=adopt_note
+                                    placeholder="为什么纳管它（可空）"
+                                />
+                            }
+                        })}
+                    {adoptable
+                        .then(|| {
                             let key = key.clone();
                             let imei = imei.clone();
                             view! {
@@ -569,8 +594,10 @@ fn Row(
                                     on_click=move |_| {
                                         let key = key.clone();
                                         let imei = imei.clone();
+                                        let note = adopt_note.get_untracked().trim().to_string();
+                                        let note = (!note.is_empty()).then_some(note);
                                         leptos::task::spawn_local(async move {
-                                            adopt(state, claims, key, imei).await
+                                            adopt(state, claims, key, imei, note).await
                                         });
                                     }
                                 >

@@ -227,7 +227,7 @@ async fn unregister(
         return;
     }
     state.busy.set(true);
-    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
+    let body = edge_panel_api::RegistrationBody { imei: imei.clone(), note: None };
     let got: Load<RegistrationResult> =
         api::post("/api/modems/unregister", &body, "取消纳管").await;
     state.busy.set(false);
@@ -470,6 +470,7 @@ mod tests {
             discoveries: Vec::new(),
             retirements: Vec::new(),
             retro_enforcing: false,
+            adoptions: Vec::new(),
         };
         assert!(manageable(&body, "867018069509705"));
     }

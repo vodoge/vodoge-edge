@@ -1506,6 +1506,30 @@ impl Store {
         Ok(())
     }
 
+    /// 改一条纳管记录的备注。CRUD 里的 U。
+    ///
+    /// 🔴 只动 note。`registered_at` / `registered_by` 是履历，不是可编辑字段
+    /// —— 0015 建它们的理由是「为什么这一根在被管」，那是别人对一个没人记得
+    /// 添加过的模组问的第一个问题。在此之前改备注唯一的办法是取消纳管再纳管，
+    /// 而那条路恰好把这两列冲成今天。
+    ///
+    /// `None` 是一次合法的编辑（清空备注），不是「没提供所以别动」。想表达
+    /// 「别动」的调用方不要调这个函数。
+    ///
+    /// 返回是否真的改到了一行。改一条不在册的要回 `false` 而不是静默成功，
+    /// 否则云端会把「这根不在册」回成「已更新」。
+    pub fn update_registered_modem(
+        &self,
+        imei: &str,
+        note: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE registered_modems SET note = ?2 WHERE imei = ?1",
+            params![imei, note],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// 人主动重新确认了一次，而闸仍然不通过：把倒计时拨回起点，标记留着。
     ///
     /// 🔴 和 `mark_gate_failure` 的语义**正好相反**，这是有意的。那一条用

@@ -282,6 +282,18 @@
       }
       .vd-cand-cell { min-width: 0; word-break: break-word; }
 
+        /* ── 纳管记录 ──────────────────────────────────────────────────
+           每条两行：上面是履历（只读），下面是备注输入框 + 保存。
+           和候选行同一套密度，因为它们讲的是同一件事的两个阶段。 */
+        .vd-adoptions { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+        .vd-adoption {
+          display: flex; flex-direction: column; gap: 3px;
+          padding: 4px 6px;
+          border: 1px solid var(--colorNeutralStroke2);
+          border-radius: 4px;
+          font-size: 11px;
+        }
+
       /* ── 日志行 ──────────────────────────────────────────────────────
          26rem 塞不下四列表格，所以两行一条：短的元信息一行，行文独占一行。
          左边那条色带是给「竖着扫一眼只找红的」用的。 */

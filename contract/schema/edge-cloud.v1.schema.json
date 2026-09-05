@@ -743,6 +743,21 @@
             { "type": "null" }
           ]
         },
+        "adoption_note": {
+          "description": "Why this module is being managed, as somebody wrote it down when adopting it or edited it later. Absent means nobody has written one. Carried up because the answer lived only in the agent's SQLite: the cloud could adopt a module with a note and then had no way to read it back, and the console had no way to show or change it.",
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "adopted_at": {
+          "description": "When the module was adopted, in milliseconds since the epoch. Provenance, not an editable field: the only way to move it is to unregister and re-adopt, which is what UpdateModem exists to avoid.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "adopted_by": {
+          "description": "Who made the decision -- `panel`, `cloud`, or `migration`. Says who, not where the code ran: both entry points share one implementation, so hard-coding either would make a cloud-issued adoption claim to have happened on the LAN panel.",
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
         "capability": { "$ref": "#/$defs/CapabilitySummary" }
       }
     },
@@ -847,6 +862,23 @@
         "modem_imei": {
           "description": "The marked module to re-run the adoption gates against. Not a way to silence the mark: the agent clears it only when the gates pass again, and otherwise keeps the mark while restarting the quarantine countdown, so somebody fixing the real cause is not raced by the grace period. Adoption provenance is never touched.",
           "$ref": "#/$defs/Imei"
+        }
+      }
+    },
+    "UpdateModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "UpdateModem" },
+        "modem_imei": {
+          "description": "The adopted module whose record is being edited.",
+          "$ref": "#/$defs/Imei"
+        },
+        "note": {
+          "description": "Why this module is being managed. Absent means clear it -- there is no way to say \"leave it alone\", because a caller who wants that does not send this command. The adoption date and who made the decision are provenance rather than fields: the only way to change them was unregister-and-re-register, which rewrites them to today, and that is what this command exists to avoid.",
+          "type": ["string", "null"],
+          "maxLength": 256
         }
       }
     },
@@ -1080,6 +1112,7 @@
       { "$ref": "#/$defs/RegisterModemCommand" },
       { "$ref": "#/$defs/UnregisterModemCommand" },
       { "$ref": "#/$defs/ReconfirmModemCommand" },
+      { "$ref": "#/$defs/UpdateModemCommand" },
       { "$ref": "#/$defs/RenameEsimProfileCommand" },
       { "$ref": "#/$defs/DisableEsimProfileCommand" },
       { "$ref": "#/$defs/DeleteEsimProfileCommand" },

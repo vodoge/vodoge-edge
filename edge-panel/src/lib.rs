@@ -15,7 +15,8 @@ use edge_panel_api::{
     AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
     MessageBody, MessagesBody, ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody,
     RescanReceipt, ResetBody, RestartBody, RestartReceipt, RetirementBody, SendBody, SendReceipt,
-    RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody, UssdCancelReceipt,
+    ModemUpdateBody, RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody,
+    UssdCancelReceipt,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -28,7 +29,7 @@ use edge_panel_api::{
 /// ergonomics for no gain — there is still exactly one definition.
 pub use edge_panel_api::{
     AtResult, CandidateClaimResult, CandidateRevokeResult, ProfileBody, ProfilesResult,
-    ReconfirmResult,
+    AdoptionBody, ModemUpdateResult, ReconfirmResult,
     RegistrationResult, ReportResult, RescanResult, ScanResult, ScannedOperatorBody,
     UsbResetResult, UssdResult,
 };
@@ -174,6 +175,25 @@ pub trait Actions: Send + Sync {
     /// Persist an operator approval for one already discovered serial
     /// endpoint. Implementations must re-check the live endpoint rather than
     /// accepting a free-form port name from the panel.
+    /// 每一根在册模组的纳管记录。CRUD 里的 R —— 那个一直缺的一半。
+    ///
+    /// `list_modems` 回的是这一轮的观测；这个回的是当初的决定。
+    fn adoptions(&self) -> Result<Vec<AdoptionBody>, PanelError> {
+        Ok(Vec::new())
+    }
+
+    /// 改一条纳管记录的备注。CRUD 里的 U。
+    ///
+    /// 只有备注可改。`registered_at` / `registered_by` 是履历不是字段，
+    /// 而在此之前改备注唯一的办法是取消纳管再纳管，那会把履历冲成今天。
+    fn update_modem(
+        &self,
+        _imei: String,
+        _note: Option<String>,
+    ) -> Result<ModemUpdateResult, PanelError> {
+        Err(PanelError::Action("modem update is not configured".into()))
+    }
+
     /// 重新确认一根被闸标记的模组。
     ///
     /// 不是「让告警闭嘴」：它重新跑一遍闸，过了才清标记；没过就保留标记、
@@ -218,6 +238,8 @@ pub trait Actions: Send + Sync {
         &self,
         _imei: String,
         _source: &str,
+        // 为什么纳管它。云端一直在传，而在此之前它到日志为止就没了。
+        _note: Option<String>,
     ) -> Result<RegistrationResult, PanelError> {
         Err(PanelError::Action(
             "local modem registration is not configured".into(),
@@ -441,6 +463,7 @@ fn build_router_with_blocks(
         .route("/api/discoveries/claim", post(claim_modem_candidate))
         .route("/api/discoveries/revoke", post(revoke_modem_candidate))
         .route("/api/modems/reconfirm", post(reconfirm_modem))
+        .route("/api/modems/update", post(update_modem))
         .route("/api/modems/register", post(register_modem))
         .route("/api/modems/unregister", post(unregister_modem))
         .with_state(Arc::new(PanelState {
@@ -536,6 +559,19 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
             discoveries: discoveries.into_iter().map(discovery_body).collect(),
             retirements: retirements.into_iter().map(retirement_body).collect(),
             retro_enforcing: state.inbox.retro_enforcing(),
+            // 读不到就给空表，不让整个状态页跟着 500：这一份是「当初的决定」，
+            // 缺了它面板仍然能显示这一轮的观测，而观测才是运维盯着的东西。
+            // 缺口本身在下面那行日志里，不是无声的。
+            adoptions: state
+                .actions
+                .as_ref()
+                .map(|actions| actions.adoptions())
+                .transpose()
+                .unwrap_or_else(|error| {
+                    log_error(format!("adoptions unavailable: {error}"));
+                    None
+                })
+                .unwrap_or_default(),
         })
         .into_response(),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
@@ -566,19 +602,26 @@ async fn register_modem(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<RegistrationBody>,
 ) -> Response {
-    registration(state, body.imei, true).await
+    // 纳管时就能写下「为什么」。面板上一直没有这个输入框，而云端一直在传
+    // 这个字段 —— 现在两边都能写，也都真的存下来。
+    registration(state, body.imei, Some(body.note), true).await
 }
 
 async fn unregister_modem(
     State(state): State<Arc<PanelState>>,
     Json(body): Json<RegistrationBody>,
 ) -> Response {
-    registration(state, body.imei, false).await
+    registration(state, body.imei, None, false).await
 }
 
 /// Both directions, because they differ only in which action is called and a
 /// second copy of the validation is a second place for it to drift.
-async fn registration(state: Arc<PanelState>, imei: String, adopt: bool) -> Response {
+async fn registration(
+    state: Arc<PanelState>,
+    imei: String,
+    note: Option<Option<String>>,
+    adopt: bool,
+) -> Response {
     let Some(actions) = state.actions.as_ref() else {
         return json_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -589,8 +632,12 @@ async fn registration(state: Arc<PanelState>, imei: String, adopt: bool) -> Resp
     if imei.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "imei is required");
     }
+    let note = note.flatten().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    if note.as_deref().is_some_and(|value| value.chars().count() > 256) {
+        return json_error(StatusCode::BAD_REQUEST, "note must be 256 characters or fewer");
+    }
     let outcome = if adopt {
-        actions.register_modem(imei, "panel")
+        actions.register_modem(imei, "panel", note)
     } else {
         actions.unregister_modem(imei)
     };
@@ -616,6 +663,31 @@ async fn claim_modem_candidate(
     };
     match actions.claim_modem_candidate(candidate_key) {
         Ok(result) => Json(ClaimReceipt::claimed(result.candidate_key)).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn update_modem(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ModemUpdateBody>,
+) -> Response {
+    let imei = body.imei.trim().to_string();
+    if imei.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "imei is required");
+    }
+    // 空串按「清空」处理，不是按「没填」。前端的输入框清空之后发来的就是它。
+    let note = body
+        .note
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if note.as_deref().is_some_and(|value| value.chars().count() > 256) {
+        return json_error(StatusCode::BAD_REQUEST, "note must be 256 characters or fewer");
+    }
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(StatusCode::NOT_IMPLEMENTED, "modem update is not configured");
+    };
+    match actions.update_modem(imei, note) {
+        Ok(result) => Json(result).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

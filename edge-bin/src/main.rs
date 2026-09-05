@@ -38,7 +38,7 @@ mod linux {
     };
     use edge_panel::{
         log_error, log_line, serve, Actions, AtResult, CandidateClaimResult, CandidateRevokeResult,
-        Inbox, PanelError, ReconfirmResult,
+        AdoptionBody, Inbox, ModemUpdateResult, PanelError, ReconfirmResult,
         ProfileBody, ProfilesResult, RegistrationResult, ReportResult, RescanResult, ScanResult,
         ScannedOperatorBody, UsbResetResult, UssdResult,
     };
@@ -1894,11 +1894,16 @@ mod linux {
             imei: &str,
             note: Option<&str>,
         ) -> Result<JsonValue, SendError> {
-            let result =
-                Actions::register_modem(self, imei.to_string(), "cloud").map_err(action_failed)?;
-            if let Some(note) = note.filter(|value| !value.trim().is_empty()) {
+            let note = note
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            if let Some(note) = note.as_deref() {
                 log_line(format!("modem {imei} adopted from the cloud: {note}"));
             }
+            // note 一路传到底。以前它只到上面那行日志为止。
+            let result = Actions::register_modem(self, imei.to_string(), "cloud", note)
+                .map_err(action_failed)?;
             json_details(&result)
         }
 
@@ -1908,6 +1913,25 @@ mod linux {
         /// 「闸仍然不通过」回成成功的样子。云端看到的必须和现场看到的是
         /// 同一句话，否则控制台上一个绿色的「已完成」会让人以为修好了，
         /// 而下一轮它又被标记。
+        /// 改一条纳管记录的备注，走面板那同一份实现。
+        fn update_modem(&mut self, imei: &str, note: Option<&str>) -> Result<JsonValue, SendError> {
+            let note = note
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let result = Actions::update_modem(self, imei.to_string(), note)
+                .map_err(action_failed)?;
+            // 回整条纳管记录，不只回 ok：云端拿它直接刷屏幕，而「我以为改成了
+            // 什么」和「库里现在是什么」分开的那点差，正是没人会去查的。
+            Ok(serde_json::json!({
+                "modem_imei": result.adoption.imei,
+                "registered_at": result.adoption.registered_at,
+                "registered_by": result.adoption.registered_by,
+                "family": result.adoption.family,
+                "note": result.adoption.note,
+            }))
+        }
+
         fn reconfirm_modem(&mut self, imei: &str) -> Result<JsonValue, SendError> {
             let result = Actions::reconfirm_modem(self, imei.to_string()).map_err(action_failed)?;
             Ok(serde_json::json!({
@@ -3768,6 +3792,7 @@ mod linux {
             &self,
             imei: String,
             source: &str,
+            note: Option<String>,
         ) -> Result<RegistrationResult, PanelError> {
             // 🔴 先把矩阵克隆出来，**然后**才去锁 store。
             //
@@ -3850,7 +3875,11 @@ mod linux {
                     // 否则「当初是按哪一对放行的」和「记下来的是什么型号」
                     // 可能来自两次不同的观测。
                     family: observed.family.clone(),
-                    note: None,
+                    // 🔴 云端一直在传这个字段，而这里一直写死 None：那句
+                    // 「为什么纳管这一根」只被 log 了一行，而那个日志环 500 行、
+                    // 二十分钟滚一轮。半小时之后答案就彻底不存在了 —— 0015 建
+                    // 这一列要回答的正是这个问题。
+                    note: note.clone(),
                 })
                 .map_err(|error| PanelError::Action(error.to_string()))?;
             if retired.is_some() {
@@ -3879,6 +3908,65 @@ mod linux {
                 imei,
                 registered: false,
                 changed,
+            })
+        }
+
+        fn adoptions(&self) -> Result<Vec<AdoptionBody>, PanelError> {
+            Ok(self
+                .store
+                .0
+                .lock()
+                .expect("store")
+                .registered_modems()
+                .map_err(PanelError::Store)?
+                .into_iter()
+                .map(|row| AdoptionBody {
+                    imei: row.imei,
+                    registered_at: row.registered_at,
+                    registered_by: row.registered_by,
+                    family: row.family,
+                    usb_device: row.usb_device,
+                    note: row.note,
+                })
+                .collect())
+        }
+
+        fn update_modem(
+            &self,
+            imei: String,
+            note: Option<String>,
+        ) -> Result<ModemUpdateResult, PanelError> {
+            let imei = imei.trim().to_string();
+            let store = self.store.0.lock().expect("store");
+            let changed = store
+                .update_registered_modem(&imei, note.as_deref())
+                .map_err(PanelError::Store)?;
+            if !changed {
+                // 不在册就是拒，不静默成功。改一根没被纳管的模组的备注是个
+                // 无意义的动作，而回一个 ok 会让运维以为自己记下了什么。
+                return Err(PanelError::Action(format!(
+                    "{imei} 不在册 —— 只有已纳管的模组才有纳管记录可改"
+                )));
+            }
+            // 回整条，不只回 ok：调用方拿它直接刷屏幕，而「我以为改成了什么」
+            // 和「库里现在是什么」分开的那点差，正是没人会去查的。
+            let row = store
+                .registered_modems()
+                .map_err(PanelError::Store)?
+                .into_iter()
+                .find(|row| row.imei == imei)
+                .ok_or_else(|| PanelError::Action(format!("{imei} 刚刚还在，现在读不到了")))?;
+            drop(store);
+            log_line(format!("modem {imei} note updated"));
+            Ok(ModemUpdateResult {
+                adoption: AdoptionBody {
+                    imei: row.imei,
+                    registered_at: row.registered_at,
+                    registered_by: row.registered_by,
+                    family: row.family,
+                    usb_device: row.usb_device,
+                    note: row.note,
+                },
             })
         }
 
@@ -5228,14 +5316,19 @@ mod linux {
         // Read separately from the snapshots: the registry is the authority on
         // what is managed, and a module adopted but never yet seen has no
         // snapshot to be inferred from.
-        let managed: Option<Vec<String>> = match shared.0.lock().expect("store").registered_modems()
-        {
-            Ok(rows) => Some(rows.into_iter().map(|row| row.imei).collect()),
-            Err(error) => {
-                log_error(format!("registry not read: {error}"));
-                None
-            }
-        };
+        // 一次读取，两个用途：`managed_imeis` 那份全量名单，和随观测上行的
+        // 纳管记录。读两遍是两次可能不一致的快照，而它们正要被同一个信封带走。
+        let registry: Option<Vec<edge_store::RegisteredModem>> =
+            match shared.0.lock().expect("store").registered_modems() {
+                Ok(rows) => Some(rows),
+                Err(error) => {
+                    log_error(format!("registry not read: {error}"));
+                    None
+                }
+            };
+        let managed: Option<Vec<String>> = registry
+            .as_ref()
+            .map(|rows| rows.iter().map(|row| row.imei.clone()).collect());
         enqueue_device_state(
             outbox,
             &matrix,
@@ -5243,6 +5336,7 @@ mod linux {
             &host,
             discoveries.as_deref(),
             managed.as_deref(),
+            registry.as_deref(),
             now,
         )?;
         if qmi_paths.is_empty() && snapshots.is_empty() {
@@ -7681,6 +7775,9 @@ mod linux {
         host: &HostStats,
         discoveries: Option<&[edge_store::LocalModemDiscovery]>,
         managed: Option<&[String]>,
+        // 纳管记录。`None` = 这一轮读不到注册表，不是「一条都没有」——
+        // 后者会让云端把每一根的备注都清空。
+        adoptions: Option<&[edge_store::RegisteredModem]>,
         now: i64,
     ) -> serde_json::Value {
         let mut entries = Vec::with_capacity(modems.len());
@@ -7705,6 +7802,8 @@ mod linux {
                 CapabilityOrigin::Fallback => "fallback",
             };
             let carrier_profile = carrier.as_str().to_string();
+            let adoption = adoptions
+                .and_then(|rows| rows.iter().find(|row| row.imei == modem.imei));
             entries.push(serde_json::json!({
                 "modem_imei": modem.imei,
                 "state": modem.state,
@@ -7738,6 +7837,17 @@ mod linux {
                 // and this is the only way the cloud can see it.
                 "apn_contexts": modem.apn_contexts.as_deref()
                     .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
+                // 纳管记录随观测一起上行。
+                //
+                // 🔴 这三样以前只活在 agent 的 SQLite 里：云端能带着一句备注去
+                // 纳管一根模组，然后**再也读不回来** —— 控制台既显示不了也改不了。
+                // CRUD 的 R 在云端那一半一直是缺的。
+                //
+                // 和上面那些字段的区别是：它们是这一轮的观测，会随每次轮询变；
+                // 这三个是当初的决定，只有人改它才会变。
+                "adoption_note": adoption.and_then(|row| row.note.clone()),
+                "adopted_at": adoption.map(|row| row.registered_at),
+                "adopted_by": adoption.map(|row| row.registered_by.clone()),
                 "capability": {
                     "sms_mo": capability.sms_mo.wire(),
                     "sms_mt": capability.sms_mt.wire(),
@@ -9155,9 +9265,11 @@ mod linux {
         host: &HostStats,
         discoveries: Option<&[edge_store::LocalModemDiscovery]>,
         managed: Option<&[String]>,
+        adoptions: Option<&[edge_store::RegisteredModem]>,
         now: i64,
     ) -> Result<(), String> {
-        let payload = device_state_payload(matrix, modems, host, discoveries, managed, now);
+        let payload =
+            device_state_payload(matrix, modems, host, discoveries, managed, adoptions, now);
         append_kind(outbox, "DeviceState", payload)
     }
 
@@ -9202,6 +9314,8 @@ mod linux {
                 &HostStats::default(),
                 Some(&[candidate()]),
                 None,
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             let map = payload.as_object().expect("payload is a map");
@@ -9229,6 +9343,8 @@ mod linux {
                 &HostStats::default(),
                 Some(&[]),
                 None,
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             assert!(
@@ -9248,6 +9364,8 @@ mod linux {
                 &HostStats::default(),
                 Some(&[]),
                 Some(&[]),
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             let map = payload.as_object().expect("map");
@@ -9272,6 +9390,8 @@ mod linux {
                 &HostStats::default(),
                 None,
                 None,
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             assert!(
@@ -9289,6 +9409,8 @@ mod linux {
                 &HostStats::default(),
                 Some(&[]),
                 None,
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             let map = payload.as_object().expect("map");
@@ -9305,6 +9427,8 @@ mod linux {
                 &HostStats::default(),
                 Some(&[]),
                 Some(&["868019060490134".to_string()]),
+                // 这一支不验纳管记录。
+                None,
                 7,
             );
             let listed = payload["managed_imeis"].as_array().expect("array");

@@ -73,6 +73,16 @@ pub struct StatusBody {
     /// 不来的动作，要么会以为还有时间而其实没有。
     #[serde(default)]
     pub retro_enforcing: bool,
+    /// 每一根在册模组的纳管记录：谁纳管的、什么时候、备注。
+    ///
+    /// 和 `modems` 分开而不是并进去：`modems` 是**这一轮的观测**（信号、驻留、
+    /// 状态），会随每次轮询变；这一份是**当初的决定**，只有人改它才会变。
+    /// 混成一个结构，下一个人就分不清哪几格该跟着轮询刷新。
+    ///
+    /// `#[serde(default)]` 的理由和 `retirements` 那条一样：scratchpad 里的
+    /// 回放服务器产的是旧形状 JSON，少一个字段不该让整个面板打不开。
+    #[serde(default)]
+    pub adoptions: Vec<AdoptionBody>,
 }
 
 /// 一根模组当前的「闸不再满足」标记。
@@ -256,6 +266,44 @@ pub struct CandidateRevokeResult {
     /// 或者上一次的批准早已被别的东西清掉了。回一个笼统的 ok 会把这两种
     /// 情况说成同一件事。
     pub was_approved: bool,
+}
+
+/// 一条纳管记录本身 —— 谁纳管的、什么时候、为什么。
+///
+/// 🔴 在此之前这三样**从来没有出过 agent**。`registered_by` 只在退休提示里
+/// 露过一次，`registered_at` 和 `note` 一次都没有。0015 建这几列的理由是
+/// 「为什么这一根在被管」是别人对一个没人记得添加过的模组问的第一个问题 ——
+/// 而答案存在库里、屏幕上不显示，等于没有答案。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdoptionBody {
+    pub imei: String,
+    /// 毫秒时间戳。
+    pub registered_at: i64,
+    /// `panel` / `cloud` / `migration` —— 是谁做的这个决定，不是代码跑在哪。
+    pub registered_by: String,
+    /// 纳管当时记下的型号。和闸 2 用的是同一份事实。
+    pub family: Option<String>,
+    pub usb_device: Option<String>,
+    /// 为什么纳管它。可编辑，其余几项不可 —— 那些是履历。
+    pub note: Option<String>,
+}
+
+/// `POST /api/modems/update` 的请求体。
+#[derive(Serialize, Deserialize)]
+pub struct ModemUpdateBody {
+    pub imei: String,
+    /// 新的备注。`None` 是清空，不是「别动」——想表达别动的不要发这个请求。
+    pub note: Option<String>,
+}
+
+/// `POST /api/modems/update` 的应答。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModemUpdateResult {
+    /// 改完之后那一行的样子，整条回来。
+    ///
+    /// 不只回一个 ok：调用方要拿它直接刷新屏幕，而「我以为改成了什么」和
+    /// 「库里现在是什么」分开的时候，中间那点差正是没人会去查的。
+    pub adoption: AdoptionBody,
 }
 
 /// `POST /api/modems/reconfirm` 的应答。
@@ -490,6 +538,12 @@ pub struct ClaimCandidateBody {
 #[derive(Serialize, Deserialize)]
 pub struct RegistrationBody {
     pub imei: String,
+    /// 纳管时写下的「为什么」。纳管用，取消纳管忽略。
+    ///
+    /// `#[serde(default)]`：老前端和 scratchpad 里的回放服务器发的请求体没有
+    /// 这一格，少一个可选字段不该让纳管这个动作直接 400。
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// One captured log line.

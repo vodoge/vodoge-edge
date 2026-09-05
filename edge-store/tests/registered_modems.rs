@@ -187,3 +187,41 @@ fn the_registry_lists_in_adoption_order() {
     let order: Vec<&str> = all.iter().map(|row| row.imei.as_str()).collect();
     assert_eq!(order, vec!["862547055142811", "867018069509705"]);
 }
+
+/// CRUD 的 U。在此之前一个纳管记录建好就再也改不了 —— 备注写错了、或者换了
+/// 人接手要补一句，唯一的办法是取消纳管再纳管，而那会把 registered_at /
+/// registered_by 冲成今天，正是 0015 建这两列要保住的东西。
+#[test]
+fn a_note_can_be_edited_without_rewriting_the_provenance() {
+    let store = store();
+    store
+        .register_modem(&RegisteredModem {
+            imei: "867018069509705".into(),
+            registered_at: 1_000,
+            registered_by: "panel".into(),
+            usb_device: Some("1-1.2".into()),
+            family: Some("EC20".into()),
+            note: Some("装机时那一根".into()),
+        })
+        .expect("adopt");
+
+    let changed = store
+        .update_registered_modem("867018069509705", Some("换给老王了，2026-09"))
+        .expect("update");
+    assert!(changed, "改一条存在的记录要回 true");
+
+    let row = store.registered_modems().expect("read").into_iter().next().expect("one");
+    assert_eq!(row.note.as_deref(), Some("换给老王了，2026-09"));
+    assert_eq!(row.registered_at, 1_000, "履历被冲掉了");
+    assert_eq!(row.registered_by, "panel", "履历被冲掉了");
+    assert_eq!(row.family.as_deref(), Some("EC20"), "型号不该被这一步碰");
+
+    // 清空备注是合法的编辑，不是「没改」。
+    assert!(store.update_registered_modem("867018069509705", None).expect("clear"));
+    let row = store.registered_modems().expect("read").into_iter().next().expect("one");
+    assert_eq!(row.note, None, "清不掉备注");
+
+    // 改一条不存在的，要回 false 而不是静默成功 —— 否则云端会把「这根不在
+    // 册」回成「已更新」。
+    assert!(!store.update_registered_modem("999999999999999", Some("x")).expect("absent"));
+}

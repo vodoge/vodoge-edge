@@ -44,13 +44,37 @@ pub enum ClaimNote {
     Failed(String),
 }
 
+/// 改一条纳管记录的备注。CRUD 里的 U。
+///
+/// 🔴 只改备注。`registered_at` / `registered_by` 是履历，屏幕上只读 —— 在此
+/// 之前想改一句话唯一的办法是取消纳管再纳管，而那会把这两列冲成今天，正是
+/// 0015 建它们要保住的东西。
+async fn save_note(state: StatusState, imei: String, note: String) {
+    let note = note.trim().to_string();
+    let body = edge_panel_api::ModemUpdateBody {
+        imei: imei.clone(),
+        // 空串是「清空」，不是「别动」。想别动的不会按这个按钮。
+        note: (!note.is_empty()).then_some(note),
+    };
+    let got: Load<edge_panel_api::ModemUpdateResult> =
+        crate::api::post("/api/modems/update", &body, "保存备注").await;
+    match got {
+        Load::Ready(_) => {
+            state.reconfirm.set(Some((imei, "备注已保存".into())));
+            leptos::task::spawn_local(async move { poll(state).await });
+        }
+        Load::Failed(why) => state.reconfirm.set(Some((imei, format!("保存失败 · {why}")))),
+        Load::Loading => {}
+    }
+}
+
 /// 重新确认一根被闸标记的模组。
 ///
 /// 服务端会重新跑一遍闸。两种结局都写回这一页的提示条：闸过了就说清标记
 /// 已清；没过就把闸的理由原样显示出来 —— **不能显示成成功**，否则运维会
 /// 以为自己修好过一次，而下一轮它又会被标记。
 async fn reconfirm(state: StatusState, imei: String) {
-    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
+    let body = edge_panel_api::RegistrationBody { imei: imei.clone(), note: None };
     let got: Load<edge_panel_api::ReconfirmResult> =
         crate::api::post("/api/modems/reconfirm", &body, "重新确认纳管").await;
     match got {
@@ -394,6 +418,65 @@ const TRACE_COLS_WIDE: usize = crate::trace::TRACE_KEEP;
 ///
 /// 现在放舰队总览：三根模组的轨迹**对齐**铺开一小时。轮换是三根之间的相位
 /// 关系，单看一根看不出来；这块地方够宽，正好画得下。
+/// 一条纳管记录：履历只读，备注可改。
+///
+/// 这是 CRUD 里 U 的入口，也是 R 的后半 —— 前半（在册的有哪几根）一直有，
+/// 后半（当初为什么把它们纳进来）一直没有。
+#[component]
+fn AdoptionRow(row: edge_panel_api::AdoptionBody, state: StatusState) -> impl IntoView {
+    let imei = row.imei.clone();
+    // 草稿。每行一份 —— 共享一个的话，在一行里打到一半切到另一行，
+    // 那半句会跟着跑过去，而它下一次被保存时是保到别人头上。
+    let draft = RwSignal::new(row.note.clone().unwrap_or_default());
+    let saving = RwSignal::new(false);
+    let head = format!(
+        "{} · {} · 由 {} 于 {}",
+        row.imei,
+        row.family.as_deref().unwrap_or("型号未记"),
+        row.registered_by,
+        stamp(row.registered_at),
+    );
+    view! {
+        <div class="vd-adoption">
+            <span class="vd-faint">{head}</span>
+            <Flex gap=FlexGap::Small style="flex-wrap: wrap;">
+                <Input value=draft placeholder="为什么纳管它（可空）" />
+                <Button
+                    size=ButtonSize::Small
+                    disabled=saving
+                    on_click=move |_| {
+                        let imei = imei.clone();
+                        let note = draft.get_untracked();
+                        saving.set(true);
+                        leptos::task::spawn_local(async move {
+                            save_note(state, imei, note).await;
+                            saving.set(false);
+                        });
+                    }
+                >
+                    {move || if saving.get() { "保存中…" } else { "保存备注" }}
+                </Button>
+            </Flex>
+        </div>
+    }
+}
+
+/// 毫秒时间戳 → 「YYYY-MM-DD HH:MM」。
+///
+/// 用浏览器本地时区：看这块屏幕的人就在现场，而 UTC 会让「今天下午装的」
+/// 读起来像是昨天或明天的事。
+fn stamp(ms: i64) -> String {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        date.get_full_year(),
+        date.get_month() + 1,
+        date.get_date(),
+        date.get_hours(),
+        date.get_minutes(),
+    )
+}
+
 #[component]
 pub fn FleetOverview(state: StatusState) -> impl IntoView {
     view! {
@@ -459,6 +542,30 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                 </div>
                             }
                         })}
+                    // ── 纳管记录（CRUD 的 R 与 U）────────────────────────────────
+                    //
+                    // 🔴 这三样以前**从来没有出过 agent**：谁纳管的、什么时候、为什么。
+                    // 0015 建这几列的理由是「为什么这一根在被管」是别人对一个没人记得
+                    // 添加过的模组问的第一个问题 —— 答案存在库里、屏幕上不显示，等于
+                    // 没有答案。
+                    //
+                    // 放在这里而不是模组卡上：整张卡是点击选中的，卡里塞一个输入框会让
+                    // 「点一下选中」和「点一下改字」抢同一次点击。
+                    {
+                        let adoptions = body.adoptions.clone();
+                        (!adoptions.is_empty())
+                            .then(|| {
+                                view! {
+                                    <div class="vd-adoptions">
+                                        <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
+                                        {adoptions
+                                            .into_iter()
+                                            .map(|row| view! { <AdoptionRow row=row state=state /> })
+                                            .collect_view()}
+                                    </div>
+                                }
+                            })
+                    }
                     <div class="vd-fleetrows">
                         {body
                             .modems

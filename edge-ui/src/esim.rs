@@ -628,6 +628,7 @@ mod tests {
             discoveries: Vec::new(),
             retirements: Vec::new(),
             retro_enforcing: false,
+            adoptions: Vec::new(),
         };
 
         assert!(

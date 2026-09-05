@@ -409,6 +409,12 @@ pub struct ModemState {
     pub usb_device: Option<String>,
     #[serde(rename = "apn_contexts", default, skip_serializing_if = "Option::is_none")]
     pub apn_contexts: Option<Vec<ApnContext>>,
+    #[serde(rename = "adoption_note", default, skip_serializing_if = "Option::is_none")]
+    pub adoption_note: Option<String>,
+    #[serde(rename = "adopted_at", default, skip_serializing_if = "Option::is_none")]
+    pub adopted_at: Option<i64>,
+    #[serde(rename = "adopted_by", default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
     #[serde(rename = "capability")]
     pub capability: CapabilitySummary,
 }
@@ -500,6 +506,17 @@ pub struct ReconfirmModemCommand {
     pub kind: String,
     #[serde(rename = "modem_imei")]
     pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateModemCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "note", default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1192,6 +1209,13 @@ pub enum Command {
     ReconfirmModem {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
+    },
+    UpdateModem {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+        #[serde(rename = "note")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     RenameEsimProfile {
         #[serde(rename = "modem_imei")]

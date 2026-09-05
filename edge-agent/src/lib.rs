@@ -238,6 +238,19 @@ pub trait SendPort {
         Err(unsupported("unregister_modem"))
     }
 
+    /// Edit an adopted module's record. The U in this catalogue's CRUD.
+    ///
+    /// Only the note moves. The adoption date and who made the decision are
+    /// provenance, not fields: the only way to change them was unregister and
+    /// re-register, which rewrites them to today -- and that is exactly what
+    /// this exists to avoid.
+    ///
+    /// `None` clears the note. There is no way to say "leave it alone",
+    /// because a caller who wants that does not send this command.
+    fn update_modem(&mut self, _imei: &str, _note: Option<&str>) -> Result<JsonValue, SendError> {
+        Err(unsupported("update_modem"))
+    }
+
     /// Re-run the adoption gates against a module the gates have marked.
     ///
     /// Not a way to silence the mark. The agent clears it only when the gates
@@ -1172,6 +1185,14 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::UnregisterModem { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.unregister_modem(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::UpdateModem { modem_imei, note } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.update_modem(modem_imei, note.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,
