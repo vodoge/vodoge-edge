@@ -324,3 +324,133 @@ fn refusal_labels_carry_no_instance_data() {
     deduped.dedup();
     assert_eq!(deduped.len(), 4, "标签有重复：{sorted:?}");
 }
+
+/// 🔴 线上那份矩阵没有 `[[device]]` 段——四根模组必须照旧过闸。
+///
+/// 这条钉的是「加了目录这个能力，但没有目录的机队不受影响」。
+/// 少了它，新 build 上线那一刻整个机队全体过不了闸 1。
+#[test]
+fn a_fleet_running_a_matrix_without_a_catalogue_is_unaffected() {
+    let live = matrix(
+        r#"
+version = "2026-09-01T03:32:24Z"
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+"#,
+    );
+    assert_eq!(live.devices(), None, "前提：这份文档确实没有目录");
+    assert_eq!(
+        bind_gates(&registry(), &live, Some(EC20), Some(cn_mobile_pair())),
+        Ok(())
+    );
+}
+
+/// 目录里明确停用的，挡住 —— 而且理由要和「本 build 驱动不了」分开。
+///
+/// 两者的下一步完全不同：`NoStrategy` 要改代码或换硬件，
+/// 这一条要改**目录**，而目录是数据，改它不用发版。
+#[test]
+fn a_device_switched_off_in_the_catalogue_is_refused_by_the_catalogue() {
+    let m = matrix(
+        r#"
+version = "2026-09-06"
+[[device]]
+usb = "2c7c:0125"
+strategy = "quectel-ec"
+enabled = false
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+"#,
+    );
+    assert_eq!(
+        bind_gates(&registry(), &m, Some(EC20), Some(cn_mobile_pair())),
+        Err(BindRefusal::NotInCatalogue {
+            usb: EC20,
+            gate: edge_core::DeviceGate::Disabled
+        })
+    );
+    // 文案要把「改哪里」说清楚。
+    let text = BindRefusal::NotInCatalogue {
+        usb: EC20,
+        gate: edge_core::DeviceGate::Disabled,
+    }
+    .to_string();
+    assert!(text.contains("catalogue"), "{text}");
+    assert!(
+        text.contains("can drive it"),
+        "少了「本 build 驱动得了」这半句，运维会去翻代码找一个不在代码里的答案：{text}"
+    );
+}
+
+/// 目录存在而它不在里面，同样挡住，但答案是 Absent 不是 Disabled。
+#[test]
+fn a_device_missing_from_the_catalogue_is_distinguishable_from_a_disabled_one() {
+    let m = matrix(
+        r#"
+version = "2026-09-06"
+[[device]]
+usb = "2c7c:0901"
+strategy = "quectel-ec200u"
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+"#,
+    );
+    assert_eq!(
+        bind_gates(&registry(), &m, Some(EC20), Some(cn_mobile_pair())),
+        Err(BindRefusal::NotInCatalogue {
+            usb: EC20,
+            gate: edge_core::DeviceGate::Absent
+        })
+    );
+}
+
+/// 目录的拒绝是**真判定**——追溯执行可以据此解绑。
+///
+/// 和「读不到 USB 标识」相反：那是证据不足，必须维持现状。
+#[test]
+fn a_catalogue_refusal_is_a_verdict_not_missing_evidence() {
+    use edge_core::RefusalKind;
+    assert_eq!(
+        BindRefusal::NotInCatalogue {
+            usb: EC20,
+            gate: edge_core::DeviceGate::Absent
+        }
+        .kind(),
+        RefusalKind::Verdict
+    );
+    assert_eq!(
+        BindRefusal::UnreadableUsbIdentity.kind(),
+        RefusalKind::MissingEvidence
+    );
+}
+
+/// 闸的顺序：本 build 驱动不了的，先答那一条。
+///
+/// 反过来会让一块完全陌生的硬件拿到「去改目录」的指引 ——
+/// 而把它加进目录也没用，代码里根本没有驱动它的策略。
+#[test]
+fn no_strategy_answers_before_the_catalogue_does() {
+    let m = matrix(
+        r#"
+version = "2026-09-06"
+[[device]]
+usb = "2c7c:0125"
+strategy = "quectel-ec"
+[[rule]]
+modem_family = "EC20"
+carrier = "CN-Mobile"
+sms_mo = { kind = "supported", bearer = "cellular" }
+"#,
+    );
+    // UNDRIVEN 既没有策略、也不在目录里。答案必须是前者。
+    assert_eq!(
+        bind_gates(&registry(), &m, Some(UNDRIVEN), Some(cn_mobile_pair())),
+        Err(BindRefusal::NoStrategy(UNDRIVEN))
+    );
+}

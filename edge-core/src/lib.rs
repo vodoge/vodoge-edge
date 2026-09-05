@@ -65,7 +65,9 @@ pub use retro::{
     enforce_one, Enforcement, GateEvidence, HoldReason, MatrixAuthority, GRACE_MS, GRACE_PASSES,
     OBSERVATION_MAX_AGE_MS,
 };
-pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
+pub use matrix::{
+    CapabilityMatrix, CapabilityOrigin, CapabilityQuery, DeviceGate, MatrixError, SupportedDevice,
+};
 pub use registration::{
     arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
 };

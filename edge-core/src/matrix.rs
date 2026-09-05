@@ -41,12 +41,74 @@ struct MatrixKey {
     carrier_profile: CarrierProfile,
 }
 
+/// 受支持硬件列表里的一条。
+///
+/// 「支持」= 这个 build 有策略驱动它（代码说了算），**且**目录里启用
+/// （数据库说了算）。这条只承载后半句；前半句是 `StrategyRegistry::drives`。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupportedDevice {
+    pub usb: crate::UsbIdentity,
+    /// 必须是这个 build 里真有的策略 id。目录不能凭空启用一个不存在的策略
+    /// —— 真启用了也只会在运行期炸。
+    pub strategy: String,
+    pub enabled: bool,
+    pub note: Option<String>,
+}
+
+/// 目录对某个 USB 硬件的态度。
+///
+/// 🔴 四个变体，而不是一个 bool。`NotStated` 和 `Absent` 看起来都像「没有」，
+/// 动作却相反：
+///
+/// - `NotStated`：这份文档**根本没有** `[[device]]` 段。它对硬件不发表意见，
+///   调用方退回只看 `drives()` —— 这是向后兼容的关键，否则一个还没被加过
+///   device 段的机队，在新 build 上线那一刻全体过不了闸。
+/// - `Absent`：列表**存在**，而这一条不在里面。那是一句真话：没人把它加进来。
+///
+/// 把两者塌缩成 `false`，就是让「还没人写这张表」和「写了、但没写它」
+/// 产生同一个后果。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceGate {
+    NotStated,
+    Enabled,
+    Disabled,
+    Absent,
+}
+
+impl DeviceGate {
+    /// 这道闸放不放行。
+    ///
+    /// ⚠️ `NotStated` 放行 —— 见上面的理由。它表示的是「这份文档没说」，
+    /// 不是「这份文档说不行」。
+    pub fn admits(self) -> bool {
+        matches!(self, Self::NotStated | Self::Enabled)
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::NotStated => "not_stated",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Absent => "absent",
+        }
+    }
+}
+
 /// A parsed, versioned capability matrix.
 #[derive(Clone, Debug)]
 pub struct CapabilityMatrix {
     version: String,
+    /// 这份文档要求的最低 agent 版本。
+    ///
+    /// 存在的理由很具体：`MatrixDocument` **没有** `deny_unknown_fields`，
+    /// 所以一个旧 build 读到带 `[[device]]` 的新文档会**静默地**把整段丢掉
+    /// —— 也就是没有闸 1，而且不报错。滚动升级期间这必然发生。
+    /// 有了它，旧 build 会拒绝安装并告警，而不是用一半。
+    min_agent_version: Option<String>,
     rules: HashMap<MatrixKey, Capability>,
     fallback: Capability,
+    /// `None` = 文档里没有 `[[device]]` 段。**不是**空列表。
+    devices: Option<Vec<SupportedDevice>>,
 }
 
 impl CapabilityMatrix {
@@ -95,10 +157,49 @@ impl CapabilityMatrix {
             }
         }
 
+        let devices = match document.device {
+            None => None,
+            Some(raw) => {
+                let mut seen: Vec<SupportedDevice> = Vec::with_capacity(raw.len());
+                for entry in raw {
+                    let (vendor, product) = entry.usb.split_once(':').ok_or_else(|| {
+                        MatrixError::InvalidDevice {
+                            usb: entry.usb.clone(),
+                            reason: "expected vendor:product, for example 2c7c:0125".to_owned(),
+                        }
+                    })?;
+                    let usb = crate::UsbIdentity::parse(vendor, product).ok_or_else(|| {
+                        MatrixError::InvalidDevice {
+                            usb: entry.usb.clone(),
+                            reason: "both halves must be hexadecimal".to_owned(),
+                        }
+                    })?;
+                    // 🔴 重复的一条是**错**，不是「后面的赢」。
+                    //
+                    // 两行同一个 USB 标识、`enabled` 一真一假时，
+                    // 「后面的赢」这个规则会让答案取决于文件里的顺序 ——
+                    // 而没人会想到去读顺序。规则表那边已经是这个做法
+                    // （`DuplicateRule`），这里保持一致。
+                    if seen.iter().any(|kept| kept.usb == usb) {
+                        return Err(MatrixError::DuplicateDevice { usb });
+                    }
+                    seen.push(SupportedDevice {
+                        usb,
+                        strategy: entry.strategy,
+                        enabled: entry.enabled,
+                        note: entry.note,
+                    });
+                }
+                Some(seen)
+            }
+        };
+
         Ok(Self {
             version: document.version.unwrap_or_else(|| "unversioned".to_owned()),
+            min_agent_version: document.min_agent_version,
             rules,
             fallback,
+            devices,
         })
     }
 
@@ -109,6 +210,31 @@ impl CapabilityMatrix {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// 这份文档要求的最低 agent 版本，若有。
+    ///
+    /// 安装它的一方要负责比对并在不满足时**拒绝安装**（保留上一份），
+    /// 而不是装一半。理由见字段本身的注释。
+    pub fn min_agent_version(&self) -> Option<&str> {
+        self.min_agent_version.as_deref()
+    }
+
+    /// 受支持硬件列表。`None` = 文档里没有这个段。
+    pub fn devices(&self) -> Option<&[SupportedDevice]> {
+        self.devices.as_deref()
+    }
+
+    /// 目录对这个 USB 硬件的态度。见 `DeviceGate` 关于四个变体的说明。
+    pub fn device_gate(&self, usb: crate::UsbIdentity) -> DeviceGate {
+        let Some(devices) = &self.devices else {
+            return DeviceGate::NotStated;
+        };
+        match devices.iter().find(|device| device.usb == usb) {
+            None => DeviceGate::Absent,
+            Some(device) if device.enabled => DeviceGate::Enabled,
+            Some(_) => DeviceGate::Disabled,
+        }
     }
 
     /// Returns an explicit fallback result when there is no exact matrix rule.
@@ -145,6 +271,16 @@ pub enum MatrixError {
         modem_family: ModemFamily,
         carrier_profile: CarrierProfile,
     },
+    /// `[[device]]` 里一条 USB 标识写坏了。
+    InvalidDevice {
+        usb: String,
+        reason: String,
+    },
+    /// 同一个 USB 标识出现两次。是错，不是「后面的赢」——
+    /// 两行 `enabled` 一真一假时，答案会取决于文件里的顺序，而没人会想到去读顺序。
+    DuplicateDevice {
+        usb: crate::UsbIdentity,
+    },
 }
 
 impl fmt::Display for MatrixError {
@@ -159,6 +295,12 @@ impl fmt::Display for MatrixError {
                 formatter,
                 "duplicate capability rule for modem {modem_family} and carrier {carrier_profile}"
             ),
+            Self::InvalidDevice { usb, reason } => {
+                write!(formatter, "invalid supported device {usb:?}: {reason}")
+            }
+            Self::DuplicateDevice { usb } => {
+                write!(formatter, "supported device {usb} is listed twice")
+            }
         }
     }
 }
@@ -169,6 +311,8 @@ impl Error for MatrixError {
             Self::Parse(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::DuplicateRule { .. } => None,
+            Self::InvalidDevice { .. } => None,
+            Self::DuplicateDevice { .. } => None,
         }
     }
 }
@@ -176,10 +320,33 @@ impl Error for MatrixError {
 #[derive(Deserialize)]
 struct MatrixDocument {
     version: Option<String>,
+    /// 见 `CapabilityMatrix::min_agent_version`。
+    #[serde(default)]
+    min_agent_version: Option<String>,
     #[serde(default)]
     fallback: RawCapability,
     #[serde(default)]
     rule: Vec<RawRule>,
+    /// ⚠️ `Option<Vec<_>>` 而不是 `#[serde(default)] Vec<_>`：
+    /// 「没有这个段」和「有这个段但是空的」必须分得开。见 `DeviceGate`。
+    device: Option<Vec<RawDevice>>,
+}
+
+#[derive(Deserialize)]
+struct RawDevice {
+    /// `2c7c:0125` 这样的形状。
+    usb: String,
+    strategy: String,
+    #[serde(default = "yes")]
+    enabled: bool,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `enabled` 缺省为真：写进这张表本身就是「我们支持它」的表态，
+/// 而要停用一条得**明确**写 `enabled = false`。
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]

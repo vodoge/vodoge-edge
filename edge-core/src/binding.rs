@@ -35,6 +35,17 @@ pub enum BindRefusal {
     UnreadableUsbIdentity,
     /// 这个 build 里没有任何策略驱动这个硬件。
     NoStrategy(UsbIdentity),
+    /// 这个 build **驱动得了**它，但受支持设备列表不放行。
+    ///
+    /// 和 `NoStrategy` 分开，因为下一步完全不同：`NoStrategy` 要改代码
+    /// （或换硬件），这一条要改**目录**——而目录是数据，改它不用发版。
+    /// 合成一条会让运维去翻代码找一个根本不在代码里的答案。
+    NotInCatalogue {
+        usb: UsbIdentity,
+        /// `absent` 还是 `disabled`。同样要分：一个是没人加过，
+        /// 一个是有人明确停用了。
+        gate: crate::DeviceGate,
+    },
     /// 还没识别出型号，或还没读到卡的归属网络 —— 「这一对」尚未成立。
     /// 这通常是暂时的：再探测一轮就有了。
     NotIdentifiedYet,
@@ -76,6 +87,7 @@ impl BindRefusal {
         match self {
             Self::UnreadableUsbIdentity => "unreadable_usb_identity",
             Self::NoStrategy(_) => "no_strategy",
+            Self::NotInCatalogue { .. } => "not_in_catalogue",
             Self::NotIdentifiedYet => "not_identified_yet",
             Self::NeverMeasured { .. } => "never_measured",
         }
@@ -88,7 +100,11 @@ impl BindRefusal {
         // 悄悄失效的方式，而落错边的代价是删掉一行合法的纳管。
         match self {
             Self::UnreadableUsbIdentity | Self::NotIdentifiedYet => RefusalKind::MissingEvidence,
-            Self::NoStrategy(_) | Self::NeverMeasured { .. } => RefusalKind::Verdict,
+            // 目录说不行是一个**真判定**：证据齐全（USB 标识读到了、
+            // 目录也读到了），答案就是不该管。
+            Self::NoStrategy(_) | Self::NotInCatalogue { .. } | Self::NeverMeasured { .. } => {
+                RefusalKind::Verdict
+            }
         }
     }
 }
@@ -108,9 +124,21 @@ impl std::fmt::Display for BindRefusal {
             ),
             Self::NoStrategy(identity) => write!(
                 formatter,
-                "no strategy in this build drives {identity}; it is not on the supported-device \
-                 list, and adopting it would put a row in the registry no probe can satisfy"
+                "no strategy in this build drives {identity}; adopting it would put a row in the \
+                 registry no probe can satisfy"
             ),
+            Self::NotInCatalogue { usb, gate } => match gate {
+                crate::DeviceGate::Disabled => write!(
+                    formatter,
+                    "{usb} is switched off in the supported-device list; this build can drive it, \
+                     so the fix is in the catalogue rather than in the agent"
+                ),
+                _ => write!(
+                    formatter,
+                    "{usb} is not on the supported-device list; this build can drive it, so the \
+                     fix is to add it to the catalogue rather than to the agent"
+                ),
+            },
             Self::NotIdentifiedYet => write!(
                 formatter,
                 "its model and home network have not both been read yet, so there is no pairing \
@@ -145,6 +173,19 @@ pub fn bind_gates(
     };
     if !registry.drives(identity) {
         return Err(BindRefusal::NoStrategy(identity));
+    }
+    // 闸 1 的第二半：代码驱动得了，目录还要放行。
+    //
+    // ⚠️ 一份**没有** `[[device]]` 段的文档在这里放行（`NotStated.admits()`
+    // 为真），这是向后兼容的关键：线上跑的那份矩阵就没有这个段，而目录还没有
+    // 任何发布方。要是「没说」等于「不行」，新 build 上线那一刻整个机队全体
+    // 过不了闸 —— 一次纯粹的能力增强变成一次全线中断。
+    let gate = matrix.device_gate(identity);
+    if !gate.admits() {
+        return Err(BindRefusal::NotInCatalogue {
+            usb: identity,
+            gate,
+        });
     }
 
     // 闸 2：测试过的
