@@ -389,7 +389,31 @@ impl Store {
                  discovery, manageable, control_port)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(imei) DO UPDATE SET
-                family = excluded.family,
+                -- 型号是身份，不是每轮的观测值 —— 它和正下方的 firmware
+                -- 是同一类事实（只有把模块重刷才会变），而不是和 state /
+                -- last_seen 同类。同一个 IMEI 的型号永远不变。
+                --
+                -- 但不能照抄 firmware 的 COALESCE：退化的读数不是 NULL，是一个
+                -- 非空的降级串。ModemFamily::detect_name 在型号和固件都读回空串
+                -- 时返回字面量 unknown，而那正是只走 AT 的 EC200U 在它那 15 分钟
+                -- 的挂死里会发生的事。COALESCE 对 unknown 无效。
+                --
+                -- 只拦覆盖，不拦首次写入：一根从没被认出过的模组要能以 unknown
+                -- 落一行，否则运维连它插着都看不到。
+                --
+                -- 也只拦这两个哨兵值。Other(_) 里的垃圾不在此列 —— 台架上真出现过
+                -- family = 0（模组对型号查询答了 0），但代码分不出 0 和 SIM7600G，
+                -- 后者是一个合法的、只是本 build 不认识的型号。在这一层猜哪个是
+                -- 垃圾，会把不认识的硬件和模组答了废话混成一件事。那属于判定层：
+                -- 追溯执行对 Other(_) 维持现状并告警，而不是解绑。
+                --
+                -- 代价具体：纳管第二道闸按 (family, carrier) 查规则，family 被抹成
+                -- unknown 之后这一对在矩阵里必然缺席，于是判成从没测过。
+                family = CASE
+                             WHEN TRIM(excluded.family) IN ('', 'unknown')
+                             THEN local_modems.family
+                             ELSE excluded.family
+                         END,
                 -- Same policy as the card identity below: a pass that could
                 -- not read one of these keeps the last that could. Firmware
                 -- is only re-read on a probe that got that far, and the

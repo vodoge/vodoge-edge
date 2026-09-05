@@ -4906,16 +4906,26 @@ mod linux {
                 Err(error) => log_error(format!("discoveries not pruned: {error}")),
             }
         }
+        // 🔴 `Err => None`，不是 `Err => Vec::new()`。
+        //
+        // 空的候选列表是一句**真话**（这台机器上没有待批准的 endpoint）；
+        // 读失败**不是**。云端已经把这两件事分开了：`0050` 的投影在
+        // `NOT (NEW.payload ? 'discoveries')` 时直接返回，而注释写明了理由
+        // ——「reading its silence as \"nothing is plugged in\" would clear a
+        // list somebody is looking at」。撒谎的是这一半。
+        //
+        // 这和正下方 `managed` 的写法是同一条规则，也和它同一个来历：
+        // `managed_imeis` 那次，一次短暂的存储读失败取消了整台设备的纳管。
         let discoveries = match shared
             .0
             .lock()
             .expect("store")
             .list_local_modem_discoveries()
         {
-            Ok(rows) => rows,
+            Ok(rows) => Some(rows),
             Err(error) => {
                 log_error(format!("discoveries not read: {error}"));
-                Vec::new()
+                None
             }
         };
         // Read separately from the snapshots: the registry is the authority on
@@ -4934,7 +4944,7 @@ mod linux {
             &matrix,
             &snapshots,
             &host,
-            &discoveries,
+            discoveries.as_deref(),
             managed.as_deref(),
             now,
         )?;
@@ -7182,7 +7192,7 @@ mod linux {
         matrix: &CapabilityMatrix,
         modems: &[ModemSnapshot],
         host: &HostStats,
-        discoveries: &[edge_store::LocalModemDiscovery],
+        discoveries: Option<&[edge_store::LocalModemDiscovery]>,
         managed: Option<&[String]>,
         now: i64,
     ) -> serde_json::Value {
@@ -7271,25 +7281,6 @@ mod linux {
             // nobody manages any more: the edge simply stops reporting one,
             // and without this the row sits at its last observation for ever,
             // which reads as a healthy module that went quiet.
-            // What the agent has seen and not written to. The panel could
-            // always list these and claim one; until they travelled, an
-            // operator working from the cloud could not tell that a stick had
-            // been plugged in at all.
-            "discoveries": discoveries
-                .iter()
-                .map(|candidate| serde_json::json!({
-                    "candidate_key": candidate.candidate_key,
-                    "usb_device": candidate.usb_device,
-                    "transport": candidate.transport,
-                    "control_port": candidate.control_port,
-                    "vendor_id": candidate.vendor_id,
-                    "product_id": candidate.product_id,
-                    "state": candidate.state,
-                    "imei": candidate.imei,
-                    "detail": candidate.detail,
-                    "last_seen": candidate.last_seen,
-                }))
-                .collect::<Vec<_>>()
         });
         // 🔴 Inserted only when the registry was actually read, and `json!`
         // is why this is not a field above: `Option::None` there serialises as
@@ -7301,6 +7292,37 @@ mod linux {
         // row; sending one because a store read failed would unmanage the
         // whole device on a transient error.
         let mut payload = payload;
+        // What the agent has seen and not written to. The panel could always
+        // list these and claim one; until they travelled, an operator working
+        // from the cloud could not tell that a stick had been plugged in at
+        // all.
+        //
+        // 🔴 Inserted only when the store was actually read, for the same
+        // reason `managed_imeis` below is -- and against the same cloud rule.
+        // `0050`'s projection replaces the whole list from this key, so an
+        // empty array retires every candidate row for this device. Sending one
+        // because a store read failed would clear a list an operator is
+        // looking at, on a transient error.
+        if let (Some(discoveries), Some(map)) = (discoveries, payload.as_object_mut()) {
+            map.insert(
+                "discoveries".into(),
+                serde_json::json!(discoveries
+                    .iter()
+                    .map(|candidate| serde_json::json!({
+                        "candidate_key": candidate.candidate_key,
+                        "usb_device": candidate.usb_device,
+                        "transport": candidate.transport,
+                        "control_port": candidate.control_port,
+                        "vendor_id": candidate.vendor_id,
+                        "product_id": candidate.product_id,
+                        "state": candidate.state,
+                        "imei": candidate.imei,
+                        "detail": candidate.detail,
+                        "last_seen": candidate.last_seen,
+                    }))
+                    .collect::<Vec<_>>()),
+            );
+        }
         if let (Some(managed), Some(map)) = (managed, payload.as_object_mut()) {
             map.insert("managed_imeis".into(), serde_json::json!(managed));
         }
@@ -7312,7 +7334,7 @@ mod linux {
         matrix: &CapabilityMatrix,
         modems: &[ModemSnapshot],
         host: &HostStats,
-        discoveries: &[edge_store::LocalModemDiscovery],
+        discoveries: Option<&[edge_store::LocalModemDiscovery]>,
         managed: Option<&[String]>,
         now: i64,
     ) -> Result<(), String> {
@@ -7356,7 +7378,7 @@ mod linux {
                 &matrix(),
                 &[],
                 &HostStats::default(),
-                &[candidate()],
+                Some(&[candidate()]),
                 None,
                 7,
             );
@@ -7383,7 +7405,7 @@ mod linux {
                 &matrix(),
                 &[],
                 &HostStats::default(),
-                &[],
+                Some(&[]),
                 None,
                 7,
             );
@@ -7402,13 +7424,54 @@ mod linux {
                 &matrix(),
                 &[],
                 &HostStats::default(),
-                &[],
+                Some(&[]),
                 Some(&[]),
                 7,
             );
             let map = payload.as_object().expect("map");
             assert!(map.contains_key("managed_imeis"), "「一个都没纳管」是真话，不该被吞掉");
             assert_eq!(map["managed_imeis"].as_array().map(Vec::len), Some(0));
+        }
+
+        /// 🔴 候选列表读不到时，这个键必须**根本不出现**。
+        ///
+        /// 和 managed_imeis 是同一条规则，而且云端已经把它实现好了：
+        /// 0050 的投影在 `NOT (NEW.payload ? 'discoveries')` 时直接返回，
+        /// 注释写明「reading its silence as \"nothing is plugged in\" would
+        /// clear a list somebody is looking at」。而这条投影是**整表替换**
+        /// ——一个捏造的空数组会退休掉这台设备下的每一行候选。
+        ///
+        /// 也就是说：云端等这半边说真话已经等了很久，是边缘这半在撒谎。
+        #[test]
+        fn an_unreadable_candidate_list_omits_the_key_entirely() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                None,
+                None,
+                7,
+            );
+            assert!(
+                !payload.as_object().expect("map").contains_key("discoveries"),
+                "读不到就写空数组，云端会把运维正在看的候选列表整张清掉"
+            );
+        }
+
+        /// 阴性对照：真的一个候选都没有，是一句真话，要照发。
+        #[test]
+        fn an_empty_candidate_list_is_a_statement_and_is_sent() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                Some(&[]),
+                None,
+                7,
+            );
+            let map = payload.as_object().expect("map");
+            assert!(map.contains_key("discoveries"), "「一个候选都没有」是真话");
+            assert_eq!(map["discoveries"].as_array().map(Vec::len), Some(0));
         }
 
         /// 找不到的模组也要出现在名单里 —— 名单是注册表，不是本轮观测。
@@ -7418,7 +7481,7 @@ mod linux {
                 &matrix(),
                 &[],
                 &HostStats::default(),
-                &[],
+                Some(&[]),
                 Some(&["868019060490134".to_string()]),
                 7,
             );
