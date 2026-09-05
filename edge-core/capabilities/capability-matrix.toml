@@ -1,4 +1,24 @@
-version = "2026-08-20"
+# 还没收到云端推送时，这台 agent 依据的那一份。
+#
+# 🔴 这份文件**不是**真相源。真相源是云端的 app.support_ledger，
+# 由 publish-ledger / 控制台发布，经 update_capability_matrix 推下来，
+# 落在边缘库的 capability_matrix 表里。main.rs 优先用存储里那一份,
+# 只有取不到或解析不了才回落到这里。
+#
+# 2026-09-05：删掉了 9 条 —— EC25-CN 的 4 条、EG25-G 的 4 条，以及
+# EC20 × CN-Unicom。它们从未进过云端账本，也就没人说得出是谁在什么硬件上
+# 测的；账本的价值全在「里面写的都是量出来的」，所以作废而不是补录。
+#
+# 留着它们的危害是具体的：一台还没收到推送的边缘机会拿这些已作废的结论去开
+# 纳管的闸，而面板会把它报成 `rule` —— 读的人以为背后有一次测量。
+# edge-core/tests/sms_matrix.rs 的 voided_pairs_read_as_untested_in_the_builtin_matrix
+# 钉住了这个后果。
+#
+# ⚠️ 剩下这 3 条和线上在跑的那份**仍然不一致**（`data` 的有无、`sms_mt`
+# 是 probe 还是 supported）。内置矩阵作为「第二个真相源」的问题没有被这次
+# 删除解决，只是缩小了。彻底的解法见
+# vodoge-cloud/docs/device-catalogue.md 的未决第 1 条。
+version = "2026-09-05"
 
 [fallback]
 sms_mo = { kind = "probe" }
@@ -22,69 +42,6 @@ data = { kind = "supported", bearer = "cellular" }
 
 [[rule]]
 modem_family = "EC20"
-carrier = "CN-Unicom"
-sms_mo = { kind = "supported", bearer = "cellular" }
-sms_mt = { kind = "supported", bearer = "cellular" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EC20"
-carrier = "Generic-International"
-sms_mo = { kind = "probe" }
-sms_mt = { kind = "probe" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EC25-CN"
-carrier = "CN-Mobile"
-sms_mo = { kind = "supported", bearer = "cellular" }
-sms_mt = { kind = "supported", bearer = "cellular" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EC25-CN"
-carrier = "CN-Unicom"
-sms_mo = { kind = "supported", bearer = "cellular" }
-sms_mt = { kind = "supported", bearer = "cellular" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EC25-CN"
-carrier = "CN-Telecom"
-sms_mo = { kind = "probe" }
-sms_mt = { kind = "probe" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EC25-CN"
-carrier = "Generic-International"
-sms_mo = { kind = "probe" }
-sms_mt = { kind = "probe" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EG25-G"
-carrier = "CN-Mobile"
-sms_mo = { kind = "supported", bearer = "cellular" }
-sms_mt = { kind = "supported", bearer = "cellular" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EG25-G"
-carrier = "CN-Unicom"
-sms_mo = { kind = "supported", bearer = "cellular" }
-sms_mt = { kind = "supported", bearer = "cellular" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EG25-G"
-carrier = "CN-Telecom"
-sms_mo = { kind = "probe" }
-sms_mt = { kind = "probe" }
-data = { kind = "supported", bearer = "cellular" }
-
-[[rule]]
-modem_family = "EG25-G"
 carrier = "Generic-International"
 sms_mo = { kind = "probe" }
 sms_mt = { kind = "probe" }
