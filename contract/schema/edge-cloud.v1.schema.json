@@ -838,6 +838,18 @@
         }
       }
     },
+    "ReconfirmModemCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "modem_imei"],
+      "properties": {
+        "kind": { "const": "ReconfirmModem" },
+        "modem_imei": {
+          "description": "The marked module to re-run the adoption gates against. Not a way to silence the mark: the agent clears it only when the gates pass again, and otherwise keeps the mark while restarting the quarantine countdown, so somebody fixing the real cause is not raced by the grace period. Adoption provenance is never touched.",
+          "$ref": "#/$defs/Imei"
+        }
+      }
+    },
     "ClaimModemCandidateCommand": {
       "type": "object",
       "additionalProperties": false,
@@ -846,6 +858,19 @@
         "kind": { "const": "ClaimModemCandidate" },
         "candidate_key": {
           "description": "Which observed endpoint to approve for an identity probe. Deliberately the only input: the command approves something the agent already saw, and taking a port or an IMEI here would let the cloud describe hardware nobody has looked at.",
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "RevokeModemCandidateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "candidate_key"],
+      "properties": {
+        "kind": { "const": "RevokeModemCandidate" },
+        "candidate_key": {
+          "description": "Which approved endpoint to stop probing. The mirror of ClaimModemCandidate: somebody nodded at a serial port, and this is the way to take that back. The agent refuses when the module behind it is currently managed -- revoking then would leave a registered module that nothing talks to, and that state does not announce itself.",
           "type": "string",
           "maxLength": 128
         }
@@ -1051,8 +1076,10 @@
       { "$ref": "#/$defs/RefreshModemsCommand" },
       { "$ref": "#/$defs/ReadLogsCommand" },
       { "$ref": "#/$defs/ClaimModemCandidateCommand" },
+      { "$ref": "#/$defs/RevokeModemCandidateCommand" },
       { "$ref": "#/$defs/RegisterModemCommand" },
       { "$ref": "#/$defs/UnregisterModemCommand" },
+      { "$ref": "#/$defs/ReconfirmModemCommand" },
       { "$ref": "#/$defs/RenameEsimProfileCommand" },
       { "$ref": "#/$defs/DisableEsimProfileCommand" },
       { "$ref": "#/$defs/DeleteEsimProfileCommand" },

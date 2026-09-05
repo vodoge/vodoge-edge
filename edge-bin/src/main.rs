@@ -1858,6 +1858,23 @@ mod linux {
             Ok(serde_json::json!({ "candidate_key": result.candidate_key }))
         }
 
+        /// 撤销探测批准，走面板那同一份实现。
+        ///
+        /// 一份实现两个入口，和 register_modem 同一个理由：两份「谁可以被撤销」
+        /// 会漂移，而漂移的那一份正是会让人撤掉一根正在服务的模组的那一份。
+        ///
+        /// `was_approved` 要带回云端。撤一个从没批准过的候选是成功的空操作，
+        /// 运维需要分得清它和「真的撤掉了」—— 回一个笼统的 ok 会把两种情况
+        /// 说成同一件事，而后者通常意味着他点错了行。
+        fn revoke_modem_candidate(&mut self, candidate_key: &str) -> Result<JsonValue, SendError> {
+            let result = Actions::revoke_modem_candidate(self, candidate_key.to_string())
+                .map_err(action_failed)?;
+            Ok(serde_json::json!({
+                "candidate_key": result.candidate_key,
+                "was_approved": result.was_approved,
+            }))
+        }
+
         /// The agent's own log ring, the one the LAN panel serves.
         ///
         /// Bounded at 500 lines, which a healthy poll loop fills in about
@@ -1883,6 +1900,22 @@ mod linux {
                 log_line(format!("modem {imei} adopted from the cloud: {note}"));
             }
             json_details(&result)
+        }
+
+        /// 重新确认，走面板那同一份实现。
+        ///
+        /// 🔴 `cleared` 和 `restarted` 两个都要带回去，而且**不能**把
+        /// 「闸仍然不通过」回成成功的样子。云端看到的必须和现场看到的是
+        /// 同一句话，否则控制台上一个绿色的「已完成」会让人以为修好了，
+        /// 而下一轮它又被标记。
+        fn reconfirm_modem(&mut self, imei: &str) -> Result<JsonValue, SendError> {
+            let result = Actions::reconfirm_modem(self, imei.to_string()).map_err(action_failed)?;
+            Ok(serde_json::json!({
+                "modem_imei": result.imei,
+                "cleared": result.cleared,
+                "restarted": result.restarted,
+                "message": result.message,
+            }))
         }
 
         fn unregister_modem(&mut self, imei: &str) -> Result<JsonValue, SendError> {

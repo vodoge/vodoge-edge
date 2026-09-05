@@ -212,6 +212,17 @@ pub trait SendPort {
         Err(unsupported("claim_modem_candidate"))
     }
 
+    /// Take that approval back: stop probing an endpoint somebody nodded at.
+    ///
+    /// The agent refuses when the module behind it is currently managed.
+    /// Revoking then would leave a registered module nothing talks to -- it
+    /// keeps its row, keeps appearing in `managed_imeis`, and produces no
+    /// alert, because the silence watchdog watches devices rather than
+    /// modules. Unmanage first, then revoke.
+    fn revoke_modem_candidate(&mut self, _candidate_key: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("revoke_modem_candidate"))
+    }
+
     /// The agent's own recent log lines.
     ///
     /// The same ring the LAN panel serves. It exists because reaching these
@@ -225,6 +236,18 @@ pub trait SendPort {
     /// Stop managing a module. What it produced is kept.
     fn unregister_modem(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
         Err(unsupported("unregister_modem"))
+    }
+
+    /// Re-run the adoption gates against a module the gates have marked.
+    ///
+    /// Not a way to silence the mark. The agent clears it only when the gates
+    /// pass again; when they still refuse it keeps the mark and restarts the
+    /// quarantine countdown, so somebody fixing the real cause -- usually by
+    /// pushing a matrix -- is not raced by the grace period. Adoption
+    /// provenance is never touched: the existing workaround is unregister and
+    /// re-register, which rewrites it to today.
+    fn reconfirm_modem(&mut self, _imei: &str) -> Result<JsonValue, SendError> {
+        Err(unsupported("reconfirm_modem"))
     }
 
     fn read_logs(
@@ -1130,6 +1153,14 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                     true,
                 ))
             }
+            Command::RevokeModemCandidate { candidate_key } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.revoke_modem_candidate(candidate_key);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
             Command::RegisterModem { modem_imei, note } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.register_modem(modem_imei, note.as_deref());
@@ -1141,6 +1172,14 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Command::UnregisterModem { modem_imei } => {
                 self.mark_executing(&payload.cmd_id);
                 let outcome = self.port.unregister_modem(modem_imei);
+                Ok((
+                    diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
+                    true,
+                ))
+            }
+            Command::ReconfirmModem { modem_imei } => {
+                self.mark_executing(&payload.cmd_id);
+                let outcome = self.port.reconfirm_modem(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
                     true,

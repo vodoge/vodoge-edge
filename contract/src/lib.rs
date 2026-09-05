@@ -495,7 +495,25 @@ pub struct UnregisterModemCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReconfirmModemCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimModemCandidateCommand {
+    #[serde(rename = "kind")]
+    pub kind: String,
+    #[serde(rename = "candidate_key")]
+    pub candidate_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeModemCandidateCommand {
     #[serde(rename = "kind")]
     pub kind: String,
     #[serde(rename = "candidate_key")]
@@ -1156,6 +1174,10 @@ pub enum Command {
         #[serde(rename = "candidate_key")]
         candidate_key: String,
     },
+    RevokeModemCandidate {
+        #[serde(rename = "candidate_key")]
+        candidate_key: String,
+    },
     RegisterModem {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
@@ -1164,6 +1186,10 @@ pub enum Command {
         note: Option<String>,
     },
     UnregisterModem {
+        #[serde(rename = "modem_imei")]
+        modem_imei: String,
+    },
+    ReconfirmModem {
         #[serde(rename = "modem_imei")]
         modem_imei: String,
     },
