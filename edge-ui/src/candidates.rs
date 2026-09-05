@@ -85,11 +85,27 @@ fn hardware(c: &DiscoveryBody) -> Option<String> {
     if c.vendor_id.is_none() && c.product_id.is_none() {
         return None;
     }
-    Some(format!(
+    let usb = format!(
         "USB {}:{}",
         c.vendor_id.as_deref().unwrap_or("????"),
         c.product_id.as_deref().unwrap_or("????")
-    ))
+    );
+    // 型号在前，USB 身份在后：运维先问「这是什么」，再问「插在哪个口」。
+    //
+    // 读不到型号就只画 USB 身份，**不填 unknown 也不猜**。这一格是纳管前的
+    // 最后一眼，写一个编出来的型号比留空更坏 —— 闸 2 也正是拿这个值去查
+    // 规则的，屏幕上说 EC20 而闸按别的判，事后没人能对上账。
+    Some(
+        match c
+            .family
+            .as_deref()
+            .map(str::trim)
+            .filter(|family| !family.is_empty() && *family != "unknown")
+        {
+            Some(family) => format!("{family} · {usb}"),
+            None => usb,
+        },
+    )
 }
 
 /// 浏览器自带的确认框。
@@ -345,6 +361,8 @@ fn Row(
     let claimable = can_claim(&c);
     let adoptable = can_adopt(&c, &managed);
     let imei = c.imei.clone().unwrap_or_default();
+    // 视图和动作各拿一份：动作那份会被闭包 move 走。
+    let imei_shown = imei.clone();
     let detail = c.detail.clone();
     // 🔴 行标识用 USB 路径，不用控制口。
     //
@@ -406,6 +424,17 @@ fn Row(
                 }}
             </div>
             <div class="vd-cand-cell">{hw.unwrap_or_else(|| "—".into())}</div>
+            // IMEI —— 纳管按的就是它。
+            //
+            // 机队上三根 EC20 的 vid:pid 一模一样，型号那一格分不出它们；
+            // `usb_device` 说的是「插在哪个口」。而纳管这个动作的参数是 IMEI，
+            // 屏幕上不画它，运维就是在盲按。还没报出 IMEI 的候选留一个破折号 ——
+            // 那种行本来也按不了「纳管」。
+            <div class="vd-cand-cell">
+                <Caption1>
+                    {if imei_shown.is_empty() { "—".to_string() } else { format!("IMEI {imei_shown}") }}
+                </Caption1>
+            </div>
             <div class="vd-cand-cell">
                 {move || {
                     // 认领笔记盖过服务端的详情：操作员刚按下去的那件事,比一条
@@ -498,6 +527,7 @@ mod tests {
             product_id: Some("0125".into()),
             state: "found".into(),
             imei: None,
+            family: Some("EC20".into()),
             detail: "no identity yet".into(),
             last_seen: 0,
         }
@@ -634,17 +664,57 @@ mod tests {
     }
 
     #[test]
+    /// 🔴 运维要在这一行上按「纳管」，行上就得说清纳管的是什么。
+    ///
+    /// 只画 USB vid:pid 是不够的：机队上三根 EC20 的 vid:pid 一模一样
+    /// （2c7c:0125），光看这个分不出按的是哪一根。型号回答「这是什么硬件」，
+    /// IMEI 回答「是哪一根」—— 缺任何一个，「手动管理」就成了盲按。
+    #[test]
+    fn a_row_says_what_you_are_about_to_adopt() {
+        let c = candidate();
+        let text = hardware(&c).expect("有 USB 身份就该有一行硬件说明");
+        assert!(text.contains("EC20"), "没说型号：{text}");
+        assert!(text.contains("2c7c:0125"), "没说 USB 身份：{text}");
+    }
+
+    /// 型号还没读出来时不能编一个 —— 那一格留空比写错强。
+    #[test]
+    fn an_unread_family_is_left_blank_not_guessed() {
+        let mut c = candidate();
+        c.family = None;
+        let text = hardware(&c).expect("USB 身份还在");
+        assert!(text.contains("2c7c:0125"), "USB 身份不该跟着消失：{text}");
+        assert!(
+            !text.contains("unknown") && !text.contains("EC"),
+            "型号读不到时不该编一个：{text}"
+        );
+    }
+
+    #[test]
     fn hardware_shows_what_it_has_and_marks_what_it_lacks() {
-        assert_eq!(hardware(&candidate()).as_deref(), Some("USB 2c7c:0125"));
+        assert_eq!(
+            hardware(&candidate()).as_deref(),
+            Some("EC20 · USB 2c7c:0125")
+        );
 
         // 两边各缺一次 —— 只验一边的话，另一边的 "????" 是没人守的。
+        //
+        // 型号读到了但 USB 身份缺一半时，缺的那一半仍要显式标出来：这一格
+        // 是给人看的，"????" 说的是「这里本该有个值，我们没读到」，而留空
+        // 会被读成「这块硬件就是这样」。
         let mut no_product = candidate();
         no_product.product_id = None;
-        assert_eq!(hardware(&no_product).as_deref(), Some("USB 2c7c:????"));
+        assert_eq!(
+            hardware(&no_product).as_deref(),
+            Some("EC20 · USB 2c7c:????")
+        );
 
         let mut no_vendor = candidate();
         no_vendor.vendor_id = None;
-        assert_eq!(hardware(&no_vendor).as_deref(), Some("USB ????:0125"));
+        assert_eq!(
+            hardware(&no_vendor).as_deref(),
+            Some("EC20 · USB ????:0125")
+        );
 
         let mut none = candidate();
         none.vendor_id = None;

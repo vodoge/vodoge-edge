@@ -166,6 +166,12 @@ pub struct DiscoveryBody {
     pub product_id: Option<String>,
     pub state: String,
     pub imei: Option<String>,
+    /// 这一根是什么型号 —— 探到时写下的。
+    ///
+    /// 面板上这一格的作用是让运维在按「纳管」之前知道自己纳管的是什么：
+    /// 机队上三根 EC20 的 vid:pid 一模一样，光看 USB 身份分不出。
+    /// 也是纳管闸 2 的输入之一（见 edge-store 的 0017 迁移）。
+    pub family: Option<String>,
     pub detail: String,
     pub last_seen: i64,
 }

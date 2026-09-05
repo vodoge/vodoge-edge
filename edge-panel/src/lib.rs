@@ -979,6 +979,7 @@ fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {
             product_id: value.product_id,
             state: value.state,
             imei: value.imei,
+            family: value.family,
             detail: value.detail,
             last_seen: value.last_seen,
         }
