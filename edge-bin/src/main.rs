@@ -8101,14 +8101,35 @@ mod linux {
         if !plan.hold.is_empty() {
             // 判据整体不可信（回落到内置矩阵、uplink 没连上过）单独成一条：
             // 那是一台机器的状态，不是几根模组各自的问题。
-            let systemic = plan.hold.iter().any(|(_, reason)| {
-                matches!(
-                    reason,
-                    edge_core::HoldReason::MatrixNotAuthoritative(_)
-                        | edge_core::HoldReason::UplinkNeverResumed
-                )
+            // 🔴 两个 systemic 原因要**分别**报，不能合成一条。
+            //
+            // 第一版把它们都塞进 `retro_matrix_not_authoritative`，
+            // context 里写 `authority.wire()`。冷启动那几趟的实际输出是
+            // 「矩阵不权威」配上 `authority: "stored"` —— 文案和字段
+            // 自相矛盾，而读它的人多半是在半夜排查为什么执行停了。
+            //
+            // 而且这两件事的下一步完全不同：矩阵不权威要去看这台机器的
+            // 矩阵是哪来的；uplink 没连上过要去看网络和证书。
+            let uplink_cold = plan
+                .hold
+                .iter()
+                .any(|(_, reason)| matches!(reason, edge_core::HoldReason::UplinkNeverResumed));
+            let matrix_weak = plan.hold.iter().any(|(_, reason)| {
+                matches!(reason, edge_core::HoldReason::MatrixNotAuthoritative(_))
             });
-            if systemic {
+            if uplink_cold {
+                sink((
+                    edge_core::AlertLevel::Warning,
+                    "retro_uplink_never_resumed",
+                    "registration gates not evaluated: this agent has not reached the cloud since it started"
+                        .to_owned(),
+                    serde_json::json!({
+                        "matrix_version": matrix_version,
+                        "held": plan.hold.len(),
+                    }),
+                    Throttling::Throttled,
+                ));
+            } else if matrix_weak {
                 sink((
                     edge_core::AlertLevel::Warning,
                     "retro_matrix_not_authoritative",
@@ -8394,11 +8415,24 @@ mod linux {
             retired: &[(String, edge_core::BindRefusal)],
             mode: EnforceMode,
         ) -> Vec<PlannedAlert> {
+            alerts_with(plan, retired, mode, edge_core::MatrixAuthority::Stored)
+        }
+
+        /// ⚠️ authority 要能传进来。写死成 Stored 的话，那条「矩阵不权威」的
+        /// 断言就会去断言一个**生产里不可能出现**的组合（hold 原因说
+        /// BuiltinNoRow，context 里却是 stored），而断言不可能的值是坏味道：
+        /// 它会在真值变了的时候照样通过。
+        fn alerts_with(
+            plan: &EnforcementPlan,
+            retired: &[(String, edge_core::BindRefusal)],
+            mode: EnforceMode,
+            authority: edge_core::MatrixAuthority,
+        ) -> Vec<PlannedAlert> {
             let mut out = Vec::new();
             emit_plan_alerts(
                 plan,
                 retired,
-                edge_core::MatrixAuthority::Stored,
+                authority,
                 "2026-09-01T03:32:24Z",
                 mode,
                 |a| out.push(a),
@@ -8538,6 +8572,50 @@ mod linux {
             assert_eq!(
                 codes(&alerts(&plan, &[], EnforceMode::Mark)),
                 vec!["retro_matrix_not_authoritative"]
+            );
+        }
+
+        /// 🔴 冷启动那一支不能报成「矩阵不权威」。
+        ///
+        /// 第一版把两个 systemic 原因合成一条，于是冷启动的实际输出是
+        /// 「矩阵不权威」配上 `authority: "stored"` —— 文案和字段自相矛盾。
+        /// 两件事的下一步也完全不同：一个去看矩阵哪来的，一个去看网络和证书。
+        #[test]
+        fn a_cold_uplink_is_not_reported_as_a_bad_matrix() {
+            let plan = EnforcementPlan {
+                hold: vec![("1".into(), edge_core::HoldReason::UplinkNeverResumed)],
+                ..Default::default()
+            };
+            let emitted = alerts(&plan, &[], EnforceMode::Mark);
+            assert_eq!(codes(&emitted), vec!["retro_uplink_never_resumed"]);
+            assert!(
+                emitted[0].3.get("authority").is_none(),
+                "冷启动那条不该带 authority —— 它和矩阵权威性无关"
+            );
+        }
+
+        /// 阴性对照：真的是矩阵不权威时，照旧报那一条，并带上 authority。
+        #[test]
+        fn a_weak_matrix_is_still_reported_with_its_authority() {
+            let plan = EnforcementPlan {
+                hold: vec![(
+                    "1".into(),
+                    edge_core::HoldReason::MatrixNotAuthoritative(
+                        edge_core::MatrixAuthority::BuiltinNoRow,
+                    ),
+                )],
+                ..Default::default()
+            };
+            let emitted = alerts_with(
+                &plan,
+                &[],
+                EnforceMode::Mark,
+                edge_core::MatrixAuthority::BuiltinNoRow,
+            );
+            assert_eq!(codes(&emitted), vec!["retro_matrix_not_authoritative"]);
+            assert_eq!(
+                emitted[0].3["authority"], "builtin_no_row",
+                "context 里的 authority 必须是真的那一个，否则运维会去查错方向"
             );
         }
 
