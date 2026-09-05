@@ -167,3 +167,89 @@ fn the_builtin_matrix_states_nothing_about_hardware() {
     assert_eq!(m.devices(), None);
     assert_eq!(m.device_gate(EC20), DeviceGate::NotStated);
 }
+
+// ────────────────────────── min_agent_version ──────────────────────────
+
+use edge_core::VersionCheck;
+
+fn with_min(v: &str) -> CapabilityMatrix {
+    matrix(&format!("version = \"x\"\nmin_agent_version = \"{v}\"\n{ONE_RULE}"))
+}
+
+/// 没写就不设限。
+#[test]
+fn a_document_without_a_minimum_does_not_gate_on_version() {
+    let m = matrix(&format!(r#"version = "x"{ONE_RULE}"#));
+    assert_eq!(m.version_check("0.1.0"), VersionCheck::NotRequired);
+    assert!(m.version_check("0.1.0").admits());
+}
+
+/// 够格就放行，包括正好相等。
+#[test]
+fn an_agent_at_or_above_the_minimum_is_admitted() {
+    for running in ["0.2.0", "0.2.1", "0.3.0", "1.0.0"] {
+        assert_eq!(
+            with_min("0.2.0").version_check(running),
+            VersionCheck::Satisfied,
+            "{running} 被挡住了"
+        );
+    }
+}
+
+/// 🔴 不够格要拒，而且要说出两边的版本。
+///
+/// 只说「版本太低」而不说是哪两个数，运维得去两个地方查才能知道差多少。
+#[test]
+fn an_older_agent_is_refused_and_the_message_names_both_versions() {
+    let check = with_min("0.2.0").version_check("0.1.0");
+    assert_eq!(
+        check,
+        VersionCheck::TooOld {
+            required: "0.2.0".into(),
+            running: "0.1.0".into()
+        }
+    );
+    assert!(!check.admits());
+}
+
+/// 🔴 版本串读不出来也**拒**。无法判断不是通过。
+///
+/// 做成 `Option<bool>` 的话，调用方要么忘了处理 None，要么写成
+/// `unwrap_or(true)` —— 而那正好让一个写错的版本号变成「不设限」，
+/// 也就是这道闸存在目的的反面。
+#[test]
+fn an_unreadable_version_is_refused_not_waved_through() {
+    for (required, running) in [
+        ("0.2.0", "not-a-version"),
+        ("latest", "0.1.0"),
+        ("0.2.0-rc1", "0.1.0"),
+        ("", "0.1.0"),
+    ] {
+        let check = with_min(required).version_check(running);
+        assert!(
+            !check.admits(),
+            "required={required:?} running={running:?} 被放行了：{check:?}"
+        );
+        assert!(matches!(check, VersionCheck::Unreadable { .. }) || matches!(check, VersionCheck::TooOld { .. }));
+    }
+}
+
+/// 位数不齐要能比。`0.2` 和 `0.2.0` 是同一个要求。
+#[test]
+fn a_short_version_string_compares_as_zero_padded() {
+    assert_eq!(with_min("0.2").version_check("0.2.0"), VersionCheck::Satisfied);
+    assert_eq!(with_min("1").version_check("1.0.0"), VersionCheck::Satisfied);
+    assert!(!with_min("1").version_check("0.9.9").admits());
+}
+
+/// 按数值比，不是按字典序。`0.10.0` 比 `0.9.0` 新。
+///
+/// 字典序会说 "0.10.0" < "0.9.0"，于是一个本该被挡的旧 agent 会被放行。
+#[test]
+fn versions_compare_numerically_not_lexically() {
+    assert_eq!(with_min("0.10.0").version_check("0.9.0"), VersionCheck::TooOld {
+        required: "0.10.0".into(),
+        running: "0.9.0".into()
+    });
+    assert_eq!(with_min("0.9.0").version_check("0.10.0"), VersionCheck::Satisfied);
+}

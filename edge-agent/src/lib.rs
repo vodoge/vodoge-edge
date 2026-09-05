@@ -917,7 +917,12 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 matrix_version,
                 matrix_sha256,
                 matrix,
-            } => match install_matrix(matrix_version, matrix_sha256, matrix) {
+            } => match install_matrix(
+                matrix_version,
+                matrix_sha256,
+                matrix,
+                self.guard.current.as_str(),
+            ) {
                 Ok(parsed) => {
                     self.matrix = parsed;
                     // Stored after the parse, so a restart cannot load a
@@ -1544,6 +1549,7 @@ fn install_matrix(
     matrix_version: &str,
     matrix_sha256: &str,
     matrix: &ContextValue,
+    running_version: &str,
 ) -> Result<CapabilityMatrix, (&'static str, String)> {
     let bytes = serde_json::to_vec(matrix).map_err(|err| ("matrix_invalid", err.to_string()))?;
     let digest = hex_sha256(&bytes);
@@ -1565,6 +1571,40 @@ fn install_matrix(
                 matrix_version
             ),
         ));
+    }
+    // 🔴 本 build 够不够格读这份文档。不够就**整份拒绝**，上一份原样留着。
+    //
+    // 理由不是洁癖：`MatrixDocument` 没有 `deny_unknown_fields`，所以一个
+    // 旧 build 读到带 `[[device]]` 的新文档会**静默地**把整段丢掉 ——
+    // 也就是没有纳管的闸 1，而且不报错。滚动升级期间这必然发生，
+    // 而「装了一半」比「没装」难查得多：云端看到 succeeded，边缘却在按
+    // 一份它读不全的文档做纳管决定。
+    //
+    // 拒绝在这里，是因为这是**唯一**的安装点：拒了就既不会进内存，
+    // 也不会被 persist（那一步在调用方，只在 Ok 之后才走）。
+    match parsed.version_check(running_version) {
+        check if check.admits() => {}
+        edge_core::VersionCheck::TooOld { required, running } => {
+            return Err((
+                "matrix_needs_newer_agent",
+                format!(
+                    "capability matrix requires agent {required}, this one is {running}; \
+                     keeping the previous matrix"
+                ),
+            ));
+        }
+        edge_core::VersionCheck::Unreadable { required, running } => {
+            return Err((
+                "matrix_needs_newer_agent",
+                format!(
+                    "capability matrix requires agent {required:?} and this one reports \
+                     {running:?}; neither can be compared, so the matrix is refused rather \
+                     than assumed compatible"
+                ),
+            ));
+        }
+        // admits() 已经覆盖，这里只是让 match 穷举 —— 加变体时编译失败。
+        edge_core::VersionCheck::NotRequired | edge_core::VersionCheck::Satisfied => {}
     }
     Ok(parsed)
 }

@@ -1277,3 +1277,78 @@ fn the_placeholder_version_cannot_be_mistaken_for_a_real_one() {
         "占位版本号 `{version}` 长得像一个真的版本 —— 云端分不出它是假的"
     );
 }
+
+/// 一份要求更新 agent 的矩阵，整份拒绝，上一份原样留着。
+///
+/// 🔴 理由不是洁癖：`MatrixDocument` 没有 `deny_unknown_fields`，所以一个旧
+/// build 读到带 `[[device]]` 的新文档会**静默地**把整段丢掉 —— 也就是没有
+/// 纳管的闸 1，而且不报错。滚动升级期间这必然发生。
+///
+/// 「装了一半」比「没装」难查得多：云端看到 succeeded，边缘却在按一份它
+/// 读不全的文档做纳管决定。
+#[test]
+fn a_matrix_that_needs_a_newer_agent_is_refused_without_replacing() {
+    let mut json = hot_matrix_json();
+    json["min_agent_version"] = serde_json::json!("99.0.0");
+    let matrix: ContextValue = serde_json::from_value(json).expect("context");
+    let sha = sha256_hex(&serde_json::to_vec(&matrix).expect("bytes"));
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    let before = executor.matrix().version().to_string();
+
+    let outcome = executor
+        .deliver(
+            DELIVERY_A,
+            matrix_command(CMD_ID, "hot-1", &sha, matrix),
+            1_500,
+        )
+        .expect("refusal still completes the command");
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("matrix_needs_newer_agent")
+    );
+    assert!(!outcome.executed);
+    assert_eq!(
+        executor.matrix().version(),
+        before,
+        "拒绝了却把矩阵换掉了——那正是「装了一半」"
+    );
+}
+
+/// 版本串读不出来也拒。无法判断不是通过。
+#[test]
+fn a_matrix_with_an_uncomparable_minimum_is_refused() {
+    let mut json = hot_matrix_json();
+    json["min_agent_version"] = serde_json::json!("latest");
+    let matrix: ContextValue = serde_json::from_value(json).expect("context");
+    let sha = sha256_hex(&serde_json::to_vec(&matrix).expect("bytes"));
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    let before = executor.matrix().version().to_string();
+
+    let outcome = executor
+        .deliver(DELIVERY_A, matrix_command(CMD_ID, "hot-1", &sha, matrix), 1_500)
+        .expect("refusal still completes");
+    assert_eq!(
+        outcome.result.reason_code.as_deref(),
+        Some("matrix_needs_newer_agent")
+    );
+    assert_eq!(executor.matrix().version(), before);
+}
+
+/// 阴性对照：没有 min_agent_version 的照旧装得上。
+///
+/// 没有这条，上面两条可以靠「拒绝一切矩阵推送」通过，
+/// 而那会让云端再也推不下去任何东西。
+#[test]
+fn a_matrix_without_a_minimum_still_installs() {
+    let matrix: ContextValue = serde_json::from_value(hot_matrix_json()).expect("context");
+    let sha = sha256_hex(&serde_json::to_vec(&matrix).expect("bytes"));
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+
+    let outcome = executor
+        .deliver(DELIVERY_A, matrix_command(CMD_ID, "hot-1", &sha, matrix), 1_500)
+        .expect("install");
+    assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
+    assert_eq!(executor.matrix().version(), "hot-1");
+}

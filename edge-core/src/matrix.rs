@@ -94,6 +94,56 @@ impl DeviceGate {
     }
 }
 
+/// 这份文档要求的 agent 版本，本 build 够不够。
+///
+/// 🔴 四个变体，和 `DeviceGate` 同一个理由：`Unreadable` 必须有名字。
+/// 做成 `Option<bool>` 的话，调用方要么忘记处理 `None`，要么把它写成
+/// `unwrap_or(true)` —— 而那正好让一个写错的版本号变成「不设限」，
+/// 也就是这道闸存在的目的的反面。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VersionCheck {
+    /// 文档没有 `min_agent_version`。
+    NotRequired,
+    Satisfied,
+    TooOld { required: String, running: String },
+    /// 哪一边的版本串解析不了。**也拒** —— 无法判断不是通过。
+    Unreadable { required: String, running: String },
+}
+
+impl VersionCheck {
+    pub fn admits(&self) -> bool {
+        matches!(self, Self::NotRequired | Self::Satisfied)
+    }
+
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Satisfied => "satisfied",
+            Self::TooOld { .. } => "too_old",
+            Self::Unreadable { .. } => "unreadable",
+        }
+    }
+}
+
+/// `1.2.3` → `[1, 2, 3]`。位数不足补 0，多余的忽略。
+///
+/// 只认纯数字段。`0.1.0-rc1` 这样的会解析失败 —— 保守，但这道闸宁可
+/// 拒一份带预发布标签的文档，也不要在版本比较上猜。
+fn numeric_version(text: &str) -> Option<[u64; 3]> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = [0u64; 3];
+    for (index, piece) in trimmed.split('.').enumerate() {
+        if index >= 3 {
+            break;
+        }
+        parts[index] = piece.parse().ok()?;
+    }
+    Some(parts)
+}
+
 /// A parsed, versioned capability matrix.
 #[derive(Clone, Debug)]
 pub struct CapabilityMatrix {
@@ -218,6 +268,32 @@ impl CapabilityMatrix {
     /// 而不是装一半。理由见字段本身的注释。
     pub fn min_agent_version(&self) -> Option<&str> {
         self.min_agent_version.as_deref()
+    }
+
+    /// 本 build 够不够格安装这份文档。
+    ///
+    /// `min_agent_version` 存在的理由是：`MatrixDocument` 没有
+    /// `deny_unknown_fields`，所以一个旧 build 读到带 `[[device]]` 的新文档
+    /// 会**静默地**把整段丢掉 —— 也就是没有闸 1，而且不报错。
+    /// 滚动升级期间这必然发生。
+    ///
+    /// 🔴 不够格时调用方必须**拒绝安装并保留上一份**，不能装一半：
+    /// 装进去的是一份这个 build 读不全的文档，而它读不全的恰好是那道闸。
+    pub fn version_check(&self, running: &str) -> VersionCheck {
+        let Some(required) = &self.min_agent_version else {
+            return VersionCheck::NotRequired;
+        };
+        match (numeric_version(required), numeric_version(running)) {
+            (Some(need), Some(have)) if have >= need => VersionCheck::Satisfied,
+            (Some(_), Some(_)) => VersionCheck::TooOld {
+                required: required.clone(),
+                running: running.to_owned(),
+            },
+            _ => VersionCheck::Unreadable {
+                required: required.clone(),
+                running: running.to_owned(),
+            },
+        }
     }
 
     /// 受支持硬件列表。`None` = 文档里没有这个段。

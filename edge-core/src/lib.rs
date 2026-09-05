@@ -66,7 +66,7 @@ pub use retro::{
     OBSERVATION_MAX_AGE_MS,
 };
 pub use matrix::{
-    CapabilityMatrix, CapabilityOrigin, CapabilityQuery, DeviceGate, MatrixError, SupportedDevice,
+    CapabilityMatrix, CapabilityOrigin, CapabilityQuery, DeviceGate, MatrixError, SupportedDevice, VersionCheck,
 };
 pub use registration::{
     arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
