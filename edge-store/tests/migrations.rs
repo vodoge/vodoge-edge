@@ -207,3 +207,83 @@ fn an_empty_push_clears_the_set() {
     // so it cannot outlive the set it describes.
     assert_eq!(store.card_policy_version().expect("version"), None);
 }
+
+/// 生产库是**已经存在**的：0017 走的是 `ALTER TABLE ADD COLUMN`，不是建表。
+///
+/// 这条测试跑的正是那条路：回滚到 16（那时候候选表没有身份列），再前进一步。
+/// 从零建库的那条路每个测试都在跑，唯独升级路径没人跑过 —— 而机队上的每一台
+/// 走的都是升级。
+#[test]
+fn the_discovery_identity_columns_arrive_by_upgrade() {
+    let mut store = Store::open_in_memory().expect("open");
+    let latest = store.schema_version().expect("version");
+
+    store
+        .rollback_to(edge_store::DISCOVERY_IDENTITY_MIGRATION - 1)
+        .expect("roll back to before the identity columns");
+
+    // 前提要钉住，否则下面测的就不是升级。读取侧 SELECT 了那三列，
+    // 所以列不在时它必然报错 —— 这比 has_table 更贴近真实读路径。
+    assert!(
+        store.list_local_modem_discoveries().is_err(),
+        "回滚没有跨过 0017，下面那段不是在测升级"
+    );
+
+    store.migrate().expect("upgrade");
+    assert_eq!(store.schema_version().expect("version"), latest);
+    assert!(
+        store.list_local_modem_discoveries().is_ok(),
+        "升级之后读取侧必须能用"
+    );
+}
+
+/// 读不到就不覆盖 —— 三列各自都要守住。
+///
+/// AT-only 那条路要好几轮才读得出 IMSI，中间几轮归属网是 `None`。每轮都覆盖
+/// 的话，纳管闸的输入会在「有」和「无」之间反复横跳，按钮时灵时不灵，
+/// 那比一直失败更难查。型号那一列同理：生产库里出现过两行 family='0'。
+#[test]
+fn a_pass_that_read_nothing_does_not_erase_what_an_earlier_pass_read() {
+    let store = Store::open_in_memory().expect("open");
+    let mut row = edge_store::LocalModemDiscovery {
+        candidate_key: "usb/1-2".into(),
+        usb_device: Some("1-2".into()),
+        transport: "at".into(),
+        control_port: "/dev/ttyUSB12".into(),
+        vendor_id: Some("2c7c".into()),
+        product_id: Some("0901".into()),
+        state: "found".into(),
+        imei: Some("868019060490134".into()),
+        detail: "identified over AT and awaiting adoption".into(),
+        last_seen: 1,
+        family: Some("EC200U-CN".into()),
+        home_mcc: Some(460),
+        home_mnc: Some(11),
+    };
+    store.upsert_local_modem_discovery(&row).expect("first pass");
+
+    // 下一趟什么都没读到。
+    row.family = None;
+    row.home_mcc = None;
+    row.home_mnc = None;
+    row.last_seen = 2;
+    store.upsert_local_modem_discovery(&row).expect("silent pass");
+
+    let seen = store.list_local_modem_discoveries().expect("read");
+    let kept = seen.first().expect("one row");
+    assert_eq!(kept.last_seen, 2, "这一趟的时间戳照常刷新");
+    assert_eq!(kept.family.as_deref(), Some("EC200U-CN"), "型号被抹掉了");
+    assert_eq!(kept.home_mcc, Some(460), "归属 MCC 被抹掉了");
+    assert_eq!(kept.home_mnc, Some(11), "归属 MNC 被抹掉了");
+
+    // 而模组把型号答成 "unknown" 的那一轮，同样不许覆盖。
+    row.family = Some("unknown".into());
+    row.last_seen = 3;
+    store.upsert_local_modem_discovery(&row).expect("unknown pass");
+    let seen = store.list_local_modem_discoveries().expect("read");
+    assert_eq!(
+        seen.first().expect("one row").family.as_deref(),
+        Some("EC200U-CN"),
+        "模组答 unknown 时不该把已知型号盖掉"
+    );
+}

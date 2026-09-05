@@ -112,6 +112,9 @@ async fn main() {
                 imei: None,
                 detail: "POLLERR".into(),
                 last_seen: 1_700_000_000_000,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             },
             // 三种候选各一个，好看清那两个按钮什么时候出现、什么时候不出现。
             //
@@ -127,6 +130,9 @@ async fn main() {
                 imei: None,
                 detail: String::new(),
                 last_seen: 1_700_000_000_000,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             },
             // 这个已经报过 IMEI 而且不在管理列表里，所以只该出现**纳管**。
             LocalModemDiscovery {
@@ -140,6 +146,9 @@ async fn main() {
                 imei: Some("869999000000123".into()),
                 detail: "answered AT+CGSN over serial only".into(),
                 last_seen: 1_700_000_000_000,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             },
         ],
     });

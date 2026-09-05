@@ -500,6 +500,9 @@ async fn panel_serves_embedded_html_and_local_json() {
             imei: None,
             detail: "POLLERR".into(),
             last_seen: 1_700_000_000_000,
+            family: None,
+            home_mcc: None,
+            home_mnc: None,
         }],
     });
     let app = router(inbox);

@@ -76,6 +76,12 @@ CREATE INDEX IF NOT EXISTS ingested_sms_age
 /// 同一个失效形状，换了一个算错的数字。
 pub const REGISTRY_MIGRATION: i64 = 15;
 
+/// 0017 给候选表加身份三列的那一条。
+///
+/// 具名而不是 `latest - 1`：0016 落地时那个算式就已经把「注册表迁移是最后
+/// 一条」写死过一次（见 registered_modems.rs 里的注释），同一个坑不再踩。
+pub const DISCOVERY_IDENTITY_MIGRATION: i64 = 17;
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
@@ -93,6 +99,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0014_capability_matrix.sql"),
     include_str!("../migrations/0015_registered_modems.sql"),
     include_str!("../migrations/0016_registration_gate.sql"),
+    include_str!("../migrations/0017_discovery_identity.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -504,8 +511,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO local_modem_discoveries
                 (candidate_key, usb_device, transport, control_port, vendor_id, product_id,
-                 state, imei, detail, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 state, imei, detail, last_seen, family, home_mcc, home_mnc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(candidate_key) DO UPDATE SET
                 usb_device = excluded.usb_device,
                 transport = excluded.transport,
@@ -515,7 +522,19 @@ impl Store {
                 state = excluded.state,
                 imei = excluded.imei,
                 detail = excluded.detail,
-                last_seen = excluded.last_seen",
+                last_seen = excluded.last_seen,
+                -- 读不到就不覆盖。生产库里出现过两行 family='0'，根因就是
+                -- 当年这里是无条件覆盖（见 0017 迁移的注释）。
+                family = CASE
+                    WHEN excluded.family IS NULL
+                      OR TRIM(excluded.family) IN ('', 'unknown')
+                    THEN local_modem_discoveries.family
+                    ELSE excluded.family
+                END,
+                -- 归属网要多轮才读得出，中间几轮是 NULL；覆盖会让闸 2 的
+                -- 输入反复横跳，纳管按钮时灵时不灵。
+                home_mcc = COALESCE(excluded.home_mcc, local_modem_discoveries.home_mcc),
+                home_mnc = COALESCE(excluded.home_mnc, local_modem_discoveries.home_mnc)",
             params![
                 discovery.candidate_key,
                 discovery.usb_device,
@@ -527,6 +546,9 @@ impl Store {
                 discovery.imei,
                 discovery.detail,
                 discovery.last_seen,
+                discovery.family,
+                discovery.home_mcc,
+                discovery.home_mnc,
             ],
         )?;
         Ok(())
@@ -657,7 +679,7 @@ impl Store {
     pub fn list_local_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT candidate_key, usb_device, transport, control_port, vendor_id, product_id,
-                    state, imei, detail, last_seen
+                    state, imei, detail, last_seen, family, home_mcc, home_mnc
                FROM local_modem_discoveries
               ORDER BY last_seen DESC, candidate_key",
         )?;
@@ -674,6 +696,9 @@ impl Store {
                     imei: row.get(7)?,
                     detail: row.get(8)?,
                     last_seen: row.get(9)?,
+                    family: row.get(10)?,
+                    home_mcc: row.get(11)?,
+                    home_mnc: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1008,6 +1033,18 @@ pub struct LocalModemDiscovery {
     pub imei: Option<String>,
     pub detail: String,
     pub last_seen: i64,
+    /// 这一根是什么型号 —— 纳管闸 2 的第一个输入。
+    ///
+    /// 在候选行上而不是只在 `local_modems` 上：inventory 只装已纳管的模组，
+    /// 从那里取闸的输入就成了「先被纳管才能被纳管」（见 0017 迁移）。
+    pub family: Option<String>,
+    /// 卡归属的 MCC/MNC —— 闸 2 的第二个输入，运营商画像从这里推。
+    ///
+    /// 读不到就是 `None`，**不回落到「国际卡」**。那个兜底在报告和路由里
+    /// 说得通，在一道闸上是失败即放行：一张还没读出 IMSI 的卡会被当成国际卡
+    /// 去过闸。
+    pub home_mcc: Option<u16>,
+    pub home_mnc: Option<u16>,
 }
 
 /// An operator-approved configuration for a discovered modem candidate.

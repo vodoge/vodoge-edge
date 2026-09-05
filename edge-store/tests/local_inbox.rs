@@ -67,6 +67,9 @@ fn discovery_keeps_an_unidentified_endpoint_visible() {
             imei: None,
             detail: "QMI transport error".into(),
             last_seen: 12,
+            family: None,
+            home_mcc: None,
+            home_mnc: None,
         })
         .expect("record discovery");
 
@@ -134,6 +137,9 @@ fn a_sighting_nothing_has_seen_for_a_day_is_forgotten() {
         imei: None,
         detail: "stale".into(),
         last_seen: seen,
+        family: None,
+        home_mcc: None,
+        home_mnc: None,
     };
     let day = 24 * 60 * 60 * 1000;
     let now = 10 * day;

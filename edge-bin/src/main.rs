@@ -3759,30 +3759,17 @@ mod linux {
             // （这一对在矩阵里有过真实测量）。判定本身在
             // `edge_core::bind_gates`，那里能在本机测；这里只负责把两样输入
             // 凑齐，并且**凑不齐就是拒**。
-            let usb = match (
-                observed.vendor_id.as_deref(),
-                observed.product_id.as_deref(),
-            ) {
-                (Some(vendor), Some(product)) => edge_core::UsbIdentity::parse(vendor, product),
-                _ => None,
-            };
-            let identified = store
-                .list_local_modems()
-                .map_err(|error| PanelError::Action(error.to_string()))?
-                .into_iter()
-                .find(|modem| modem.imei == imei);
-            // ⚠️ 这里**没有**像另外三处那样 `.unwrap_or("Generic-International")`。
-            // 那个兜底在「报告」和「路由」里说得通；在一道闸上它是失败即放行：
-            // 一张还没读出 IMSI 的卡会被当成国际卡，然后拿国际卡的规则过闸。
-            // 归属网络读不到就是「这一对还不成立」，而那是暂时的 —— 拒绝的
-            // 文案会说下一轮再试。
-            let pair = identified.as_ref().and_then(|modem| {
-                let (mcc, mnc) = modem.home_mcc.zip(modem.home_mnc)?;
-                Some((
-                    ModemFamily::from(modem.family.as_str()),
-                    CarrierProfile::from(Network::new(mcc, mnc).carrier_profile()),
-                ))
-            });
+            // 🔴 两样输入都从**候选行**取，不从 `local_modems`。
+            //
+            // 一开始这里读的是 inventory，那是个死锁：`local_modems` 按设计
+            // 只装已纳管的模组（poll 循环在 `is_managed` 为假时就 continue
+            // 了），所以一根从没被纳管过的模组在那里没有行 —— 闸 2 拿不到
+            // (型号, 运营商)，纳管必然失败，等多少轮都一样。而机队上现有的
+            // 几根早就有 inventory 行，于是这个洞在生产上完全是隐形的：
+            // 它只在**下一根新硬件**插上来时才发作。
+            //
+            // 候选表才是「见过、还没纳管」的记录，闸的输入本来就该在这里。
+            let (usb, pair) = adoption_inputs(observed);
             edge_core::bind_gates(strategy_registry(), &matrix, usb, pair).map_err(|refusal| {
                 PanelError::Action(format!("{imei} cannot be adopted: {refusal}"))
             })?;
@@ -3825,7 +3812,10 @@ mod linux {
                     // 🔴 真的写进去，不再是 `None`。闸 2 要靠它去查规则，
                     // 而一条 family 为空的纳管记录，事后没有任何办法回答
                     // 「当初是按哪一对放行的」。
-                    family: identified.as_ref().map(|modem| modem.family.clone()),
+                    // 和闸 2 用的是同一份事实（候选行），不是另一张表 ——
+                    // 否则「当初是按哪一对放行的」和「记下来的是什么型号」
+                    // 可能来自两次不同的观测。
+                    family: observed.family.clone(),
                     note: None,
                 })
                 .map_err(|error| PanelError::Action(error.to_string()))?;
@@ -4787,6 +4777,7 @@ mod linux {
                             DiscoveryState::Found,
                             Some(&snapshot.imei),
                             "identified and awaiting adoption",
+                            Some(&snapshot),
                             now,
                         );
                         continue;
@@ -4799,6 +4790,7 @@ mod linux {
                         DiscoveryState::Manageable,
                         Some(&snapshot.imei),
                         "QMI identity probe succeeded",
+                        Some(&snapshot),
                         now,
                     );
                     snapshots.push(snapshot);
@@ -4828,6 +4820,7 @@ mod linux {
                         DiscoveryState::ProbeFailed,
                         None,
                         error,
+                        None,
                         now,
                     );
                 }
@@ -4885,6 +4878,7 @@ mod linux {
                             DiscoveryState::Found,
                             Some(&snapshot.imei),
                             "identified over AT and awaiting adoption",
+                            Some(&snapshot),
                             now,
                         );
                         continue;
@@ -4896,6 +4890,7 @@ mod linux {
                         DiscoveryState::AtOnly,
                         Some(&snapshot.imei),
                         "AT identified the modem; QMI-managed actions are unavailable",
+                        Some(&snapshot),
                         now,
                     );
                     snapshots.push(snapshot);
@@ -4942,6 +4937,10 @@ mod linux {
                                 DiscoveryState::Found,
                                 Some(&imei),
                                 "identified on an earlier pass and awaiting adoption",
+                                // 这一趟没探到，只是记得上一趟见过。身份事实留给
+                                // 上一趟写下的那份 —— upsert 的 CASE WHEN 与
+                                // COALESCE 会把它保住。
+                                None,
                                 now,
                             );
                             claimed.extend(usb.clone());
@@ -4955,6 +4954,7 @@ mod linux {
                                 DiscoveryState::ProbeFailed,
                                 None,
                                 "AT+CGSN did not return a usable IMEI",
+                                None,
                                 now,
                             );
                         }
@@ -5245,6 +5245,57 @@ mod linux {
         }
     }
 
+    /// 从「这一趟探到了什么」里取纳管闸要的两样事实。
+    ///
+    /// 🔴 闸的输入必须来自**候选表**这一侧，不能来自 `local_modems`。
+    /// inventory 按设计只装已纳管的模组 —— poll 循环在 `is_managed` 为假时
+    /// 就 `continue` 了，理由写在那处：未纳管的模组不进 `DeviceState`，否则
+    /// 云端会替运维凭空建一行。那个设计是对的。
+    ///
+    /// 错的是把闸接到了 inventory 上：闸 2 要 (型号, 运营商画像)，而一根从没
+    /// 被纳管过的模组在 inventory 里没有行，于是「先被纳管才能被纳管」。
+    /// 机队上现有那几根早有 inventory 行，所以这个洞在生产上是隐形的 ——
+    /// 它只在**下一根新硬件**插上来时才发作。
+    fn discovered_identity(snapshot: &ModemSnapshot) -> (Option<String>, Option<u16>, Option<u16>) {
+        (
+            Some(snapshot.family.clone()),
+            snapshot.home.as_ref().map(|network| network.mcc),
+            snapshot.home.as_ref().map(|network| network.mnc),
+        )
+    }
+
+    /// 纳管两道闸的输入，全部从候选行上取。
+    ///
+    /// 返回 `(USB 身份, (型号, 运营商画像))`，两个都可能是 `None` —— 凑不齐
+    /// 就是拒，`bind_gates` 会说清缺的是哪一样，以及是「等下一轮」还是「这块
+    /// 硬件本 build 不支持」。
+    ///
+    /// ⚠️ 归属网读不到时**不回落**到 `Generic-International`。那个兜底在报告和
+    /// 路由里说得通；在一道闸上它是失败即放行：一张还没读出 IMSI 的卡会被当成
+    /// 国际卡，然后拿国际卡的规则过闸。
+    fn adoption_inputs(
+        observed: &edge_store::LocalModemDiscovery,
+    ) -> (
+        Option<edge_core::UsbIdentity>,
+        Option<(ModemFamily, CarrierProfile)>,
+    ) {
+        let usb = match (
+            observed.vendor_id.as_deref(),
+            observed.product_id.as_deref(),
+        ) {
+            (Some(vendor), Some(product)) => edge_core::UsbIdentity::parse(vendor, product),
+            _ => None,
+        };
+        let pair = observed.family.as_deref().and_then(|family| {
+            let (mcc, mnc) = observed.home_mcc.zip(observed.home_mnc)?;
+            Some((
+                ModemFamily::from(family),
+                CarrierProfile::from(Network::new(mcc, mnc).carrier_profile()),
+            ))
+        });
+        (usb, pair)
+    }
+
     fn record_discovery(
         shared: &Arc<SharedStore>,
         transport: DiscoveryTransport,
@@ -5252,8 +5303,18 @@ mod linux {
         state: DiscoveryState,
         imei: Option<&str>,
         detail: impl Into<String>,
+        // 这一趟探到的身份。`None` 表示这一趟没探到 —— 上一趟写下的那份由
+        // 存储层的 `CASE WHEN` / `COALESCE` 守住，不会被抹掉。
+        //
+        // ⚠️ 叫 `probed` 不叫 `identity`：这个函数体里 `identity` 已经是 USB
+        // 那个身份（vid/pid），两者撞名会让下面那两行悄悄取错东西。
+        probed: Option<&ModemSnapshot>,
         now: i64,
     ) {
+        let (family, home_mcc, home_mnc) = match probed {
+            Some(snapshot) => discovered_identity(snapshot),
+            None => (None, None, None),
+        };
         let usb_device = match transport {
             DiscoveryTransport::Qmi => edge_modem::usb_device_of_qmi(control_port),
             DiscoveryTransport::At => edge_modem::usb_device_of_at(control_port),
@@ -5284,6 +5345,9 @@ mod linux {
                 imei: imei.map(str::to_string),
                 detail: detail.into(),
                 last_seen: now,
+                family,
+                home_mcc,
+                home_mnc,
             });
         if let Err(error) = result {
             log_error(format!("discovery result not recorded: {error}"));
@@ -5343,6 +5407,11 @@ mod linux {
                 imei: None,
                 detail: facts.join("; "),
                 last_seen: now,
+                // 一个还没跟人说过话的串口：连 IMEI 都没有，更谈不上型号和卡归属。
+                // 探到之后由 `record_discovery` 补上，那条 upsert 不会拿 None 覆盖已有值。
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             });
         if let Err(error) = result {
             log_error(format!("manual serial candidate not recorded: {error}"));
@@ -5476,6 +5545,9 @@ mod linux {
                 imei: None,
                 detail: String::new(),
                 last_seen: 1,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             };
             assert!(manual_discovery_matches(&found, &candidate));
             assert!(
@@ -8259,6 +8331,61 @@ mod linux {
     }
 
     #[cfg(test)]
+    mod adoption_tests {
+        use super::{adoption_inputs, strategy_registry};
+        use edge_core::{bind_gates, CapabilityMatrix};
+
+        fn candidate(imei: &str) -> edge_store::LocalModemDiscovery {
+            edge_store::LocalModemDiscovery {
+                candidate_key: "usb1/1-2".into(),
+                usb_device: Some("1-2".into()),
+                transport: "qmi".into(),
+                control_port: "/dev/cdc-wdm0".into(),
+                // EC20 的 vid:pid，闸 1 认得
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0125".into()),
+                state: "found".into(),
+                imei: Some(imei.into()),
+                detail: "identified and awaiting adoption".into(),
+                last_seen: 1,
+                // 闸 2 要的两样：这一根是什么型号、卡归属哪个网
+                family: Some("EC20".into()),
+                home_mcc: Some(460),
+                home_mnc: Some(0),
+            }
+        }
+
+        /// 🔴 一根这台 agent 从没管过的模组，必须能被纳管。
+        ///
+        /// 这正是「自动发现、手动管理」的那一步。闸的两样输入以前是从
+        /// `local_modems` 取的，而那张表按设计只装**已纳管**的模组
+        /// （poll 循环在 `is_managed` 为假时就 continue 了），于是
+        /// 「先被纳管才能被纳管」——按钮按下去必然失败，等多少轮都一样。
+        #[test]
+        fn a_module_never_managed_before_can_still_be_adopted() {
+            let seen = candidate("867018069509705");
+            let (usb, pair) = adoption_inputs(&seen);
+            assert!(usb.is_some(), "闸 1 拿不到 USB 身份");
+            assert!(pair.is_some(), "闸 2 拿不到 (型号, 运营商)：纳管必然失败");
+            let matrix = CapabilityMatrix::builtin().expect("内置矩阵");
+            assert!(
+                bind_gates(strategy_registry(), &matrix, usb, pair).is_ok(),
+                "一根候选表里已识别的 EC20 + 中国移动，两道闸都该放行"
+            );
+        }
+
+        /// 读不到归属网就是拒，不许回落到「国际卡」再过闸。
+        #[test]
+        fn an_unread_home_network_is_a_refusal_not_a_guess() {
+            let mut seen = candidate("867018069509705");
+            seen.home_mcc = None;
+            seen.home_mnc = None;
+            let (_, pair) = adoption_inputs(&seen);
+            assert!(pair.is_none(), "归属网读不到时不该猜出一个运营商画像");
+        }
+    }
+
+    #[cfg(test)]
     mod retro_tests {
         use super::{
             build_evidence, emit_plan_alerts, enforce_mode_from, split_unreadable, EnforceMode,
@@ -8324,6 +8451,9 @@ mod linux {
                 imei: Some(imei.into()),
                 detail: String::new(),
                 last_seen: 1,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             }
         }
 
@@ -8698,6 +8828,9 @@ mod linux {
                 imei: None,
                 detail: String::new(),
                 last_seen: 1,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
             }
         }
 
