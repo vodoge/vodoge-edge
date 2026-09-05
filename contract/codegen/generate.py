@@ -556,7 +556,18 @@ def emit_go(schema: dict) -> str:
         for field, spec in properties.items():
             ty = go_type(spec, defs)
             if field not in required and not ty.startswith("*") and not ty.startswith("[]"):
-                if ty in {"string", "int64", "uint64", "bool", "float64"}:
+                # 🔴 Struct types need the pointer as much as scalars do, and
+                # for a sharper reason: `omitempty` does nothing to a struct.
+                # An optional struct emitted by value is written on every
+                # encode, so "carried only when somebody declared it" cannot be
+                # expressed at all -- every card policy push would look like a
+                # change to the edge even when nothing was ever filled in.
+                #
+                # This was hand-patched in the generated file once, which is
+                # why `--check` had been failing: the committed contract.go was
+                # right and unreproducible. Generating it is what makes the two
+                # agree.
+                if ty in {"string", "int64", "uint64", "bool", "float64"} or ty in defs:
                     ty = "*" + ty
             tag = f'`json:"{field}'
             if field not in required:
@@ -712,7 +723,26 @@ def emit_ts(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def gofmt(content: str) -> str:
+def gofmt(content: str) -> str | None:
+    """Format Go source, or return None when gofmt could not do it.
+
+    🔴 None rather than the unformatted text, and the caller refuses rather
+    than shipping it. Returning the input on a missing gofmt looks harmless --
+    the code is identical, only the alignment differs -- and it is not: the
+    committed contract.go is gofmt'd, so a regeneration without gofmt rewrites
+    526 lines of whitespace. Whoever does that either commits the noise, or
+    (worse) hand-reverts the parts they notice and leaves the rest.
+
+    Found by walking into it: on a workstation with no Go toolchain,
+    `--check` reported contract.go stale against an unmodified schema. That
+    reads as real drift and sends the reader looking for a schema change that
+    never happened.
+
+    A missing gofmt is only a problem when Go is actually being emitted --
+    the edge repository runs this same script for Rust alone and has no Go
+    toolchain at all -- so the refusal belongs in `main`, where the requested
+    targets are known, not here.
+    """
     try:
         proc = subprocess.run(
             ["gofmt"],
@@ -722,9 +752,9 @@ def gofmt(content: str) -> str:
             check=False,
         )
     except FileNotFoundError:
-        return content
+        return None
     if proc.returncode != 0:
-        return content
+        return None
     formatted = proc.stdout.decode("utf-8")
     return formatted or content
 
@@ -764,6 +794,18 @@ def main() -> int:
             (ROOT / "go" / "contract.go", go),
             (ROOT / "ts" / "index.ts", ts),
         ]
+
+    # Refuse rather than emit unformatted Go. See `gofmt` for why returning the
+    # unformatted text is the worse failure: it produces a 526-line whitespace
+    # diff that `--check` reports as staleness, pointing at a schema change
+    # that did not happen.
+    if go is None and any(content is go for _, content in targets):
+        print(
+            "gofmt is not available, so the Go binding cannot be generated. "
+            "Install Go, or pass only --rust/--ts.",
+            file=sys.stderr,
+        )
+        return 2
 
     failed = False
     for path, content in targets:

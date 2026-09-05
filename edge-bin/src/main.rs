@@ -7164,21 +7164,28 @@ mod linux {
     /// re-plugs does not leave a list that is mostly archaeology.
     const DISCOVERY_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
-    fn enqueue_device_state(
-        outbox: &Arc<Mutex<DurableOutbox>>,
+    /// The DeviceState payload for one poll pass.
+    ///
+    /// Separated from the enqueue so the shape can be asserted without a
+    /// durable outbox on disk -- the rules below are about what is in the
+    /// map, and every one of them had been unexercised.
+    ///
+    /// 🔴 An empty `modems` is reported, not swallowed. It used to return
+    /// early, because `DeviceStatePayload.modems` carried `minItems: 1` and
+    /// there was nothing honest to invent. The cost was not silence about
+    /// modems -- it was silence about **everything**: `discoveries` and
+    /// `managed_imeis` ride in the same envelope, so a box whose only hardware
+    /// was a serial candidate awaiting approval reported nothing at all and
+    /// was invisible from the cloud. The schema now says `minItems: 0`, and an
+    /// empty list is the honest report it always was.
+    fn device_state_payload(
         matrix: &CapabilityMatrix,
         modems: &[ModemSnapshot],
         host: &HostStats,
         discoveries: &[edge_store::LocalModemDiscovery],
         managed: Option<&[String]>,
         now: i64,
-    ) -> Result<(), String> {
-        if modems.is_empty() {
-            // The contract requires at least one modem and there is nothing
-            // honest to invent. A pass that found no hardware at all says so
-            // in the log and sends nothing.
-            return Ok(());
-        }
+    ) -> serde_json::Value {
         let mut entries = Vec::with_capacity(modems.len());
         for modem in modems {
             // The matrix is keyed on the home carrier, not the serving one:
@@ -7297,7 +7304,128 @@ mod linux {
         if let (Some(managed), Some(map)) = (managed, payload.as_object_mut()) {
             map.insert("managed_imeis".into(), serde_json::json!(managed));
         }
+        payload
+    }
+
+    fn enqueue_device_state(
+        outbox: &Arc<Mutex<DurableOutbox>>,
+        matrix: &CapabilityMatrix,
+        modems: &[ModemSnapshot],
+        host: &HostStats,
+        discoveries: &[edge_store::LocalModemDiscovery],
+        managed: Option<&[String]>,
+        now: i64,
+    ) -> Result<(), String> {
+        let payload = device_state_payload(matrix, modems, host, discoveries, managed, now);
         append_kind(outbox, "DeviceState", payload)
+    }
+
+    #[cfg(test)]
+    mod device_state_tests {
+        use super::{device_state_payload, HostStats};
+        use edge_core::CapabilityMatrix;
+
+        fn matrix() -> CapabilityMatrix {
+            CapabilityMatrix::builtin().expect("built-in matrix")
+        }
+
+        fn candidate() -> edge_store::LocalModemDiscovery {
+            edge_store::LocalModemDiscovery {
+                candidate_key: "1-1.3:1.0".into(),
+                usb_device: Some("1-1.3".into()),
+                // 这个值在 2026-09-05 之前是契约禁止的，尽管边缘端一直会写它。
+                transport: "serial".into(),
+                control_port: "/dev/ttyUSB4".into(),
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0901".into()),
+                state: "found".into(),
+                imei: None,
+                detail: String::new(),
+                last_seen: 1,
+            }
+        }
+
+        /// 🔴 一台没有已识别模组、只有一个待批准候选的机器，必须在云端可见。
+        ///
+        /// 这是去掉那个提前返回的**全部理由**。此前 modems 为空就整封不发，
+        /// 而 discoveries 和 managed_imeis 搭的是同一封信 —— 于是这台机器
+        /// 在云端完全不存在，运维连「有根棒插上了」都看不到。
+        #[test]
+        fn a_pass_with_no_modems_still_carries_its_candidates() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                &[candidate()],
+                None,
+                7,
+            );
+            let map = payload.as_object().expect("payload is a map");
+            assert_eq!(
+                map["modems"].as_array().map(Vec::len),
+                Some(0),
+                "modems 要是空数组，不是 null —— 契约把它类型化为数组"
+            );
+            let seen = map["discoveries"].as_array().expect("discoveries is an array");
+            assert_eq!(seen.len(), 1, "候选没跟着走，这封信就白发了");
+            assert_eq!(seen[0]["transport"], "serial");
+        }
+
+        /// 缺席 ≠ 空。
+        ///
+        /// 读注册表失败时 `managed` 是 `None`，这个键必须**根本不出现**：
+        /// 云端的 `app.apply_managed_modems` 把缺席读作「agent 没说」而直接
+        /// 返回，把空数组读作「一个都没纳管」并退休掉所有行。一次短暂的存储
+        /// 读错因此会取消整台设备的纳管 —— 这不是假设，是发生过的事故。
+        #[test]
+        fn a_failed_registry_read_omits_the_key_entirely() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                &[],
+                None,
+                7,
+            );
+            assert!(
+                !payload.as_object().expect("map").contains_key("managed_imeis"),
+                "读不到注册表时写出这个键，等于替 agent 说了它没说过的话"
+            );
+        }
+
+        /// 而空数组是一句**真话**，要照发。
+        ///
+        /// 阴性对照：没有它，上面那条测试可以靠「永远不写这个键」通过。
+        #[test]
+        fn an_empty_registry_is_a_statement_and_is_sent() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                &[],
+                Some(&[]),
+                7,
+            );
+            let map = payload.as_object().expect("map");
+            assert!(map.contains_key("managed_imeis"), "「一个都没纳管」是真话，不该被吞掉");
+            assert_eq!(map["managed_imeis"].as_array().map(Vec::len), Some(0));
+        }
+
+        /// 找不到的模组也要出现在名单里 —— 名单是注册表，不是本轮观测。
+        #[test]
+        fn the_managed_list_is_the_registry_not_this_pass() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                &[],
+                Some(&["868019060490134".to_string()]),
+                7,
+            );
+            let listed = payload["managed_imeis"].as_array().expect("array");
+            assert_eq!(listed.len(), 1, "本轮一根都没看见，但注册表里有一根");
+            assert_eq!(listed[0], "868019060490134");
+        }
     }
 
     /// The alert throttle this process announces through.

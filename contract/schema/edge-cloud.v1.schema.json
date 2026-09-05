@@ -545,7 +545,7 @@
         "observed_at": { "$ref": "#/$defs/EpochMillis" },
         "modems": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 0,
           "maxItems": 128,
           "items": { "$ref": "#/$defs/ModemState" }
         },
@@ -757,7 +757,7 @@
           "maxLength": 128
         },
         "usb_device": { "$ref": "#/$defs/NullableString" },
-        "transport": { "type": "string", "enum": ["qmi", "at"] },
+        "transport": { "type": "string", "enum": ["qmi", "at", "serial"] },
         "control_port": { "type": "string", "maxLength": 128 },
         "vendor_id": { "$ref": "#/$defs/NullableString" },
         "product_id": { "$ref": "#/$defs/NullableString" },
