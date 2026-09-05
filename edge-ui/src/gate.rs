@@ -12,6 +12,9 @@ use edge_panel_api::{GateFailureBody, RetirementBody};
 fn reason_label(reason: &str) -> &str {
     match reason {
         "no_strategy" => "这个版本没有驱动它的策略",
+        // ⚠️ 和上一条分开，因为下一步不同：上一条要改代码或换硬件，
+        // 这一条要改**目录**，而目录是数据，改它不用发版。
+        "not_in_catalogue" => "受支持设备列表里没有放行它",
         "never_measured" => "这一对（型号 × 运营商）从没被测过",
         "unreadable_usb_identity" => "读不出它的 USB 标识",
         "not_identified_yet" => "还没识别出型号或归属网络",
@@ -132,6 +135,28 @@ mod tests {
             let text = gate_notice(&gate(reason, 0, 1), 60_000, true);
             assert!(!text.contains("adopt"), "{text}");
             assert!(!text.contains("before"), "{text}");
+        }
+    }
+
+    /// 每一个真实的拒绝标签都要有中文。
+    ///
+    /// 靠「认不出就原样显示」兜底是对的（见下一条），但那是给**将来**新增的
+    /// 变体留的余地，不是给现有变体偷懒的借口 —— 一个今天就存在的标签
+    /// 露出英文，读的人会以为是程序出错了。
+    #[test]
+    fn every_refusal_that_exists_today_has_chinese() {
+        for reason in [
+            "no_strategy",
+            "not_in_catalogue",
+            "never_measured",
+            "unreadable_usb_identity",
+            "not_identified_yet",
+        ] {
+            let text = gate_notice(&gate(reason, 0, 1), 60_000, true);
+            assert!(
+                !text.contains(reason),
+                "{reason} 还在露英文标签：{text}"
+            );
         }
     }
 
