@@ -62,6 +62,20 @@ CREATE INDEX IF NOT EXISTS ingested_sms_age
     ON ingested_sms (imei, last_seen);
 ";
 
+/// `0015_registered_modems.sql` 在迁移序列里的位置。
+///
+/// 具名导出，是因为测试需要「回滚到注册表迁移之前」，而它此前写的是
+/// `latest - 1` —— 那个表达式把「0015 是最后一条」这个事实编进了算式。
+/// 加上 0016 之后 `latest - 1` 变成了 15，回滚不再跨过 0015，两条关于
+/// 「升级会自动纳管旧 agent 管着的模组」的测试**静默变空**：它们照常绿，
+/// 断言的却是一次没发生过的迁移。
+///
+/// 这个文件里已经有过一次同样的教训：那两条测试的注释写着「An earlier
+/// version of this test rolled back to 0, which drops `local_modems` too,
+/// so there was nothing to adopt and it asserted nothing.」——
+/// 同一个失效形状，换了一个算错的数字。
+pub const REGISTRY_MIGRATION: i64 = 15;
+
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_cursor.sql"),
@@ -78,6 +92,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0013_apn_contexts.sql"),
     include_str!("../migrations/0014_capability_matrix.sql"),
     include_str!("../migrations/0015_registered_modems.sql"),
+    include_str!("../migrations/0016_registration_gate.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -106,6 +121,19 @@ impl Store {
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// 这张表现在存不存在。
+    ///
+    /// 给测试钉住迁移的**前提**用：只断言结果的话，一次编号漂移就能让
+    /// 「回滚到某版本之前」悄悄变成「回滚到它之后」，而断言照常通过。
+    pub fn has_table(&self, name: &str) -> Result<bool, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn schema_version(&self) -> Result<i64, StoreError> {
@@ -137,6 +165,11 @@ impl Store {
         if target < current {
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS registered_modems;")?;
+            // 0016 建的。和上面那张同生共死：回滚到 16 以下之后它不该还在，
+            // 否则一条 CREATE TABLE IF NOT EXISTS 会在重放时静默变成空操作，
+            // 而它携带的列定义就再也不会被验证。
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS registration_retirements;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS card_policies;")?;
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS manual_modem_profiles;")?;
@@ -993,6 +1026,20 @@ pub struct ManualModemProfile {
     pub approved_at: i64,
 }
 
+fn read_retirement(row: &rusqlite::Row<'_>) -> rusqlite::Result<Retirement> {
+    Ok(Retirement {
+        imei: row.get(0)?,
+        registered_at: row.get(1)?,
+        registered_by: row.get(2)?,
+        family: row.get(3)?,
+        usb_device: row.get(4)?,
+        retired_at: row.get(5)?,
+        reason: row.get(6)?,
+        detail: row.get(7)?,
+        matrix_version: row.get(8)?,
+    })
+}
+
 fn read_manual_modem_profile(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ManualModemProfile> {
@@ -1270,6 +1317,38 @@ pub struct RegisteredModem {
     pub note: Option<String>,
 }
 
+/// 一根已纳管模组当前的「闸不再满足」标记。
+///
+/// 🔴 标记不是删除。带着它的模组**仍然被管理**、仍然被轮询、仍然出现在
+/// `managed_imeis` 里。这是自动化「先说、后做」里的那个「说」。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GateFailure {
+    /// 第一次判为「该解绑」的时刻。**不会被后续的趟数推后**，
+    /// 否则倒计时永远走不完。
+    pub since: i64,
+    pub reason: String,
+    pub passes: u32,
+}
+
+/// 一条被追溯执行摘掉的纳管履历。
+///
+/// 0015 说 `registered_by` 存在的理由是「why is this being managed 是别人对
+/// 一个没人记得添加过的模组问的第一个问题」。自动解绑会把那个答案从库里彻底
+/// 抹掉，这张表就是答案的去处 —— 它回答那个问题的镜像：为什么这根不再被管了。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Retirement {
+    pub imei: String,
+    pub registered_at: i64,
+    pub registered_by: String,
+    pub family: Option<String>,
+    pub usb_device: Option<String>,
+    pub retired_at: i64,
+    /// `no_strategy` 或 `never_measured`。
+    pub reason: String,
+    pub detail: Option<String>,
+    pub matrix_version: Option<String>,
+}
+
 impl Store {
     /// Adopt a module, or refresh the evidence on one already adopted.
     ///
@@ -1320,6 +1399,140 @@ impl Store {
     }
 
     /// Everything this agent is managing, oldest adoption first.
+    /// 记下「这一趟依然判为该解绑」，并推进倒计时。
+    ///
+    /// 🔴 `COALESCE(gate_failed_since, ?2)`：起点只在**第一趟**写入。
+    /// 每趟都刷新起点的话，倒计时永远走不到 30 分钟，隔离期就成了
+    /// 一个永远不到期的摆设 —— 那和关掉这个特性没有区别，但看起来像开着。
+    pub fn mark_gate_failure(&self, imei: &str, reason: &str, now: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE registered_modems
+                SET gate_failed_since = COALESCE(gate_failed_since, ?2),
+                    gate_failed_reason = ?3,
+                    gate_failed_passes = gate_failed_passes + 1
+              WHERE imei = ?1",
+            params![imei, now, reason],
+        )?;
+        Ok(())
+    }
+
+    /// 闸又过了：把标记和倒计时一起清掉。
+    ///
+    /// 这是自愈发生的地方。云端手误推了一份规则更少的矩阵、十分钟内补回来，
+    /// 这个场景里一根都不会被删，也不需要任何人做任何事。
+    pub fn clear_gate_failure(&self, imei: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE registered_modems
+                SET gate_failed_since = NULL,
+                    gate_failed_reason = NULL,
+                    gate_failed_passes = 0
+              WHERE imei = ?1",
+            params![imei],
+        )?;
+        Ok(())
+    }
+
+    /// 一根模组当前的闸标记。
+    pub fn gate_failure(&self, imei: &str) -> Result<Option<GateFailure>, StoreError> {
+        let row = self.conn.query_row(
+            "SELECT gate_failed_since, gate_failed_reason, gate_failed_passes
+               FROM registered_modems WHERE imei = ?1",
+            params![imei],
+            |row| {
+                let since: Option<i64> = row.get(0)?;
+                let reason: Option<String> = row.get(1)?;
+                let passes: i64 = row.get(2)?;
+                Ok(since.map(|since| GateFailure {
+                    since,
+                    reason: reason.unwrap_or_default(),
+                    passes: passes.max(0) as u32,
+                }))
+            },
+        );
+        match row {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// 摘掉一根：履历搬进退休表，纳管行删掉。**一个事务。**
+    ///
+    /// 🔴 两步必须同生共死。先删后写，中间掉电就永久丢掉了「为什么不再管它」；
+    /// 先写后删，中间掉电就留下一条说着「已退休」而实际还在被管的记录，
+    /// 而下一趟判定会看到它仍然纳管、再写一次退休行。
+    pub fn retire_modem(&mut self, retirement: &Retirement) -> Result<bool, StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO registration_retirements
+                 (imei, registered_at, registered_by, family, usb_device,
+                  retired_at, reason, detail, matrix_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(imei) DO UPDATE SET
+                 retired_at = excluded.retired_at,
+                 reason = excluded.reason,
+                 detail = excluded.detail,
+                 matrix_version = excluded.matrix_version",
+            params![
+                retirement.imei,
+                retirement.registered_at,
+                retirement.registered_by,
+                retirement.family,
+                retirement.usb_device,
+                retirement.retired_at,
+                retirement.reason,
+                retirement.detail,
+                retirement.matrix_version,
+            ],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM registered_modems WHERE imei = ?1",
+            params![retirement.imei],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// 这根之前有没有被追溯执行摘掉过。
+    ///
+    /// 重新纳管时读它来复原履历：一次十分钟就修好的云端手误，不该让六条
+    /// 纳管履历被永久改写成今天。
+    pub fn retired_registration(&self, imei: &str) -> Result<Option<Retirement>, StoreError> {
+        let row = self.conn.query_row(
+            "SELECT imei, registered_at, registered_by, family, usb_device,
+                    retired_at, reason, detail, matrix_version
+               FROM registration_retirements WHERE imei = ?1",
+            params![imei],
+            read_retirement,
+        );
+        match row {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn list_retirements(&self) -> Result<Vec<Retirement>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT imei, registered_at, registered_by, family, usb_device,
+                    retired_at, reason, detail, matrix_version
+               FROM registration_retirements ORDER BY retired_at DESC, imei",
+        )?;
+        let rows = statement
+            .query_map([], read_retirement)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 履历已经复原到纳管行里了，退休记录可以走了。
+    pub fn forget_retirement(&self, imei: &str) -> Result<bool, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM registration_retirements WHERE imei = ?1",
+            params![imei],
+        )?;
+        Ok(removed > 0)
+    }
+
     pub fn registered_modems(&self) -> Result<Vec<RegisteredModem>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT imei, registered_at, registered_by, usb_device, family, note

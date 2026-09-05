@@ -1,7 +1,7 @@
 //! Adopting a module, and the one-time migration that keeps a running bench
 //! running.
 
-use edge_store::{LocalModem, RegisteredModem, Store};
+use edge_store::{LocalModem, RegisteredModem, Store, REGISTRY_MIGRATION};
 
 fn store() -> Store {
     Store::open_in_memory().expect("open")
@@ -59,9 +59,18 @@ fn the_migration_adopts_modules_already_being_managed() {
     let mut store = store();
     let latest = store.schema_version().expect("version");
 
+    // ⚠️ 具名，不是 `latest - 1`。那个写法把「注册表迁移是最后一条」编进了
+    //    算式，而它在 0016 落地的那一刻就不成立了 —— 回滚不再跨过 0015，
+    //    这条测试照常绿，断言的却是一次没发生过的迁移。
     store
-        .rollback_to(latest - 1)
+        .rollback_to(REGISTRY_MIGRATION - 1)
         .expect("roll back to before the registry");
+    // 前提本身也要钉住：回滚之后那张表必须真的不在。
+    // 只断言结果的话，下一次编号漂移还是会让这条测试变空。
+    assert!(
+        !store.has_table("registered_modems").expect("introspect"),
+        "回滚没有跨过注册表迁移，下面那段就不是在测迁移"
+    );
     // An older agent's inventory: seen and managed, with no registry to be in.
     store.upsert_local_modem(&seen("862547055142811")).expect("older agent");
     store.upsert_local_modem(&seen("867018069509705")).expect("older agent");
@@ -88,7 +97,7 @@ fn replaying_the_migration_is_a_no_op() {
     let mut store = store();
     let latest = store.schema_version().expect("version");
 
-    store.rollback_to(latest - 1).expect("roll back");
+    store.rollback_to(REGISTRY_MIGRATION - 1).expect("roll back");
     store.upsert_local_modem(&seen("862547055142811")).expect("older agent");
     store.migrate().expect("upgrade");
     store.migrate().expect("upgrade again");
