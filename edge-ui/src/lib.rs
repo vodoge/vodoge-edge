@@ -31,6 +31,7 @@ mod api;
 mod candidates;
 mod console;
 mod copy;
+mod gate;
 mod danger;
 mod esim;
 mod health;

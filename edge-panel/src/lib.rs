@@ -1,5 +1,6 @@
 //! Local LAN panel. It reads only the SQLite cache so it still works offline.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,10 +12,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
-    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, LogsBody, MessageBody, MessagesBody,
-    ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody, RescanReceipt, ResetBody,
-    RestartBody, RestartReceipt, SendBody, SendReceipt, StatusBody, SwitchBody, SwitchReceipt,
-    UssdBody, UssdCancelReceipt,
+    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
+    MessageBody, MessagesBody, ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody,
+    RescanReceipt, ResetBody, RestartBody, RestartReceipt, RetirementBody, SendBody, SendReceipt,
+    StatusBody, SwitchBody, SwitchReceipt, UssdBody, UssdCancelReceipt,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -29,7 +30,9 @@ pub use edge_panel_api::{
     AtResult, CandidateClaimResult, ProfileBody, ProfilesResult, RegistrationResult, ReportResult,
     RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
 };
-use edge_store::{LocalMessage, LocalModem, LocalModemDiscovery, Store, StoreError};
+use edge_store::{
+    GateFailure, LocalMessage, LocalModem, LocalModemDiscovery, Retirement, Store, StoreError,
+};
 
 mod logs;
 pub use logs::{log_error, log_line, LogLine, LogRing};
@@ -78,6 +81,30 @@ pub trait Inbox: Send + Sync {
     /// not provide an IMEI and therefore are not modem inventory records.
     fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
         Ok(Vec::new())
+    }
+
+    /// 每根已纳管模组当前的闸标记，按 IMEI。
+    ///
+    /// 默认返回空：edge-panel 自己的内存 fixture 不需要实现它，
+    /// 而一个没有实现它的 Inbox 表达的是「这里没有追溯执行」，
+    /// 那和「一根都没被标记」在显示上是同一件事。
+    fn list_gate_failures(&self) -> Result<BTreeMap<String, GateFailure>, PanelError> {
+        Ok(BTreeMap::new())
+    }
+
+    /// 被追溯执行摘掉的纳管履历。
+    fn list_retirements(&self) -> Result<Vec<Retirement>, PanelError> {
+        Ok(Vec::new())
+    }
+
+    /// 本机的追溯执行会不会真的解绑。
+    ///
+    /// 默认 `false`（只标记）。这个默认值和 agent 那边 `VODOGE_RETRO_ENFORCE`
+    /// 的默认值必须一致，而它们一致的方式是**只有一份实现**：
+    /// edge-bin 的实现直接调 `enforce_mode()`，这里不重复那条解析规则。
+    /// 一个把「只有逐字 unbind 才开」写成两遍的地方，早晚会有一遍写错。
+    fn retro_enforcing(&self) -> bool {
+        false
     }
 }
 
@@ -452,6 +479,16 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
     // Cloned out under its own lock rather than held across the loop: the
     // agent replaces this whole value when the cloud pushes a new matrix.
     let matrix = state.matrix.lock().expect("capability matrix").clone();
+    // 🔴 这两样读不到就当成空，而不是让整个 /api/status 变成 500。
+    //
+    // 面板是运维在东西出问题时唯一还能打开的东西。闸标记和退休记录都是
+    // **附加**信息：少了它们，模组列表照常可读；而为了它们让整页 500，
+    // 等于在故障时把唯一的窗口也关上。
+    //
+    // ⚠️ 这个降级只对**显示**成立。追溯执行本身对同样的读失败是整趟作废，
+    // 因为那一边的降级会导致删除。同一个 Err，两个方向，理由不同。
+    let gate_failures = state.inbox.list_gate_failures().unwrap_or_default();
+    let retirements = state.inbox.list_retirements().unwrap_or_default();
     match (
         state.inbox.list_modems(),
         state.inbox.list_modem_discoveries(),
@@ -462,10 +499,13 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                 .into_iter()
                 .map(|modem| {
                     let is_busy = busy.iter().any(|imei| *imei == modem.imei);
-                    modem_body(modem, now, is_busy, &matrix)
+                    let gate = gate_failures.get(&modem.imei).cloned();
+                    modem_body(modem, now, is_busy, &matrix, gate)
                 })
                 .collect(),
             discoveries: discoveries.into_iter().map(discovery_body).collect(),
+            retirements: retirements.into_iter().map(retirement_body).collect(),
+            retro_enforcing: state.inbox.retro_enforcing(),
         })
         .into_response(),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"),
@@ -849,7 +889,13 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 /// type. The conversion belongs on this side either way — it reads
 /// `edge-store` rows, and `edge-store` carries a bundled SQLite that must
 /// never reach the wasm bundle.
-fn modem_body(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix) -> ModemBody {
+fn modem_body(
+    value: LocalModem,
+    now: i64,
+    busy: bool,
+    matrix: &CapabilityMatrix,
+    gate: Option<GateFailure>,
+) -> ModemBody {
     let stale = value
         .last_seen
         .map(|seen| now.saturating_sub(seen) > STALE_AFTER_MS)
@@ -901,10 +947,27 @@ fn modem_body(value: LocalModem, now: i64, busy: bool, matrix: &CapabilityMatrix
         msisdn: value.msisdn,
         carrier_profile: carrier.as_str().to_string(),
         capability_origin,
+        gate_failure: gate.map(|gate| GateFailureBody {
+            reason: gate.reason,
+            since: gate.since,
+            passes: gate.passes,
+        }),
     }
 }
 
 /// See the note on `modem_body`: a free function because the type is foreign.
+fn retirement_body(value: Retirement) -> RetirementBody {
+    RetirementBody {
+        imei: value.imei,
+        retired_at: value.retired_at,
+        reason: value.reason,
+        detail: value.detail,
+        family: value.family,
+        registered_by: value.registered_by,
+        matrix_version: value.matrix_version,
+    }
+}
+
 fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {
     {
         DiscoveryBody {

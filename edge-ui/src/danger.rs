@@ -468,6 +468,8 @@ mod tests {
             mode: edge_panel_api::PanelMode::Local,
             modems: Vec::new(),
             discoveries: Vec::new(),
+            retirements: Vec::new(),
+            retro_enforcing: false,
         };
         assert!(manageable(&body, "867018069509705"));
     }

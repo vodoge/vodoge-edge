@@ -129,6 +129,7 @@ mod request_bodies_are_typed {
         ("copy.rs", include_str!("copy.rs")),
         ("danger.rs", include_str!("danger.rs")),
         ("esim.rs", include_str!("esim.rs")),
+        ("gate.rs", include_str!("gate.rs")),
         ("health.rs", include_str!("health.rs")),
         ("logs.rs", include_str!("logs.rs")),
         ("scan.rs", include_str!("scan.rs")),

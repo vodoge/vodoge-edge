@@ -153,6 +153,38 @@ mod linux {
                 .list_managed_modems()
                 .map_err(PanelError::Store)
         }
+        /// 每根已纳管模组当前的闸标记。
+        ///
+        /// 逐根读而不是一次 JOIN：`gate_failure` 是按 IMEI 的单行查询，而
+        /// 注册表在这台机器上是个位数。为一个位数的循环去开一个新查询，
+        /// 换来的是它和 `enforce_registration` 读的是同一个函数 ——
+        /// 面板显示的和判定依据的，不会有两套 SQL 各自演化。
+        fn list_gate_failures(
+            &self,
+        ) -> Result<std::collections::BTreeMap<String, edge_store::GateFailure>, PanelError> {
+            let store = self.0.lock().expect("store");
+            let mut out = std::collections::BTreeMap::new();
+            for row in store.registered_modems().map_err(PanelError::Store)? {
+                if let Some(gate) = store.gate_failure(&row.imei).map_err(PanelError::Store)? {
+                    out.insert(row.imei, gate);
+                }
+            }
+            Ok(out)
+        }
+
+        fn retro_enforcing(&self) -> bool {
+            // 同一个函数，不是同一条规则的第二份抄写。
+            enforce_mode() == EnforceMode::Unbind
+        }
+
+        fn list_retirements(&self) -> Result<Vec<edge_store::Retirement>, PanelError> {
+            self.0
+                .lock()
+                .expect("store")
+                .list_retirements()
+                .map_err(PanelError::Store)
+        }
+
         fn list_modem_discoveries(&self) -> Result<Vec<LocalModemDiscovery>, PanelError> {
             self.0
                 .lock()
@@ -3758,16 +3790,37 @@ mod linux {
             let already = store
                 .is_registered(&imei)
                 .map_err(|error| PanelError::Action(error.to_string()))?;
+            // 🔴 被追溯执行摘掉的那一根，如果人把它绑回来，履历要跟着回来。
+            //
+            // 这个仓库用测试钉住了「重复纳管不改写首次纳管的时间和来源」
+            // （edge-store/tests/registered_modems.rs）。DELETE + 重新 INSERT
+            // 是唯一能绕过那条保证的路径，而追溯执行是第一个会走这条路径的
+            // 自动化。一次十分钟就修好的云端手误，不该让六条纳管履历被永久
+            // 改写成今天。
+            //
+            // ⚠️ 只复原**追溯执行**摘的。人手动 unregister 之后再 adopt，
+            //    那是一次新的决定，registered_at 就该是今天 ——
+            //    所以 `unregister_modem` 不写退休行（那条规则有测试钉着）。
+            let retired = store
+                .retired_registration(&imei)
+                .map_err(|error| PanelError::Action(error.to_string()))?;
+            let (registered_at, registered_by) = match &retired {
+                Some(row) => (row.registered_at, row.registered_by.clone()),
+                None => (unix_ms(), source.to_owned()),
+            };
             store
                 .register_modem(&edge_store::RegisteredModem {
                     imei: imei.clone(),
-                    registered_at: unix_ms(),
+                    registered_at,
                     // 🔴 Who adopted it, not where the code runs. Both entry
                     // points share this implementation, and hard-coding
                     // "panel" made a cloud-issued adoption claim to have been
                     // done on the LAN panel -- which is the one question this
                     // column exists to answer.
-                    registered_by: source.to_owned(),
+                    //
+                    // 复原的那条走的是同一个字段：一根被自动摘掉又被绑回来的
+                    // 模组，「当初是谁纳管的」这个答案没有变过。
+                    registered_by,
                     usb_device: observed.usb_device.clone(),
                     // 🔴 真的写进去，不再是 `None`。闸 2 要靠它去查规则，
                     // 而一条 family 为空的纳管记录，事后没有任何办法回答
@@ -3776,6 +3829,16 @@ mod linux {
                     note: None,
                 })
                 .map_err(|error| PanelError::Action(error.to_string()))?;
+            if retired.is_some() {
+                // 履历已经回到纳管行里，退休记录可以走了。
+                //
+                // 失败只落日志：那一行留着的后果是面板上多显示一条已经不成立
+                // 的「已被自动摘除」，难看但无害；而为它让整个纳管动作失败，
+                // 就把一次成功的补救变成了一次失败。
+                if let Err(error) = store.forget_retirement(&imei) {
+                    log_error(format!("retirement row for {imei} not cleared: {error}"));
+                }
+            }
             Ok(RegistrationResult {
                 imei,
                 registered: true,
@@ -7539,6 +7602,40 @@ mod linux {
             .collect()
     }
 
+    /// 读不到隔离标记的那几根，这一趟**不判**，改成 Hold。
+    ///
+    /// 🔴 这不是洁癖。把「读不到标记」和「没有标记」混起来会开出一整类
+    /// 零宽限删除：读不到时若照常判定，得到 `Keep` 的那一根不会被清标记
+    /// （调用方以为它本来就没有），库里旧的 `gate_failed_since` 原封不动地
+    /// 活下来；下一次真判定用 `COALESCE` 接上那个旧起点，隔离期当场就是满的
+    /// —— 一次瞬时的 SQLITE_BUSY 就能把 30 分钟的宽限变成 0。
+    ///
+    /// 第一版代码的注释写着「这一趟就不判它」，而代码照判不误。
+    /// 这个函数是让那句注释变成真的。
+    fn split_unreadable(
+        registered: &[edge_store::RegisteredModem],
+        unreadable: &[String],
+    ) -> (
+        Vec<edge_store::RegisteredModem>,
+        Vec<(String, edge_core::HoldReason)>,
+    ) {
+        let mut judged = Vec::with_capacity(registered.len());
+        let mut holds = Vec::new();
+        for row in registered {
+            if unreadable.iter().any(|imei| imei == &row.imei) {
+                // 照样要出现在告警里 —— 静默消失的那几根恰好是最需要
+                // 有人看一眼的。
+                holds.push((
+                    row.imei.clone(),
+                    edge_core::HoldReason::GateStateUnreadable,
+                ));
+            } else {
+                judged.push(row.clone());
+            }
+        }
+        (judged, holds)
+    }
+
     /// 纯判定，不碰 store。
     fn plan_enforcement(
         matrix: &CapabilityMatrix,
@@ -7669,6 +7766,7 @@ mod linux {
                 }
             };
             let mut gates = std::collections::BTreeMap::new();
+            let mut unreadable: Vec<String> = Vec::new();
             for row in &registered {
                 match store.gate_failure(&row.imei) {
                     Ok(Some(gate)) => {
@@ -7676,26 +7774,59 @@ mod linux {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        // 读不到某一根的倒计时，这一趟就不判它 —— 但也不必
-                        // 因此作废整趟：缺了标记只会让它从头开始计数，
-                        // 而从头计数是往「更不容易删」的方向偏。
+                        // 🔴 「读不到」单独记，**不**和「没有标记」混在一起。
+                        //
+                        // 混起来会开出一整类零宽限删除：读不到时若照常判定，
+                        // 得到 Keep 就不会去清库里那条标记（调用方以为它不
+                        // 存在），旧的 gate_failed_since 原封不动地活下来；
+                        // 下一次真判定用 COALESCE 接上那个旧起点，隔离期当场
+                        // 就是满的。
+                        //
+                        // 这段代码此前的注释写着「这一趟就不判它」——
+                        // 而代码照判不误。现在它真的不判了。
                         log_error(format!("gate state not read for {}: {error}", row.imei));
+                        unreadable.push(row.imei.clone());
                     }
                 }
             }
 
-            let evidence = build_evidence(&registered, &gates, &observed, discoveries, now);
-            let plan = plan_enforcement(matrix, authority, uplink_ever_resumed, &evidence, now);
+            let (judged, unreadable_holds) = split_unreadable(&registered, &unreadable);
+            let evidence = build_evidence(&judged, &gates, &observed, discoveries, now);
+            let mut plan = plan_enforcement(matrix, authority, uplink_ever_resumed, &evidence, now);
+            plan.hold.extend(unreadable_holds);
 
             // 执行。
             for imei in &plan.keep {
-                if gates.contains_key(imei) {
-                    if let Err(error) = store.clear_gate_failure(imei) {
-                        log_error(format!("gate mark not cleared for {imei}: {error}"));
-                    }
+                // 无条件清，不看 `gates` 里有没有。
+                //
+                // 省下的那次 UPDATE 换来的是上面说的那类零宽限删除：只要
+                // 「库里有标记」和「本进程知道有标记」出现过一次分歧，
+                // 清除就会被跳过。一次幂等的 UPDATE 便宜得多。
+                if let Err(error) = store.clear_gate_failure(imei) {
+                    // 🔴 这是唯一一次往「更容易删」方向偏的写失败：自愈没成功，
+                    // 而倒计时还在走。它必须有告警，不能只落日志。
+                    log_error(format!("gate mark not cleared for {imei}: {error}"));
+                    raise_alert(
+                        outbox,
+                        edge_core::AlertLevel::Error,
+                        "retro_mark_not_cleared",
+                        format!("{imei} passed the gates again but its countdown could not be cleared"),
+                        serde_json::json!({ "imei": imei, "error": error.to_string() }),
+                        now,
+                    );
                 }
             }
-            for (imei, refusal, _, _) in &plan.quarantine {
+            // 🔴 隔离和越线的都要记标记。
+            //
+            // 倒计时是「这个状态持续了多久」的**记录**，与本机敢不敢删无关。
+            // 只给隔离期内的记，会让 mark 模式下越线的那些停在越线那一刻的
+            // 值上；等哪天切到 unbind，第一趟就到期 —— 隔离期实际为零。
+            for (imei, refusal) in plan
+                .quarantine
+                .iter()
+                .map(|(imei, refusal, _, _)| (imei, refusal))
+                .chain(plan.unbind.iter().map(|(imei, refusal)| (imei, refusal)))
+            {
                 if let Err(error) = store.mark_gate_failure(imei, refusal.wire(), now) {
                     // 倒计时没推进就等于这一趟没发生 —— 往安全的方向偏。
                     log_error(format!("gate mark not written for {imei}: {error}"));
@@ -7732,15 +7863,28 @@ mod linux {
                     }
                 }
             }
-            EnforcementPlan {
-                keep: plan.keep,
-                hold: plan.hold,
-                quarantine: plan.quarantine,
-                unbind: retired,
-            }
+            // 🔴 返回的是**判定**（plan.unbind），不是**结果**（retired）。
+            //
+            // 此前这里把 retired 塞回 plan.unbind，于是 mark 模式下 retired
+            // 恒为空，越过隔离期的模组就从所有告警里彻底消失了 ——
+            // 而「先跑几周只标记、看误报率」看到的正好是一个假的零：
+            // 它要度量的那个人群，恰恰是唯一不产生告警的那一群。
+            (plan, retired)
         };
 
-        emit_plan_alerts(outbox, &plan, authority, &matrix_version, mode, now);
+        emit_plan_alerts(
+            &plan.0,
+            &plan.1,
+            authority,
+            &matrix_version,
+            mode,
+            |(level, code, message, context, throttling)| match throttling {
+                Throttling::Throttled => raise_alert(outbox, level, code, message, context, now),
+                Throttling::Bypass => {
+                    raise_alert_unthrottled(outbox, level, code, message, context, now)
+                }
+            },
+        );
     }
 
     /// 一趟一条，不是一根一条。
@@ -7749,18 +7893,43 @@ mod linux {
     /// 后果被低估了：掉线是持续状态，所以抢到发送名额的永远是同一根，
     /// 其余几根的身份在 `Suppress` 分支里当场蒸发 —— 那个分支是 `return`，
     /// payload 连构造都不构造。这里不照抄那九行。
+    /// 一条告警：级别、code、正文、context，以及**过不过节流**。
+    type PlannedAlert = (
+        edge_core::AlertLevel,
+        &'static str,
+        String,
+        serde_json::Value,
+        Throttling,
+    );
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Throttling {
+        Throttled,
+        /// 只给「一次性、且总量天然有界」的 code。见 `raise_alert_unthrottled`。
+        Bypass,
+    }
+
+    /// 这一趟该发哪几条告警。
+    ///
+    /// 副作用做成注入的 sink，和 `rotate_cycle` 一样 —— 于是「mark 模式下
+    /// 越线的模组会不会有告警」这种问题可以在本机断言，不需要一个真的 outbox。
+    /// 这个特性的试运行期完全依赖那条告警，而它此前恰好是缺的。
+    ///
+    /// 🔴 一趟一条，不是一根一条。现有的 `modem_absent` 是逐根 `raise_alert`
+    /// 共用一个常量 code，而掉线是持续状态，所以抢到发送名额的永远是排序
+    /// 最小的那一根，其余几根的身份在 `Suppress` 分支里当场蒸发 ——
+    /// 那个分支是 `return`，payload 连构造都不构造。这里不照抄那九行。
     fn emit_plan_alerts(
-        outbox: &Arc<Mutex<DurableOutbox>>,
         plan: &EnforcementPlan,
+        retired: &[(String, edge_core::BindRefusal)],
         authority: edge_core::MatrixAuthority,
         matrix_version: &str,
         mode: EnforceMode,
-        now: i64,
+        mut sink: impl FnMut(PlannedAlert),
     ) {
         if !plan.hold.is_empty() {
             // 判据整体不可信（回落到内置矩阵、uplink 没连上过）单独成一条：
-            // 它是一台机器的状态，不是几根模组各自的问题，而且它会持续复发，
-            // 节流对它是对的。
+            // 那是一台机器的状态，不是几根模组各自的问题。
             let systemic = plan.hold.iter().any(|(_, reason)| {
                 matches!(
                     reason,
@@ -7769,18 +7938,18 @@ mod linux {
                 )
             });
             if systemic {
-                raise_alert(
-                    outbox,
+                sink((
                     edge_core::AlertLevel::Warning,
                     "retro_matrix_not_authoritative",
-                    "registration gates not evaluated: the running matrix is not authoritative",
+                    "registration gates not evaluated: the running matrix is not authoritative"
+                        .to_owned(),
                     serde_json::json!({
                         "authority": authority.wire(),
                         "matrix_version": matrix_version,
                         "held": plan.hold.len(),
                     }),
-                    now,
-                );
+                    Throttling::Throttled,
+                ));
             } else {
                 let (modems, truncated) = modem_array(
                     plan.hold
@@ -7790,8 +7959,7 @@ mod linux {
                         })
                         .collect(),
                 );
-                raise_alert(
-                    outbox,
+                sink((
                     edge_core::AlertLevel::Warning,
                     "retro_hold",
                     format!("{} adopted modules could not be evaluated", plan.hold.len()),
@@ -7800,8 +7968,8 @@ mod linux {
                         "modems": modems,
                         "truncated": truncated,
                     }),
-                    now,
-                );
+                    Throttling::Throttled,
+                ));
             }
         }
 
@@ -7819,8 +7987,7 @@ mod linux {
                     })
                     .collect(),
             );
-            raise_alert(
-                outbox,
+            sink((
                 edge_core::AlertLevel::Error,
                 "retro_quarantined",
                 format!(
@@ -7831,14 +7998,20 @@ mod linux {
                     "count": plan.quarantine.len(),
                     "modems": modems,
                     "matrix_version": matrix_version,
-                    "mode": if mode == EnforceMode::Unbind { "unbind" } else { "mark" },
                     "truncated": truncated,
                 }),
-                now,
-            );
+                Throttling::Throttled,
+            ));
         }
 
-        if !plan.unbind.is_empty() {
+        // 🔴 mark 模式下越过隔离期的那些，必须自己有一条告警。
+        //
+        // 它们不在 `quarantine` 里（已经越线了），也不在 `retired` 里
+        // （本机不删）。少了这一条，试运行期看到的是一个**假的零**——
+        // 「先跑几周看误报率」要度量的正是这群，而它们恰好一声不响。
+        //
+        // 走节流：这是一个持续状态，每一趟都会复发，节流对它是对的。
+        if mode == EnforceMode::Mark && !plan.unbind.is_empty() {
             let (modems, truncated) = modem_array(
                 plan.unbind
                     .iter()
@@ -7847,14 +8020,11 @@ mod linux {
                     })
                     .collect(),
             );
-            // 🔴 不过节流。解绑是一次性的：删掉那一行之后下一趟不会再看它
-            // 第二眼，所以被压掉的这条**永远不会被补发**。
-            raise_alert_unthrottled(
-                outbox,
+            sink((
                 edge_core::AlertLevel::Critical,
-                "retro_unbound",
+                "retro_would_unbind",
                 format!(
-                    "{} adopted modules were retired by the registration gates",
+                    "{} adopted modules would be retired if this agent were enforcing",
                     plan.unbind.len()
                 ),
                 serde_json::json!({
@@ -7863,14 +8033,45 @@ mod linux {
                     "matrix_version": matrix_version,
                     "truncated": truncated,
                 }),
-                now,
+                Throttling::Throttled,
+            ));
+        }
+
+        if !retired.is_empty() {
+            let (modems, truncated) = modem_array(
+                retired
+                    .iter()
+                    .map(|(imei, refusal)| {
+                        serde_json::json!({ "imei": imei, "refusal": refusal.wire() })
+                    })
+                    .collect(),
             );
+            // 🔴 不过节流。解绑是一次性的：删掉那一行之后下一趟不会再看它
+            // 第二眼，所以被压掉的这条**永远不会被补发**。
+            sink((
+                edge_core::AlertLevel::Critical,
+                "retro_unbound",
+                format!(
+                    "{} adopted modules were retired by the registration gates",
+                    retired.len()
+                ),
+                serde_json::json!({
+                    "count": retired.len(),
+                    "modems": modems,
+                    "matrix_version": matrix_version,
+                    "truncated": truncated,
+                }),
+                Throttling::Bypass,
+            ));
         }
     }
 
     #[cfg(test)]
     mod retro_tests {
-        use super::{build_evidence, enforce_mode_from, EnforceMode};
+        use super::{
+            build_evidence, emit_plan_alerts, enforce_mode_from, split_unreadable, EnforceMode,
+            EnforcementPlan, PlannedAlert, Throttling,
+        };
 
         /// 🔴 只有一个字符串通往删除。
         #[test]
@@ -8008,6 +8209,194 @@ mod linux {
                 evidence[0].usb,
                 Some(edge_core::UsbIdentity::new(0x2c7c, 0x0125))
             );
+        }
+
+        fn refusal() -> edge_core::BindRefusal {
+            edge_core::BindRefusal::NeverMeasured {
+                family: edge_core::ModemFamily::EC25_CN,
+                carrier: edge_core::CarrierProfile::CN_UNICOM,
+            }
+        }
+
+        fn alerts(
+            plan: &EnforcementPlan,
+            retired: &[(String, edge_core::BindRefusal)],
+            mode: EnforceMode,
+        ) -> Vec<PlannedAlert> {
+            let mut out = Vec::new();
+            emit_plan_alerts(
+                plan,
+                retired,
+                edge_core::MatrixAuthority::Stored,
+                "2026-09-01T03:32:24Z",
+                mode,
+                |a| out.push(a),
+            );
+            out
+        }
+
+        fn codes(alerts: &[PlannedAlert]) -> Vec<&'static str> {
+            alerts.iter().map(|a| a.1).collect()
+        }
+
+        /// 🔴 读不到隔离标记的那一根，这一趟不参与判定。
+        ///
+        /// 混起来会开出一整类零宽限删除：读不到时若照常判定，得到 Keep 的
+        /// 那一根不会被清标记（调用方以为它本来就没有），库里旧的
+        /// gate_failed_since 原封不动地活下来；下一次真判定用 COALESCE 接上
+        /// 那个旧起点，隔离期当场满 —— 一次瞬时 SQLITE_BUSY 就把 30 分钟的
+        /// 宽限变成 0。
+        #[test]
+        fn a_modem_whose_mark_could_not_be_read_is_not_judged() {
+            let rows = vec![registered("1", Some("EC20")), registered("2", Some("EC20"))];
+            let (judged, holds) = split_unreadable(&rows, &["2".to_string()]);
+            assert_eq!(judged.len(), 1);
+            assert_eq!(judged[0].imei, "1");
+            assert_eq!(
+                holds,
+                vec![("2".to_string(), edge_core::HoldReason::GateStateUnreadable)],
+                "读不到标记的那根既没被判、也没进 hold —— 它会静默消失"
+            );
+        }
+
+        /// 阴性对照：都读得到时一根都不该被挡在判定之外。
+        ///
+        /// 没有这条，上面那条可以靠「永远不判任何东西」通过，
+        /// 而那是一个看起来开着的关闭。
+        #[test]
+        fn nothing_is_held_back_when_every_mark_was_readable() {
+            let rows = vec![registered("1", Some("EC20")), registered("2", Some("EC20"))];
+            let (judged, holds) = split_unreadable(&rows, &[]);
+            assert_eq!(judged.len(), 2);
+            assert!(holds.is_empty());
+        }
+
+        /// 🔴 mark 模式下越过隔离期的模组，必须有一条自己的告警。
+        ///
+        /// 它们不在 quarantine 里（越线了），也不在 retired 里（本机不删）。
+        /// 少了这一条，「先跑几周只标记、看误报率」看到的是一个**假的零**——
+        /// 要度量的正是这群，而它们恰好一声不响。
+        ///
+        /// 第一版实现就是这样：把 retired 塞回 plan.unbind 再发告警，
+        /// 于是 mark 模式下 retired 恒为空，这群人彻底消失。而 mark 模式
+        /// 是整套设计里唯一让「自动做破坏」保有退路的地方。
+        #[test]
+        fn mark_mode_still_announces_what_it_would_have_deleted() {
+            let plan = EnforcementPlan {
+                unbind: vec![("868019060490134".into(), refusal())],
+                ..Default::default()
+            };
+            let emitted = alerts(&plan, &[], EnforceMode::Mark);
+            assert!(
+                codes(&emitted).contains(&"retro_would_unbind"),
+                "mark 模式下越线的模组没有任何告警：{:?}",
+                codes(&emitted)
+            );
+            assert_eq!(emitted[0].0, edge_core::AlertLevel::Critical);
+        }
+
+        /// 但 mark 模式**不能**说它删了 —— 它一行都没删。
+        #[test]
+        fn mark_mode_never_claims_a_delete() {
+            let plan = EnforcementPlan {
+                unbind: vec![("1".into(), refusal())],
+                ..Default::default()
+            };
+            assert!(!codes(&alerts(&plan, &[], EnforceMode::Mark)).contains(&"retro_unbound"));
+        }
+
+        /// 🔴 告警说的是**真的删掉了的那些**，不是判定。
+        ///
+        /// 判定为删、而 retire_modem 写失败的那一根不能出现在 retro_unbound
+        /// 里：没删就不能说删了，否则云端会退休一行边缘还在管的记录。
+        #[test]
+        fn a_failed_retire_is_not_announced_as_a_delete() {
+            let plan = EnforcementPlan {
+                unbind: vec![("1".into(), refusal()), ("2".into(), refusal())],
+                ..Default::default()
+            };
+            let retired = vec![("1".to_string(), refusal())];
+            let emitted = alerts(&plan, &retired, EnforceMode::Unbind);
+            let unbound = emitted
+                .iter()
+                .find(|a| a.1 == "retro_unbound")
+                .expect("有这条");
+            assert_eq!(unbound.3["count"], 1, "把没删成的那根也算进去了");
+        }
+
+        /// 只有 retro_unbound 绕过节流。
+        ///
+        /// 解绑是一次性的：删掉那一行之后下一趟不会再看它第二眼，被压掉的
+        /// 那条永远不会被补发。其余几条都是持续状态，节流对它们是对的 ——
+        /// 让它们也绕过，一台持续 Hold 的机器会每一趟发一条。
+        #[test]
+        fn only_the_one_shot_alert_bypasses_the_throttle() {
+            let plan = EnforcementPlan {
+                hold: vec![("1".into(), edge_core::HoldReason::NeverObserved)],
+                quarantine: vec![("2".into(), refusal(), 0, 1)],
+                unbind: vec![("3".into(), refusal())],
+                ..Default::default()
+            };
+            let retired = vec![("3".to_string(), refusal())];
+            for (_, code, _, _, throttling) in alerts(&plan, &retired, EnforceMode::Unbind) {
+                let expected = if code == "retro_unbound" {
+                    Throttling::Bypass
+                } else {
+                    Throttling::Throttled
+                };
+                assert_eq!(throttling, expected, "{code} 的节流选择不对");
+            }
+        }
+
+        /// 判据整体不可信是**一台机器**的状态，不是几根模组各自的问题。
+        /// 混进 retro_hold 会让运维去逐根排查，而该修的是这台机器的矩阵。
+        #[test]
+        fn a_systemic_hold_is_reported_as_one_machine_level_fault() {
+            let plan = EnforcementPlan {
+                hold: vec![
+                    (
+                        "1".into(),
+                        edge_core::HoldReason::MatrixNotAuthoritative(
+                            edge_core::MatrixAuthority::BuiltinNoRow,
+                        ),
+                    ),
+                    ("2".into(), edge_core::HoldReason::NeverObserved),
+                ],
+                ..Default::default()
+            };
+            assert_eq!(
+                codes(&alerts(&plan, &[], EnforceMode::Mark)),
+                vec!["retro_matrix_not_authoritative"]
+            );
+        }
+
+        /// 一趟一条，不是一根一条 —— 但身份不能丢。
+        #[test]
+        fn one_alert_per_pass_not_per_modem() {
+            let plan = EnforcementPlan {
+                hold: (0..30)
+                    .map(|i| (format!("{i}"), edge_core::HoldReason::NeverObserved))
+                    .collect(),
+                ..Default::default()
+            };
+            let emitted = alerts(&plan, &[], EnforceMode::Mark);
+            assert_eq!(emitted.len(), 1, "30 根发了 {} 条", emitted.len());
+            assert_eq!(emitted[0].3["count"], 30);
+        }
+
+        /// 超过契约上限就截断并说明，而不是让整封信被云端拒收。
+        #[test]
+        fn an_oversized_list_is_truncated_rather_than_lost() {
+            let plan = EnforcementPlan {
+                hold: (0..200)
+                    .map(|i| (format!("{i}"), edge_core::HoldReason::NeverObserved))
+                    .collect(),
+                ..Default::default()
+            };
+            let emitted = alerts(&plan, &[], EnforceMode::Mark);
+            assert_eq!(emitted[0].3["truncated"], true);
+            assert_eq!(emitted[0].3["modems"].as_array().unwrap().len(), 64);
+            assert_eq!(emitted[0].3["count"], 200, "计数要说真话，即使列表被截断");
         }
 
         /// 观测年龄不会是负数 —— 时钟往回跳时，一行「来自未来」的观测

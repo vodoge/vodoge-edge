@@ -229,6 +229,7 @@ const PANEL_SOURCES: &[&str] = &[
     include_str!("../../edge-ui/src/console.rs"),
     include_str!("../../edge-ui/src/esim.rs"),
     include_str!("../../edge-ui/src/danger.rs"),
+    include_str!("../../edge-ui/src/gate.rs"),
 ];
 
 /// 剥掉 Rust 行注释。守卫要看的是代码，不是注释里的举例。

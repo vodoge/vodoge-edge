@@ -137,3 +137,47 @@ fn retiring_something_never_registered_reports_it_did_not_happen() {
         "没有纳管行可删，返回值必须说出来"
     );
 }
+
+/// 🔴 重新纳管是一次**新的决定**，倒计时必须归零。
+///
+/// 场景：运维看到「闸不再满足，还需 8 分钟」的告警，检查后确认这是一次
+/// 矩阵手误，手动把这一根重新纳管一次以示确认。如果 gate_failed_* 原样
+/// 留着，下一趟真判定会带着那个旧的起点立刻到期 —— 运维的动作不但没有
+/// 重置倒计时，反而什么都没改变。
+#[test]
+fn re_adopting_resets_the_countdown() {
+    let store = store();
+    store.register_modem(&adopted("1")).expect("adopt");
+    store.mark_gate_failure("1", "never_measured", 1_000).expect("mark");
+    store.mark_gate_failure("1", "never_measured", 9_000).expect("mark");
+
+    store.register_modem(&adopted("1")).expect("re-adopt");
+    assert_eq!(
+        store.gate_failure("1").expect("read"),
+        None,
+        "重新纳管没有清掉倒计时，运维的确认动作等于没做"
+    );
+}
+
+/// 阴性对照：重新纳管**不**改写首次纳管的时间与来源。
+///
+/// 这条是 0015 已有的保证（tests/registered_modems.rs 钉过），
+/// 上面那条修改的是同一个 ON CONFLICT，不能顺手把它破坏掉。
+#[test]
+fn re_adopting_still_preserves_the_original_provenance() {
+    let store = store();
+    store.register_modem(&adopted("1")).expect("adopt");
+    let mut again = adopted("1");
+    again.registered_at = 9_999_999;
+    again.registered_by = "cloud".into();
+    store.register_modem(&again).expect("re-adopt");
+
+    let row = store
+        .registered_modems()
+        .expect("read")
+        .into_iter()
+        .find(|row| row.imei == "1")
+        .expect("still there");
+    assert_eq!(row.registered_at, 1_700_000_000_000, "首次纳管时间被改写了");
+    assert_eq!(row.registered_by, "panel", "首次纳管来源被改写了");
+}

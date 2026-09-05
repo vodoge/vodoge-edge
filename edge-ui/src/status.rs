@@ -392,7 +392,39 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                 let window = crate::trace::window_ms(&t);
                 let mins = (window / 60_000.0).round() as i64;
                 let st = state;
+                // 本机是「只标记」还是「会真删」——两种情况的文案不一样，
+                // 见 `gate::gate_notice`。
+                let enforcing = body.retro_enforcing;
+                // 被自动摘掉的，画在机队列表**上方**。
+                //
+                // 🔴 不能画在模组行里 —— 它们已经不在 body.modems 里了。
+                // 一根被自动摘除的模组，在面板上和一根从没被纳管过的长得一样，
+                // 而那正是这份清单要消掉的歧义：0015 说 registered_by 存在的
+                // 理由是「why is this being managed 是别人问的第一个问题」，
+                // 这里回答它的镜像。
+                let retired = body.retirements.clone();
+                let count = retired.len();
                 view! {
+                    {(!retired.is_empty())
+                        .then(|| {
+                            view! {
+                                <div class="vd-retirements">
+                                    <Caption1>
+                                        {format!("{count} 根被自动摘除（仍可手动重新纳管，纳管日期会复原）")}
+                                    </Caption1>
+                                    {retired
+                                        .into_iter()
+                                        .map(|row| {
+                                            view! {
+                                                <div class="vd-retirement vd-faint">
+                                                    {crate::gate::retirement_notice(&row)}
+                                                </div>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
+                            }
+                        })}
                     <div class="vd-fleetrows">
                         {body
                             .modems
@@ -429,6 +461,31 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                         // 那要真的去摸一次模组。它们是偶尔查的
                                         // 参考信息，放在这里而不是左栏：左栏要
                                         // 保持能一眼扫完。
+                                        // 闸不再满足时的提示。
+                                        //
+                                        // 🔴 画在这一行里，而不是折进详情：
+                                        // 它说的是「这一根随时可能不再被管」，
+                                        // 而运维扫这份列表时不会点开任何东西。
+                                        {m
+                                            .gate_failure
+                                            .as_ref()
+                                            .map(|gate| {
+                                                view! {
+                                                    <span class="vd-fleetrow-gate">
+                                                        <Badge
+                                                            color=BadgeColor::Danger
+                                                            size=BadgeSize::Small
+                                                        >
+                                                            "闸"
+                                                        </Badge>
+                                                        {crate::gate::gate_notice(
+                                                            gate,
+                                                            now_ms() as i64,
+                                                            enforcing,
+                                                        )}
+                                                    </span>
+                                                }
+                                            })}
                                         <span class="vd-fleetrow-ref vd-faint">
                                             {format!(
                                                 "固件 {} · IMSI {} · 本机号 {}",
@@ -817,6 +874,7 @@ mod tests {
             discovery: "qmi".into(),
             manageable: true,
             capability_origin: edge_panel_api::CapabilityOrigin::Rule,
+            gate_failure: None,
             carrier_profile: String::new(),
             control_port: None,
             firmware: None,

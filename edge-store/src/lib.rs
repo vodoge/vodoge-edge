@@ -1362,7 +1362,21 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(imei) DO UPDATE SET
                  usb_device = excluded.usb_device,
-                 family = COALESCE(excluded.family, registered_modems.family)",
+                 family = COALESCE(excluded.family, registered_modems.family),
+                 -- 纳管是一次**新的决定**，倒计时归零。
+                 --
+                 -- 场景：运维看到「闸不再满足，还需 8 分钟」的告警，查过之后
+                 -- 认定那是一次矩阵手误，于是把这一根重新纳管一次以示确认。
+                 -- 留着旧的 gate_failed_since，下一趟真判定会带着那个旧起点
+                 -- 立刻到期 —— 运维那个动作不但没有重置倒计时，反而什么都
+                 -- 没改变，而他以为自己救回来了。
+                 --
+                 -- ⚠️ 只清这三列。registered_at / registered_by / note 依旧
+                 -- 不动（0015 的保证，tests/registered_modems.rs 钉着）：
+                 -- 「重复纳管」不是「重新纳管」，首次纳管的履历不该被改写。
+                 gate_failed_since = NULL,
+                 gate_failed_reason = NULL,
+                 gate_failed_passes = 0",
             params![
                 modem.imei,
                 modem.registered_at,

@@ -113,6 +113,13 @@ pub struct GateEvidence {
 /// 为什么这一趟判不了。**每一条都通向「维持现状」。**
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HoldReason {
+    /// 这一根的隔离标记**读不到**。
+    ///
+    /// 🔴 和「没有标记」是两件事，而这个区分正是一整类零宽限删除的入口：
+    /// 读不到时若照常判定，得到 `Keep` 就不会去清库里那条标记（因为调用方
+    /// 以为它不存在），于是旧的 `gate_failed_since` 原封不动地活下来；
+    /// 下一次真判定用 `COALESCE` 接上那个旧起点，隔离期当场就是满的。
+    GateStateUnreadable,
     MatrixNotAuthoritative(MatrixAuthority),
     UplinkNeverResumed,
     NeverObserved,
@@ -127,6 +134,7 @@ impl HoldReason {
     /// 给告警 context 用的短标签。常量，不含 IMEI。
     pub fn wire(&self) -> &'static str {
         match self {
+            Self::GateStateUnreadable => "gate_state_unreadable",
             Self::MatrixNotAuthoritative(_) => "matrix_not_authoritative",
             Self::UplinkNeverResumed => "uplink_never_resumed",
             Self::NeverObserved => "never_observed",

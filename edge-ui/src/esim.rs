@@ -615,6 +615,7 @@ mod tests {
             msisdn: None,
             carrier_profile: String::new(),
             capability_origin: CapabilityOrigin::Rule,
+            gate_failure: None,
         };
         let mut qmi = at_only.clone();
         qmi.imei = "867018069509705".into();
@@ -625,6 +626,8 @@ mod tests {
             mode: PanelMode::Cloud,
             modems: vec![at_only.clone(), qmi.clone()],
             discoveries: Vec::new(),
+            retirements: Vec::new(),
+            retro_enforcing: false,
         };
 
         assert!(

@@ -59,6 +59,46 @@ pub struct StatusBody {
     pub mode: PanelMode,
     pub modems: Vec<ModemBody>,
     pub discoveries: Vec<DiscoveryBody>,
+    /// 被追溯执行自动摘掉的纳管记录。
+    ///
+    /// `#[serde(default)]`：scratchpad 里的回放/模拟服务器产的是旧形状的
+    /// JSON，而它们正是用来在不碰硬件的情况下验面板的。少一个字段不该让
+    /// 整个面板打不开。
+    #[serde(default)]
+    pub retirements: Vec<RetirementBody>,
+    /// 本机的追溯执行会不会**真的**解绑，还是只标记。
+    ///
+    /// 文案差别很大：只标记时倒计时是「这个状态持续了多久」，
+    /// 会真删时它是「还剩多久」。把两者画成一样，运维要么会等一个永远
+    /// 不来的动作，要么会以为还有时间而其实没有。
+    #[serde(default)]
+    pub retro_enforcing: bool,
+}
+
+/// 一根模组当前的「闸不再满足」标记。
+///
+/// 🔴 带着它的模组**仍然被管理**。这是自动化「先说、后做」里的那个「说」，
+/// 面板要把它显示成一个还有余地的状态，而不是一个已经发生的损失。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GateFailureBody {
+    /// 稳定标签：`no_strategy` / `never_measured` 等。
+    pub reason: String,
+    /// 第一次判为该解绑的时刻。
+    pub since: i64,
+    /// 已经连续判了多少趟。
+    pub passes: u32,
+}
+
+/// 一条被自动摘掉的纳管履历。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetirementBody {
+    pub imei: String,
+    pub retired_at: i64,
+    pub reason: String,
+    pub detail: Option<String>,
+    pub family: Option<String>,
+    pub registered_by: String,
+    pub matrix_version: Option<String>,
 }
 
 /// One modem row, as the panel shows it.
@@ -107,6 +147,12 @@ pub struct ModemBody {
     /// the point of serialising, which is a mapping that can drift from the
     /// enum it is mapping. There is one spelling now and `serde` owns it.
     pub capability_origin: CapabilityOrigin,
+    /// 两道闸现在不满足、倒计时在走，但这根**仍然被管理**。
+    ///
+    /// `None` 是正常状态。`Some` 不是「已经没了」——面板要区分这两件事，
+    /// 否则运维会以为已经掉了，而其实还有 30 分钟可以补救。
+    #[serde(default)]
+    pub gate_failure: Option<GateFailureBody>,
 }
 
 /// A USB device the agent can see but has not adopted as a modem.

@@ -197,6 +197,19 @@
       .vd-fleetrow-flip { margin-left: auto; }
       /* 参考信息：固件 / IMSI / 本机号。agent 一直在送，以前想看得跑一次体检。 */
       .vd-fleetrow-ref { font-size: 11px; }
+      /* 闸不再满足。和 vd-fleetrow-ref 同一行高，但**不**变淡——它是这一行里
+         唯一需要人做决定的东西，压成参考信息的样子等于把它藏起来。 */
+      .vd-fleetrow-gate {
+        display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        font-size: 11px;
+      }
+      /* 被自动摘除的。画在机队上方而不是行内——它们已经不在 modems 里了，
+         而一根被摘掉的模组在面板上本来和一根从没纳管过的长得一样。 */
+      .vd-retirements {
+        display: flex; flex-direction: column; gap: 3px;
+        margin-bottom: 10px;
+      }
+      .vd-retirement { font-size: 11px; }
       /* 一小时 360 格。格子小到 1px 也无所谓——要看的是**段**，不是格。 */
       .vd-trace--wide { height: 14px; gap: 0; }
       .vd-trace--wide .vd-tick { border-radius: 0; }
