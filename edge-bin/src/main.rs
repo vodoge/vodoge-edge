@@ -5163,7 +5163,8 @@ mod linux {
         }
         let store = shared.0.lock().expect("store");
         store
-            .upsert_local_modem(&LocalModem {
+            .upsert_local_modem_with(
+                &LocalModem {
                 imei: snapshot.imei.clone(),
                 family: snapshot.family.clone(),
                 firmware: snapshot.firmware.clone(),
@@ -5181,7 +5182,11 @@ mod linux {
                 discovery: snapshot.discovery.wire().to_string(),
                 manageable: snapshot.manageable,
                 control_port: Some(at_path.display().to_string()),
-            })
+                },
+                // AT 这条路问不问得到卡号，取决于这块硬件答不答 +QCCID/+CCID。
+                // 问不成时不许把已存的卡号抹掉 —— 见 CardRead 的文档。
+                snapshot.card_read,
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -5613,6 +5618,9 @@ mod linux {
             registration: "unknown",
             family: seen.family.clone(),
             iccid: None,
+            // 这一趟根本没跟它说上话 —— 连问都谈不上。掉线不等于卡被拔了，
+            // 所以已存的卡号不许被这条合成快照抹掉。
+            card_read: edge_store::CardRead::Unasked,
             imsi: None,
             home: None,
             serving: None,
@@ -5673,6 +5681,29 @@ mod linux {
         // reported every capability as `probe`, while the same hardware
         // answering over QMI got the measured EC20 rules. Both sources go to
         // `detect`, which is what reconciles the two paths.
+        // EF_ICCID 说的是「这根现在用的是哪一张卡」。这条路以前硬写 `None`，
+        // 于是 QMI 口一挂、轮询降级到这里，`local_modems.iccid` 就被抹成空，
+        // 而卡策略是按 ICCID 查的 —— 查不到就是「没有声明」，也就是放行。
+        //
+        // 端口已经开着，这条命令在台架上实测 12ms。`+QCCID` 是 Quectel 的，
+        // `+CCID` 是更通用的那条；两条都答不出才算「没问成」。
+        let card = ["AT+QCCID", "AT+CCID"]
+            .into_iter()
+            .find_map(|command| {
+                port.command(command)
+                    .ok()
+                    .filter(edge_modem::AtExchange::succeeded)
+            });
+        let (iccid, card_read) = match card {
+            // 答了。解析出来是 `None` 说明卡槽是空的（`+QCCID: FFFF`），
+            // 那是一个真答案，该让它清空。
+            Some(exchange) => (
+                edge_modem::parse_iccid(&exchange.lines),
+                edge_store::CardRead::Answered,
+            ),
+            // 两条都不答：这块硬件问不到，不是没卡。
+            None => (None, edge_store::CardRead::Unasked),
+        };
         let model = at_identity_line(&mut port, "AT+CGMM").unwrap_or_default();
         let revision = at_identity_line(&mut port, "AT+CGMR").unwrap_or_default();
         let family = at_family(&model, &revision);
@@ -5690,7 +5721,8 @@ mod linux {
             state: "online",
             registration,
             family,
-            iccid: None,
+            iccid,
+            card_read,
             imsi,
             home,
             // Serving network comes from the QMI serving-system read, which
@@ -6974,6 +7006,10 @@ mod linux {
             registration: registration.wire(),
             family: family_name,
             iccid,
+            // QMI 这条路真的读了 EF_ICCID，所以上面那个 `None` 是一个答案
+            // （卡不在），不是「没问成」。照写，让它清空是对的 —— 否则拔掉
+            // 的卡永远拔不掉。
+            card_read: edge_store::CardRead::Answered,
             imsi,
             home,
             serving: serving_plmn,
@@ -7357,6 +7393,12 @@ mod linux {
         registration: &'static str,
         family: String,
         iccid: Option<String>,
+        /// 这一趟到底问没问卡号。
+        ///
+        /// `iccid: None` 有两种意思 —— 「问了，卡不在」和「没问成」。存储层
+        /// 对这两者的处理必须相反：前者清空，后者保住上一次读到的。分不开的
+        /// 代价见 `edge_store::CardRead` 的文档（一张禁发的卡会变成能发）。
+        card_read: edge_store::CardRead,
         imsi: Option<String>,
         /// Who issued the card.
         home: Option<Network>,

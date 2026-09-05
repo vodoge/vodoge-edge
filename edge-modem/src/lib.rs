@@ -70,7 +70,8 @@ pub use ussd::{
     UssdStage,
 };
 pub use report::{
-    collect as collect_report, parse_cnum, parse_cops_scan, parse_creg, parse_csq, ModemReport,
+    collect as collect_report, parse_cnum, parse_cops_scan, parse_creg, parse_csq, parse_iccid,
+    ModemReport,
     Registration, ScannedOperator, Signal,
 };
 pub use es10c::{

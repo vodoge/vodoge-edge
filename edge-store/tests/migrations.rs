@@ -287,3 +287,68 @@ fn a_pass_that_read_nothing_does_not_erase_what_an_earlier_pass_read() {
         "模组答 unknown 时不该把已知型号盖掉"
     );
 }
+
+/// 「这一趟没问成」不等于「卡不在」。
+///
+/// QMI 那条路真的读 EF_ICCID，`None` 的意思是卡不在，照写是对的。AT 那条路
+/// 只在模组支持 `+QCCID` / `+CCID` 时才问得到；问不到时 `None` 的意思是
+/// 「没问成」。
+///
+/// 🔴 两者用同一条规则的后果是会花钱的：QMI 口一挂、轮询降级到 AT，
+/// `local_modems.iccid` 被抹成空 → 卡策略按 ICCID 查、查不到就是「没有声明」
+/// → `unwrap_or_default()` 放行 → 一张写着「套餐不含发短信」的卡变成能发，
+/// 没有日志也没有告警。
+#[test]
+fn a_pass_that_could_not_ask_for_the_card_does_not_erase_it() {
+    let store = Store::open_in_memory().expect("open");
+    let mut row = seen_modem("868019060490134", Some("89860325743130290814"));
+    store
+        .upsert_local_modem_with(&row, edge_store::CardRead::Answered)
+        .expect("QMI pass read the card");
+
+    // 降级到 AT，这一趟连问都没问成。
+    row.iccid = None;
+    row.last_seen = Some(2);
+    store
+        .upsert_local_modem_with(&row, edge_store::CardRead::Unasked)
+        .expect("AT pass could not ask");
+
+    let kept = store.list_local_modems().expect("read");
+    assert_eq!(
+        kept.first().expect("one row").iccid.as_deref(),
+        Some("89860325743130290814"),
+        "没问成被当成了没卡，卡策略会因此失效"
+    );
+
+    // 而真的问过、答案是「卡不在」时，照旧要清空 —— 否则拔掉的卡永远拔不掉。
+    store
+        .upsert_local_modem_with(&row, edge_store::CardRead::Answered)
+        .expect("QMI pass says the tray is empty");
+    assert_eq!(
+        store.list_local_modems().expect("read").first().expect("one row").iccid,
+        None,
+        "问过了、答案是没卡，就该清空"
+    );
+}
+
+fn seen_modem(imei: &str, iccid: Option<&str>) -> edge_store::LocalModem {
+    edge_store::LocalModem {
+        imei: imei.into(),
+        family: "EC200U-CN".into(),
+        firmware: None,
+        msisdn: None,
+        msisdn_iccid: None,
+        apn_contexts: None,
+        iccid: iccid.map(str::to_owned),
+        state: "online".into(),
+        last_seen: Some(1),
+        mcc: None,
+        mnc: None,
+        home_mcc: Some(460),
+        home_mnc: Some(11),
+        imsi: Some("460115778153975".into()),
+        discovery: "at".into(),
+        manageable: false,
+        control_port: Some("/dev/ttyUSB12".into()),
+    }
+}

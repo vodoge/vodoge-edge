@@ -74,6 +74,27 @@ CREATE INDEX IF NOT EXISTS ingested_sms_age
 /// version of this test rolled back to 0, which drops `local_modems` too,
 /// so there was nothing to adopt and it asserted nothing.」——
 /// 同一个失效形状，换了一个算错的数字。
+/// 这一趟到底**问没问**卡号。
+///
+/// QMI 那条路真的读 EF_ICCID，所以 `LocalModem.iccid == None` 的意思是
+/// 「卡不在」，照写、让它变空是对的 —— 否则拔掉的卡永远拔不掉。
+///
+/// AT 那条路只在模组答得了 `+QCCID` / `+CCID` 时才问得到。问不到时
+/// `None` 的意思是「没问成」，不是「没卡」。
+///
+/// 🔴 两者共用一条规则的代价是会花钱的：QMI 口一挂、轮询降级到 AT，
+/// `local_modems.iccid` 被抹成空 → 卡策略按 ICCID 查、查不到就是「没有
+/// 声明」→ `unwrap_or_default()` 放行 → 一张写着「套餐不含发短信」的卡
+/// 变成能发，而且没有日志也没有告警。这正是这个仓库反复在防的那个形状：
+/// **一次读失败塌陷成了一个合法值**。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardRead {
+    /// 问过了。`iccid` 就是答案，`None` = 卡不在。
+    Answered,
+    /// 这一趟没问成。已存的卡号不许被覆盖。
+    Unasked,
+}
+
 pub const REGISTRY_MIGRATION: i64 = 15;
 
 /// 0017 给候选表加身份三列的那一条。
@@ -422,7 +443,24 @@ impl Store {
     }
 
     pub fn upsert_local_modem(&self, modem: &LocalModem) -> Result<(), StoreError> {
+        self.upsert_local_modem_with(modem, CardRead::Answered)
+    }
+
+    pub fn upsert_local_modem_with(
+        &self,
+        modem: &LocalModem,
+        card: CardRead,
+    ) -> Result<(), StoreError> {
+        let iccid_rule = match card {
+            CardRead::Answered => "iccid = excluded.iccid,",
+            CardRead::Unasked => {
+                "iccid = COALESCE(excluded.iccid, local_modems.iccid),"
+            }
+        };
+        // SQL 里只有这一处随参数变，其余照旧是常量字符串。占位符仍然是
+        // 位置绑定，`iccid_rule` 本身来自上面那个封闭的 match，不接受外部输入。
         self.conn.execute(
+            &format!(
             "INSERT INTO local_modems
                 (imei, family, firmware, msisdn, msisdn_iccid, apn_contexts,
                  iccid, state, last_seen, mcc, mnc, home_mcc, home_mnc, imsi,
@@ -462,7 +500,7 @@ impl Store {
                 msisdn = COALESCE(excluded.msisdn, local_modems.msisdn),
                 msisdn_iccid = COALESCE(excluded.msisdn_iccid, local_modems.msisdn_iccid),
                 apn_contexts = COALESCE(excluded.apn_contexts, local_modems.apn_contexts),
-                iccid = excluded.iccid,
+                {iccid_rule}
                 state = excluded.state,
                 last_seen = excluded.last_seen,
                 discovery = excluded.discovery,
@@ -477,7 +515,8 @@ impl Store {
                 -- than blanking it; one bad poll must not lose what is known.
                 home_mcc = COALESCE(excluded.home_mcc, local_modems.home_mcc),
                 home_mnc = COALESCE(excluded.home_mnc, local_modems.home_mnc),
-                imsi = COALESCE(excluded.imsi, local_modems.imsi)",
+                imsi = COALESCE(excluded.imsi, local_modems.imsi)"
+            ),
             params![
                 modem.imei,
                 modem.family,
