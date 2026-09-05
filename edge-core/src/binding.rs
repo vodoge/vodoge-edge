@@ -46,6 +46,38 @@ pub enum BindRefusal {
     },
 }
 
+/// 一条 refusal 是「证据不足」还是「真判定」。
+///
+/// 🔴 `bind_gates` 是为**准入**设计的：四个变体的动作完全相同（拒，
+/// 也就是不新增一行），所以把它们平等地装进一个 `Result` 是对的，
+/// `?` 和 `is_err()` 把它们抹平也没有代价。
+///
+/// 在**追溯**方向上，这四个变体的动作截然相反：前两个必须维持现状，
+/// 后两个才允许删掉一行。极性是反的。所以追溯路径**禁止**直接消费
+/// `bind_gates` 的 `Result`，必须先过这里 —— 否则「读不到 USB 标识」
+/// 会被一个 `is_err()` 翻译成「解绑」，而那正是 `managed_imeis` 那次
+/// 事故的形状。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefusalKind {
+    /// 信息缺失。**绝不能**据此解绑。
+    MissingEvidence,
+    /// 证据齐全，答案是「不该管」。
+    Verdict,
+}
+
+impl BindRefusal {
+    /// 这条拒绝是证据不足，还是一个真判定。
+    pub fn kind(&self) -> RefusalKind {
+        // ⚠️ 穷举，不要加 `_ => `。给 `BindRefusal` 添新变体时这里必须
+        // 编译失败，逼人做一次分类决定 —— 默默落进某一边就是这道闸
+        // 悄悄失效的方式，而落错边的代价是删掉一行合法的纳管。
+        match self {
+            Self::UnreadableUsbIdentity | Self::NotIdentifiedYet => RefusalKind::MissingEvidence,
+            Self::NoStrategy(_) | Self::NeverMeasured { .. } => RefusalKind::Verdict,
+        }
+    }
+}
+
 impl std::fmt::Display for BindRefusal {
     /// 面向运维的一句话，且每一句都说出**下一步做什么**。
     ///

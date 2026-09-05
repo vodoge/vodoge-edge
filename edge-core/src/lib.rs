@@ -20,6 +20,7 @@ mod gsm7;
 mod pdu;
 mod factory;
 mod binding;
+mod retro;
 mod matrix;
 mod policy;
 mod registration;
@@ -59,7 +60,11 @@ pub use strategies::{
     registry as builtin_strategy_registry, CnMobileStrategy, CnTelecomStrategy, CnUnicomStrategy,
     Ec200uStrategy, InternationalStrategy, QuectelEcStrategy,
 };
-pub use binding::{bind_gates, BindRefusal};
+pub use binding::{bind_gates, BindRefusal, RefusalKind};
+pub use retro::{
+    enforce_one, Enforcement, GateEvidence, HoldReason, MatrixAuthority, GRACE_MS, GRACE_PASSES,
+    OBSERVATION_MAX_AGE_MS,
+};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{
     arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
