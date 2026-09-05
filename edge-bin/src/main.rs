@@ -3684,6 +3684,14 @@ mod linux {
             imei: String,
             source: &str,
         ) -> Result<RegistrationResult, PanelError> {
+            // 🔴 先把矩阵克隆出来，**然后**才去锁 store。
+            //
+            // `live_matrix` 那把锁是叶子锁 —— 它只被单独持有，只为把矩阵克隆
+            // 出来或写一份新的进去，从不在持有别的锁时去拿（理由写在它创建
+            // 处的注释里）。在这里持着 store 再去锁它，就等于亲手引入那条
+            // 注释所排除的锁序，而且是一条平时永远不触发、只在
+            // `update_capability_matrix` 恰好并发时才死锁的路径。
+            let matrix = self.matrix.lock().expect("capability matrix").clone();
             let store = self.store.0.lock().expect("store");
             let seen = store
                 .list_local_modem_discoveries()
@@ -3696,6 +3704,38 @@ mod linux {
                     "{imei} has not been seen by this agent; only an identified module can be adopted"
                 )));
             };
+            // 纳管的两道闸：支持的（这个 build 驱动得了）＋ 测试过的
+            // （这一对在矩阵里有过真实测量）。判定本身在
+            // `edge_core::bind_gates`，那里能在本机测；这里只负责把两样输入
+            // 凑齐，并且**凑不齐就是拒**。
+            let usb = match (
+                observed.vendor_id.as_deref(),
+                observed.product_id.as_deref(),
+            ) {
+                (Some(vendor), Some(product)) => edge_core::UsbIdentity::parse(vendor, product),
+                _ => None,
+            };
+            let identified = store
+                .list_local_modems()
+                .map_err(|error| PanelError::Action(error.to_string()))?
+                .into_iter()
+                .find(|modem| modem.imei == imei);
+            // ⚠️ 这里**没有**像另外三处那样 `.unwrap_or("Generic-International")`。
+            // 那个兜底在「报告」和「路由」里说得通；在一道闸上它是失败即放行：
+            // 一张还没读出 IMSI 的卡会被当成国际卡，然后拿国际卡的规则过闸。
+            // 归属网络读不到就是「这一对还不成立」，而那是暂时的 —— 拒绝的
+            // 文案会说下一轮再试。
+            let pair = identified.as_ref().and_then(|modem| {
+                let (mcc, mnc) = modem.home_mcc.zip(modem.home_mnc)?;
+                Some((
+                    ModemFamily::from(modem.family.as_str()),
+                    CarrierProfile::from(Network::new(mcc, mnc).carrier_profile()),
+                ))
+            });
+            edge_core::bind_gates(strategy_registry(), &matrix, usb, pair).map_err(|refusal| {
+                PanelError::Action(format!("{imei} cannot be adopted: {refusal}"))
+            })?;
+
             let already = store
                 .is_registered(&imei)
                 .map_err(|error| PanelError::Action(error.to_string()))?;
@@ -3710,7 +3750,10 @@ mod linux {
                     // column exists to answer.
                     registered_by: source.to_owned(),
                     usb_device: observed.usb_device.clone(),
-                    family: None,
+                    // 🔴 真的写进去，不再是 `None`。闸 2 要靠它去查规则，
+                    // 而一条 family 为空的纳管记录，事后没有任何办法回答
+                    // 「当初是按哪一对放行的」。
+                    family: identified.as_ref().map(|modem| modem.family.clone()),
                     note: None,
                 })
                 .map_err(|error| PanelError::Action(error.to_string()))?;

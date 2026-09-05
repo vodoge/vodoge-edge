@@ -391,6 +391,33 @@ impl Capability {
     pub fn probe_all() -> Self {
         Self::default()
     }
+
+    /// 这一对有没有过**真实测量** —— 纳管第二道闸问的就是这个。
+    ///
+    /// 🔴 和 `SupportLedger::is_tested` 不是一回事，两者之间差一个后门。
+    /// `CapabilityMatrix::rules()` 不过滤 `probe`，所以一条四项全是 probe 的
+    /// `[[rule]]` 也会变成账本条目，`is_tested` 对它返回 true。拿 `is_tested`
+    /// 当闸的后果很具体：四条 probe 规则就能放行一根模组，它绑得上，
+    /// 然后每一个操作都被 `resolve()` 拒掉 —— 「静默半可用」，
+    /// 正是这套三层设计存在的目的所要防的东西。
+    ///
+    /// `unsupported` **算**一次测量。`0046_support_ledger.sql` 写得很清楚：
+    /// 「measured not working」是一个真实发现，和「没人测过」是两件不同的事，
+    /// 而且前者比后者更有价值。
+    ///
+    /// 判据是「至少一项」而不是「每一项」：账本的粒度是「一对多项」，
+    /// `0046` 明确允许部分测量诚实地记下来（so a partial measurement can be
+    /// recorded honestly），要求满分等于把「诚实记录部分结果」变成惩罚。
+    ///
+    /// ⚠️ 这道闸和 `resolve()` 是**两层**，不要合并：这里答的是
+    /// 「这根能不能被纳管」，`resolve()` 答的是「这个操作此刻能不能做」。
+    /// 一根只测过 `sms_mt` 的模组绑得上，但它发短信依然会被 `resolve()`
+    /// 以「recorded as needing a probe」拒掉 —— 纳管不等于每个能力都开。
+    pub fn has_measurement(&self) -> bool {
+        [&self.sms_mo, &self.sms_mt, &self.data, &self.voice]
+            .into_iter()
+            .any(|support| !matches!(support, BearerSupport::Probe))
+    }
 }
 
 impl Default for Capability {
@@ -559,5 +586,57 @@ mod family_detect_tests {
     #[test]
     fn an_unrecognised_module_keeps_its_own_name() {
         assert_eq!(ModemFamily::detect_name("SIM7600G", ""), "SIM7600G");
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::{Bearer, BearerSupport, Capability};
+
+    /// 回落值是四项全 probe，所以「矩阵里没有这一对」和「有一条但什么都没测」
+    /// 在这道闸下必须同样地不放行 —— 后者正是那个后门的形状。
+    #[test]
+    fn all_probe_is_not_a_measurement() {
+        assert!(!Capability::probe_all().has_measurement());
+    }
+
+    /// `unsupported` 是一次真实测量，不是一次缺席。
+    /// 电信 × EC20 那条就是这个形状：量过，结论是不行。
+    #[test]
+    fn a_negative_finding_still_counts_as_measured() {
+        let capability = Capability {
+            sms_mo: BearerSupport::unsupported("no_cdma_fallback_and_no_ct_volte_mbn"),
+            ..Capability::probe_all()
+        };
+        assert!(capability.has_measurement());
+    }
+
+    /// 部分测量放行 —— 这是「至少一项」而不是「每一项」的全部意义。
+    /// 香港 CSL 和美国 310-240 挂在这条上：它们的 `sms_mo` 是 probe，
+    /// `sms_mt` 是 supported，两根都该留在机队里。
+    #[test]
+    fn one_measured_operation_is_enough() {
+        let capability = Capability {
+            sms_mt: BearerSupport::supported(Bearer::Cellular),
+            ..Capability::probe_all()
+        };
+        assert!(capability.has_measurement());
+        // 而且它确实只测了一项 —— 否则上面那句就不是在测「至少一项」。
+        assert!(matches!(capability.sms_mo, BearerSupport::Probe));
+        assert!(matches!(capability.data, BearerSupport::Probe));
+        assert!(matches!(capability.voice, BearerSupport::Probe));
+    }
+
+    /// 四项都要看。漏掉任何一项，那一项上的测量就会被当成没测过。
+    #[test]
+    fn every_operation_can_carry_the_measurement() {
+        for (name, capability) in [
+            ("sms_mo", Capability { sms_mo: BearerSupport::supported(Bearer::Cellular), ..Capability::probe_all() }),
+            ("sms_mt", Capability { sms_mt: BearerSupport::supported(Bearer::Cellular), ..Capability::probe_all() }),
+            ("data", Capability { data: BearerSupport::supported(Bearer::Cellular), ..Capability::probe_all() }),
+            ("voice", Capability { voice: BearerSupport::supported(Bearer::Cellular), ..Capability::probe_all() }),
+        ] {
+            assert!(capability.has_measurement(), "{name} 上的测量没有被看见");
+        }
     }
 }

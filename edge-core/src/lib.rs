@@ -19,6 +19,7 @@ mod concat;
 mod gsm7;
 mod pdu;
 mod factory;
+mod binding;
 mod matrix;
 mod policy;
 mod registration;
@@ -58,6 +59,7 @@ pub use strategies::{
     registry as builtin_strategy_registry, CnMobileStrategy, CnTelecomStrategy, CnUnicomStrategy,
     Ec200uStrategy, InternationalStrategy, QuectelEcStrategy,
 };
+pub use binding::{bind_gates, BindRefusal};
 pub use matrix::{CapabilityMatrix, CapabilityOrigin, CapabilityQuery, MatrixError};
 pub use registration::{
     arbitrate, Confidence, Plmn, RegistrationEvidence, RegistrationSourceKind, RegistrationVerdict,
