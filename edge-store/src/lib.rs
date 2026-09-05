@@ -1506,6 +1506,37 @@ impl Store {
         Ok(())
     }
 
+    /// 人主动重新确认了一次，而闸仍然不通过：把倒计时拨回起点，标记留着。
+    ///
+    /// 🔴 和 `mark_gate_failure` 的语义**正好相反**，这是有意的。那一条用
+    /// `COALESCE(gate_failed_since, ?2)` 保住最初失败的时刻 —— 否则每一趟轮询
+    /// 都刷新一次，隔离期永远走不完，追溯执行就成了摆设。
+    ///
+    /// 这一条是人按下按钮时才发生的，它要的恰好是「从现在起重新计时」：给正在
+    /// 修根因的人（通常是要推一版新矩阵）争取时间，不让隔离期在他手上到期。
+    ///
+    /// 不清标记，因为闸确实还没过。清掉就成了「让告警闭嘴」—— 屏幕干净了，
+    /// 这一根仍然在闸外，下一轮又被标记，而运维会以为自己修好过一次。
+    ///
+    /// 两条都不碰 `registered_at` / `registered_by`：现有的绕法是「取消纳管
+    /// 再纳管」，那会把纳管履历冲成今天，而 0015 建这两列要保住的正是它。
+    pub fn restart_gate_failure(
+        &self,
+        imei: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE registered_modems
+                SET gate_failed_since = ?2,
+                    gate_failed_reason = ?3,
+                    gate_failed_passes = 0
+              WHERE imei = ?1",
+            params![imei, now, reason],
+        )?;
+        Ok(())
+    }
+
     /// 闸又过了：把标记和倒计时一起清掉。
     ///
     /// 这是自愈发生的地方。云端手误推了一份规则更少的矩阵、十分钟内补回来，

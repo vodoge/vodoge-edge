@@ -15,7 +15,7 @@ use edge_panel_api::{
     AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
     MessageBody, MessagesBody, ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody,
     RescanReceipt, ResetBody, RestartBody, RestartReceipt, RetirementBody, SendBody, SendReceipt,
-    StatusBody, SwitchBody, SwitchReceipt, UssdBody, UssdCancelReceipt,
+    RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody, UssdCancelReceipt,
 };
 
 /// The `Actions` trait below returns these, so whoever implements it reaches
@@ -27,8 +27,10 @@ use edge_panel_api::{
 /// second crate for the return types of a trait it found here would be worse
 /// ergonomics for no gain — there is still exactly one definition.
 pub use edge_panel_api::{
-    AtResult, CandidateClaimResult, ProfileBody, ProfilesResult, RegistrationResult, ReportResult,
-    RescanResult, ScanResult, ScannedOperatorBody, UsbResetResult, UssdResult,
+    AtResult, CandidateClaimResult, CandidateRevokeResult, ProfileBody, ProfilesResult,
+    ReconfirmResult,
+    RegistrationResult, ReportResult, RescanResult, ScanResult, ScannedOperatorBody,
+    UsbResetResult, UssdResult,
 };
 use edge_store::{
     GateFailure, LocalMessage, LocalModem, LocalModemDiscovery, Retirement, Store, StoreError,
@@ -172,6 +174,32 @@ pub trait Actions: Send + Sync {
     /// Persist an operator approval for one already discovered serial
     /// endpoint. Implementations must re-check the live endpoint rather than
     /// accepting a free-form port name from the panel.
+    /// 重新确认一根被闸标记的模组。
+    ///
+    /// 不是「让告警闭嘴」：它重新跑一遍闸，过了才清标记；没过就保留标记、
+    /// 把隔离期倒计时拨回起点，并如实说出闸为什么还不通过。
+    ///
+    /// 在此之前唯一的绕法是「取消纳管再纳管」，而那会把纳管履历冲成今天。
+    fn reconfirm_modem(&self, _imei: String) -> Result<ReconfirmResult, PanelError> {
+        Err(PanelError::Action(
+            "modem reconfirmation is not configured".into(),
+        ))
+    }
+
+    /// 撤销一个串口的探测批准。
+    ///
+    /// 和 `claim_modem_candidate` 成对：一个人点头说「打开这个口试试」，
+    /// 就得有一条路把那句话收回来。在此之前没有 —— 批准过的口再也撤不掉，
+    /// 每个批准过的串口都在库里留一条永久记录。
+    fn revoke_modem_candidate(
+        &self,
+        _candidate_key: String,
+    ) -> Result<CandidateRevokeResult, PanelError> {
+        Err(PanelError::Action(
+            "local modem candidate revocation is not configured".into(),
+        ))
+    }
+
     fn claim_modem_candidate(
         &self,
         _candidate_key: String,
@@ -411,6 +439,8 @@ fn build_router_with_blocks(
         .route("/api/radio", post(set_radio))
         .route("/api/rescan", post(rescan_modems))
         .route("/api/discoveries/claim", post(claim_modem_candidate))
+        .route("/api/discoveries/revoke", post(revoke_modem_candidate))
+        .route("/api/modems/reconfirm", post(reconfirm_modem))
         .route("/api/modems/register", post(register_modem))
         .route("/api/modems/unregister", post(unregister_modem))
         .with_state(Arc::new(PanelState {
@@ -586,6 +616,46 @@ async fn claim_modem_candidate(
     };
     match actions.claim_modem_candidate(candidate_key) {
         Ok(result) => Json(ClaimReceipt::claimed(result.candidate_key)).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn reconfirm_modem(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<RegistrationBody>,
+) -> Response {
+    let imei = body.imei.trim().to_string();
+    if imei.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "imei is required");
+    }
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "modem reconfirmation is not configured",
+        );
+    };
+    match actions.reconfirm_modem(imei) {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn revoke_modem_candidate(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<ClaimCandidateBody>,
+) -> Response {
+    let candidate_key = body.candidate_key.trim().to_string();
+    if candidate_key.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "candidate_key is required");
+    }
+    let Some(actions) = state.actions.as_ref() else {
+        return json_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "local modem candidate revocation is not configured",
+        );
+    };
+    match actions.revoke_modem_candidate(candidate_key) {
+        Ok(result) => Json(RevokeReceipt::from_result(result)).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }
 }

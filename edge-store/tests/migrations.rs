@@ -352,3 +352,50 @@ fn seen_modem(imei: &str, iccid: Option<&str>) -> edge_store::LocalModem {
         control_port: Some("/dev/ttyUSB12".into()),
     }
 }
+
+/// 「重新确认纳管」在闸仍然不通过时把倒计时拨回起点，而**不清掉标记**。
+///
+/// 🔴 和 `mark_gate_failure` 的区别正是这里：那一条用 COALESCE 保住最初那次
+/// 失败的时刻（否则每一趟都刷新，隔离期永远走不完）。重新确认是人主动做的
+/// 一次动作，它要的恰好是相反的语义 —— 从现在起重新计时。
+///
+/// 两条都不许碰 registered_at / registered_by：现有的绕法是「取消纳管再纳管」，
+/// 那会把纳管履历冲成今天，而 0015 建这两列要保住的正是它。
+#[test]
+fn restarting_the_quarantine_keeps_the_mark_and_the_provenance() {
+    let store = Store::open_in_memory().expect("open");
+    store
+        .register_modem(&edge_store::RegisteredModem {
+            imei: "868019060490134".into(),
+            registered_at: 1_000,
+            registered_by: "panel".into(),
+            usb_device: None,
+            family: Some("EC200U-CN".into()),
+            note: None,
+        })
+        .expect("adopt");
+
+    // 连着三趟失败，倒计时从第一趟起算。
+    for _ in 0..3 {
+        store
+            .mark_gate_failure("868019060490134", "not_in_catalogue", 2_000)
+            .expect("mark");
+    }
+    let before = store.gate_failure("868019060490134").expect("read").expect("有标记");
+    assert_eq!(before.since, 2_000);
+    assert_eq!(before.passes, 3);
+
+    store
+        .restart_gate_failure("868019060490134", "not_in_catalogue", 9_000)
+        .expect("restart");
+
+    let after = store.gate_failure("868019060490134").expect("read").expect("标记必须还在");
+    assert_eq!(after.since, 9_000, "倒计时没有从头开始");
+    assert_eq!(after.passes, 0, "趟数没有归零");
+    assert_eq!(after.reason, "not_in_catalogue", "理由不该被抹掉");
+
+    let adopted = store.registered_modems().expect("read");
+    let row = adopted.first().expect("still adopted");
+    assert_eq!(row.registered_at, 1_000, "纳管时间被冲掉了");
+    assert_eq!(row.registered_by, "panel", "纳管来源被冲掉了");
+}

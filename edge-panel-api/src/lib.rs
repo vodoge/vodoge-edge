@@ -245,6 +245,56 @@ pub struct CandidateClaimResult {
     pub candidate_key: String,
 }
 
+/// `Actions::revoke_modem_candidate` 的回答。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CandidateRevokeResult {
+    pub candidate_key: String,
+    /// 撤销之前它到底有没有被批准过。
+    ///
+    /// 🔴 不是装饰。撤一个从没被批准过的候选是**成功的空操作**，而运维需要
+    /// 分得清「撤掉了」和「本来就没批准过」—— 后者通常意味着他点错了行，
+    /// 或者上一次的批准早已被别的东西清掉了。回一个笼统的 ok 会把这两种
+    /// 情况说成同一件事。
+    pub was_approved: bool,
+}
+
+/// `POST /api/modems/reconfirm` 的应答。
+///
+/// 三个字段各自回答一个问题，缺一个这个按钮就说不清自己做了什么：
+/// `cleared` —— 闸过了没有；`restarted` —— 倒计时有没有被拨回起点；
+/// `message` —— 说人话的那一句，闸没过时它带着拒绝的理由。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReconfirmResult {
+    pub imei: String,
+    pub cleared: bool,
+    pub restarted: bool,
+    pub message: String,
+}
+
+/// `POST /api/discoveries/revoke` 的应答。
+///
+/// 和 [`ClaimReceipt`] 同一个理由拆开：`status` 是**面板**说的，不是
+/// `Actions` 实现说的。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevokeReceipt {
+    /// `"revoked"` 或 `"not-approved"`。
+    pub status: String,
+    pub candidate_key: String,
+}
+
+impl RevokeReceipt {
+    pub fn from_result(result: CandidateRevokeResult) -> Self {
+        Self {
+            status: if result.was_approved {
+                "revoked".into()
+            } else {
+                "not-approved".into()
+            },
+            candidate_key: result.candidate_key,
+        }
+    }
+}
+
 /// `POST /api/discoveries/claim` 的应答。
 ///
 /// ⚠️ 和 [`CandidateClaimResult`] 分开是有原因的：`status` 是**面板说的**，

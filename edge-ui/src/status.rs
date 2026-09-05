@@ -35,7 +35,35 @@ pub const STATUS_EVERY_MS: u64 = 10_000;
 pub enum ClaimNote {
     Pending,
     Claimed,
+    /// 探测批准被撤销了。
+    ///
+    /// 和 `Claimed` 分开而不是复用它：`held` 那个 Memo 拿 `Claimed` 当「服务端
+    /// 还没来得及说，但这一次会话里刚批准过」用。撤销共用它的话，撤完那一行
+    /// 会立刻又显示成已批准 —— 恰好是相反的意思。
+    Revoked,
     Failed(String),
+}
+
+/// 重新确认一根被闸标记的模组。
+///
+/// 服务端会重新跑一遍闸。两种结局都写回这一页的提示条：闸过了就说清标记
+/// 已清；没过就把闸的理由原样显示出来 —— **不能显示成成功**，否则运维会
+/// 以为自己修好过一次，而下一轮它又会被标记。
+async fn reconfirm(state: StatusState, imei: String) {
+    let body = edge_panel_api::RegistrationBody { imei: imei.clone() };
+    let got: Load<edge_panel_api::ReconfirmResult> =
+        crate::api::post("/api/modems/reconfirm", &body, "重新确认纳管").await;
+    match got {
+        Load::Ready(result) => {
+            state.reconfirm.set(Some((imei, result.message)));
+            // 立刻刷一次：标记清没清、倒计时归没归零，屏幕上要马上对得上。
+            leptos::task::spawn_local(async move { poll(state).await });
+        }
+        Load::Failed(why) => state
+            .reconfirm
+            .set(Some((imei, format!("重新确认失败 · {why}")))),
+        Load::Loading => {}
+    }
 }
 
 /// 这一页的全部状态。
@@ -68,6 +96,11 @@ pub struct StatusState {
     /// 你的状态也要在这里清一次」，而轨迹是唯一的例外——它是**舰队级**的、
     /// 跨模组的，切一次模组清一次就等于永远看不到轮换，而轮换正是它存在的理由。
     pub trace: RwSignal<std::collections::VecDeque<crate::trace::Frame>>,
+    /// 上一次「重新确认」的结果：(IMEI, 说人话的那一句)。
+    ///
+    /// 按 IMEI 存而不是存一句全局提示：机队上可能有好几根同时被标记，
+    /// 一条全局提示会让运维分不清那句话说的是哪一根。
+    pub reconfirm: RwSignal<Option<(String, String)>>,
 }
 
 impl StatusState {
@@ -80,6 +113,7 @@ impl StatusState {
             in_flight: RwSignal::new(false),
             stale: RwSignal::new(None),
             trace: RwSignal::new(std::collections::VecDeque::new()),
+            reconfirm: RwSignal::new(None),
         }
     }
 }
@@ -483,6 +517,46 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                                             now_ms() as i64,
                                                             enforcing,
                                                         )}
+                                                        // 「重新确认」就在这句话旁边。
+                                                        //
+                                                        // 🔴 它不是「让告警闭嘴」：服务端重新跑一遍闸，过了才清
+                                                        // 标记；没过就保留标记、把隔离期倒计时拨回起点，并把闸
+                                                        // 的理由原样回来。在此之前唯一的绕法是「取消纳管再纳管」，
+                                                        // 而那会把 registered_at / registered_by 冲成今天 ——
+                                                        // 0015 建那两列要保住的正是它。
+                                                        {
+                                                            let imei = m.imei.clone();
+                                                            view! {
+                                                                <Button
+                                                                    size=ButtonSize::Small
+                                                                    on_click=move |_| {
+                                                                        let imei = imei.clone();
+                                                                        leptos::task::spawn_local(async move {
+                                                                            reconfirm(state, imei).await
+                                                                        });
+                                                                    }
+                                                                >
+                                                                    "重新确认"
+                                                                </Button>
+                                                            }
+                                                        }
+                                                        // 按完之后那一句。按 IMEI 取，所以同时有好几根被标记时，
+                                                        // 每一行只显示属于自己的那句话。
+                                                        //
+                                                        // 🔴 闸没过时这句话说的是「仍然不通过，理由是 X」——
+                                                        // 它必须原样出现，不能被折叠成一个笼统的「已提交」。
+                                                        {
+                                                            let imei = m.imei.clone();
+                                                            move || {
+                                                                state
+                                                                    .reconfirm
+                                                                    .get()
+                                                                    .filter(|(said, _)| said == &imei)
+                                                                    .map(|(_, message)| {
+                                                                        view! { <span class="vd-faint">{message}</span> }
+                                                                    })
+                                                            }
+                                                        }
                                                     </span>
                                                 }
                                             })}

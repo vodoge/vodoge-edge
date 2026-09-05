@@ -37,7 +37,8 @@ mod linux {
         EsimLocalInfo, NasRegistrationState, OperatingMode, QmiClient,
     };
     use edge_panel::{
-        log_error, log_line, serve, Actions, AtResult, CandidateClaimResult, Inbox, PanelError,
+        log_error, log_line, serve, Actions, AtResult, CandidateClaimResult, CandidateRevokeResult,
+        Inbox, PanelError, ReconfirmResult,
         ProfileBody, ProfilesResult, RegistrationResult, ReportResult, RescanResult, ScanResult,
         ScannedOperatorBody, UsbResetResult, UssdResult,
     };
@@ -3848,6 +3849,101 @@ mod linux {
             })
         }
 
+        fn reconfirm_modem(&self, imei: String) -> Result<ReconfirmResult, PanelError> {
+            let imei = imei.trim().to_string();
+            // 矩阵先克隆再锁 store —— 和 register_modem 同一个锁序，理由写在那里。
+            let matrix = self.matrix.lock().expect("capability matrix").clone();
+            let (observed, held) = {
+                let store = self.store.0.lock().expect("store");
+                let observed = store
+                    .list_local_modem_discoveries()
+                    .map_err(PanelError::Store)?
+                    .into_iter()
+                    .find(|candidate| candidate.imei.as_deref() == Some(imei.as_str()));
+                let held = store.is_registered(&imei).map_err(PanelError::Store)?;
+                (observed, held)
+            };
+            if !held {
+                return Err(PanelError::Action(format!(
+                    "{imei} 没有被纳管 —— 重新确认是给已纳管、且被闸标记的那些用的"
+                )));
+            }
+            let Some(observed) = observed else {
+                // 🔴 读不到候选行就是拒，不当成「闸过了」。这一步塌陷成放行，
+                //    等于给了一个「按一下就把标记清掉」的按钮。
+                return Err(PanelError::Action(format!(
+                    "{imei} 这一轮没有被观测到；等下一趟轮询看见它再重新确认"
+                )));
+            };
+            let (usb, pair) = adoption_inputs(&observed);
+            let outcome =
+                reconfirm_outcome(edge_core::bind_gates(strategy_registry(), &matrix, usb, pair));
+            let now = unix_ms();
+            {
+                let store = self.store.0.lock().expect("store");
+                if outcome.cleared {
+                    store.clear_gate_failure(&imei).map_err(PanelError::Store)?;
+                } else {
+                    // 理由用闸刚刚给出的那个，不是库里存着的旧理由 —— 上一次
+                    // 被标记的原因和现在的原因可能已经不是同一个了。
+                    store
+                        .restart_gate_failure(&imei, &outcome.message, now)
+                        .map_err(PanelError::Store)?;
+                }
+            }
+            log_line(format!(
+                "modem {imei} reconfirmed: cleared={} restarted={}",
+                outcome.cleared, outcome.restarted
+            ));
+            Ok(ReconfirmResult {
+                imei,
+                cleared: outcome.cleared,
+                restarted: outcome.restarted,
+                message: outcome.message,
+            })
+        }
+
+        fn revoke_modem_candidate(
+            &self,
+            candidate_key: String,
+        ) -> Result<CandidateRevokeResult, PanelError> {
+            let candidate_key = candidate_key.trim().to_string();
+            // 一把锁读齐两样，判定在锁外做（判定是纯函数，没有 I/O）。
+            let (seen, managed) = {
+                let store = self.store.0.lock().expect("store");
+                let seen = store
+                    .list_local_modem_discoveries()
+                    .map_err(PanelError::Store)?;
+                let managed = store
+                    .registered_modems()
+                    .map_err(PanelError::Store)?
+                    .into_iter()
+                    .map(|row| row.imei)
+                    .collect::<Vec<_>>();
+                (seen, managed)
+            };
+            if let Some(reason) = revocation_refusal(&candidate_key, &seen, &managed) {
+                return Err(PanelError::Action(reason));
+            }
+            let was_approved = self
+                .store
+                .0
+                .lock()
+                .expect("store")
+                .remove_manual_modem_profile(&candidate_key)
+                .map_err(PanelError::Store)?;
+            log_line(format!(
+                "serial candidate {candidate_key} probe approval revoked (was_approved={was_approved})"
+            ));
+            // 让改动尽快生效：下一趟轮询不再打开这个口。不催的话要等满一个
+            // 8 秒周期，而运维正盯着屏幕看它有没有变。
+            self.radio.request_rescan();
+            Ok(CandidateRevokeResult {
+                candidate_key,
+                was_approved,
+            })
+        }
+
         fn claim_modem_candidate(
             &self,
             candidate_key: String,
@@ -5267,6 +5363,82 @@ mod linux {
             snapshot.home.as_ref().map(|network| network.mcc),
             snapshot.home.as_ref().map(|network| network.mnc),
         )
+    }
+
+    /// 「重新确认纳管」按下去之后发生什么。
+    ///
+    /// 🔴 这个按钮最容易被做成「让告警闭嘴」，而那比没有更坏：屏幕上干净了，
+    /// 这一根却仍然在闸外，下一轮又被标记 —— 运维会以为自己修好过一次。
+    ///
+    /// 所以它先**重新跑一遍闸**，然后按结果分两条路：
+    ///
+    /// - 闸通过了：清掉标记。这和追溯循环自己会做的事一样（`plan.keep` 那条
+    ///   路每一趟都无条件 `clear_gate_failure`），按钮的价值只是不用等。
+    /// - 闸仍然不通过：**保留标记**，但把倒计时拨回起点，并如实说出闸为什么
+    ///   还不通过。用途是给正在修根因的人（通常是要推一版新矩阵）争取时间，
+    ///   不让隔离期在他手上到期。
+    ///
+    /// 两条路都不碰 `registered_at` / `registered_by`。现有的绕法是「取消纳管
+    /// 再纳管」，那会把纳管履历冲成今天 —— 0015 建这两列要保住的正是它。
+    struct ReconfirmOutcome {
+        cleared: bool,
+        restarted: bool,
+        message: String,
+    }
+
+    fn reconfirm_outcome(gates: Result<(), edge_core::BindRefusal>) -> ReconfirmOutcome {
+        match gates {
+            Ok(()) => ReconfirmOutcome {
+                cleared: true,
+                restarted: false,
+                message: "两道闸都重新通过了，闸标记已清，倒计时结束".into(),
+            },
+            Err(refusal) => ReconfirmOutcome {
+                cleared: false,
+                restarted: true,
+                message: format!(
+                    "闸仍然不通过：{refusal}。标记保留，隔离期倒计时已从头开始 —— \
+                     这不是修好了，是给你时间去修"
+                ),
+            },
+        }
+    }
+
+    /// 撤销一个串口的探测批准之前，先问这一步安不安全。
+    ///
+    /// 返回 `Some(理由)` 就是拒绝。两种拒绝，方向相同：
+    ///
+    /// ① **这一根已经被纳管了。** 撤掉批准 = 这个串口从此不再被打开，模组不
+    ///    再被轮询，而 `registered_modems` 里那一行还在。机队上于是多出一根
+    ///    注册着、却没有任何东西跟它说话的模组：不告警（掉线告警看的是设备，
+    ///    不是模组），面板上只是一行永远不刷新的旧观测。正确顺序是先取消
+    ///    纳管、再撤销批准，拒绝的话里要把这句说出来。
+    ///
+    /// ② **候选表里认不出这个 key。** 读不到就拒，不假定「那大概没被纳管」——
+    ///    这个仓库反复在防的形状是「一次读失败塌陷成一个合法值」，而这里塌陷
+    ///    的方向恰好是最坏的那个：撤掉一根正在服务的模组的探测批准。
+    fn revocation_refusal(
+        candidate_key: &str,
+        seen: &[edge_store::LocalModemDiscovery],
+        managed: &[String],
+    ) -> Option<String> {
+        let Some(candidate) = seen
+            .iter()
+            .find(|discovery| discovery.candidate_key == candidate_key)
+        else {
+            return Some(format!(
+                "{candidate_key} 不在候选表里；先重扫 USB，确认它还在，再撤销"
+            ));
+        };
+        let imei = candidate.imei.as_deref()?;
+        if managed.iter().any(|held| held == imei) {
+            return Some(format!(
+                "{imei} 正在被管理。先取消纳管，再撤销探测批准 —— \
+                 否则这个串口不再被打开，而它的纳管记录还在，\
+                 机队上就多一根没人说话的模组"
+            ));
+        }
+        None
     }
 
     /// 纳管两道闸的输入，全部从候选行上取。
@@ -8369,6 +8541,114 @@ mod linux {
                 }),
                 Throttling::Bypass,
             ));
+        }
+    }
+
+    #[cfg(test)]
+    mod reconfirm_tests {
+        use super::reconfirm_outcome;
+        use edge_core::{BindRefusal, UsbIdentity};
+
+        /// 闸重新通过 → 清掉标记。这和追溯循环自己会做的事一样，只是不用等。
+        #[test]
+        fn gates_that_pass_again_clear_the_mark() {
+            let outcome = reconfirm_outcome(Ok(()));
+            assert!(outcome.cleared, "闸通过了却没清掉标记");
+            assert!(
+                outcome.message.contains("已清"),
+                "没告诉运维发生了什么：{}",
+                outcome.message
+            );
+        }
+
+        /// 🔴 闸仍然不通过时**不许清掉标记**。
+        ///
+        /// 这个按钮很容易被做成「让告警闭嘴」，那比没有更坏：屏幕上干净了，
+        /// 而这一根仍然在闸外，下一轮又被标记 —— 运维会以为自己修好过一次。
+        ///
+        /// 它该做的是重新计时：把倒计时拨回起点，让人有时间去修真正的原因
+        /// （通常是推一版新矩阵），并且如实说出闸为什么还不通过。
+        #[test]
+        fn gates_that_still_refuse_restart_the_clock_but_keep_the_mark() {
+            let refusal = BindRefusal::NotInCatalogue {
+                usb: UsbIdentity::parse("2c7c", "0125").expect("合法的 USB 身份"),
+                gate: edge_core::DeviceGate::Absent,
+            };
+            let outcome = reconfirm_outcome(Err(refusal));
+            assert!(!outcome.cleared, "闸没通过却把标记清掉了 —— 这是让告警闭嘴");
+            assert!(outcome.restarted, "既没清也没重新计时，这个按钮什么都没做");
+            assert!(
+                outcome.message.contains("仍"),
+                "没说清闸还是不通过：{}",
+                outcome.message
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod revocation_tests {
+        use super::revocation_refusal;
+
+        fn claimed(key: &str, imei: Option<&str>) -> edge_store::LocalModemDiscovery {
+            edge_store::LocalModemDiscovery {
+                candidate_key: key.into(),
+                usb_device: Some("1-2".into()),
+                transport: "serial".into(),
+                control_port: "/dev/ttyUSB12".into(),
+                vendor_id: Some("2c7c".into()),
+                product_id: Some("0901".into()),
+                state: "claimed".into(),
+                imei: imei.map(str::to_owned),
+                detail: String::new(),
+                last_seen: 1,
+                family: None,
+                home_mcc: None,
+                home_mnc: None,
+            }
+        }
+
+        /// 🔴 已经纳管的那一根，不许撤销它的探测批准。
+        ///
+        /// 撤了会发生什么：这个串口从此不再被打开，模组不再被轮询，而
+        /// `registered_modems` 里那一行还在 —— 于是机队上多出一根注册着、
+        /// 却没有任何东西跟它说话的模组。它不会告警（掉线告警看的是设备不是
+        /// 模组），面板上只是一行永远不刷新的旧观测。
+        ///
+        /// 正确的顺序是先取消纳管，再撤销批准。这条拒绝就是在说这句话。
+        #[test]
+        fn an_adopted_module_keeps_its_probe_approval() {
+            let seen = [claimed("serial:usb:1-2", Some("868019060490134"))];
+            let managed = ["868019060490134".to_string()];
+            let refusal = revocation_refusal("serial:usb:1-2", &seen, &managed)
+                .expect("已纳管的必须拒绝");
+            assert!(
+                refusal.contains("取消纳管"),
+                "拒绝的话没告诉运维下一步该做什么：{refusal}"
+            );
+        }
+
+        /// 没被纳管的候选可以撤销 —— 这正是这个功能存在的理由。
+        #[test]
+        fn an_unadopted_candidate_can_be_revoked() {
+            let seen = [claimed("serial:usb:1-2", Some("868019060490134"))];
+            assert_eq!(revocation_refusal("serial:usb:1-2", &seen, &[]), None);
+
+            // 连 IMEI 都还没报出来的（探测没成功），当然也能撤。
+            let quiet = [claimed("serial:usb:1-3", None)];
+            assert_eq!(revocation_refusal("serial:usb:1-3", &quiet, &[]), None);
+        }
+
+        /// 🔴 候选行读不到时**不能当成「没被纳管」**放行。
+        ///
+        /// 这是这个仓库反复在防的形状：一次读失败塌陷成一个合法值。这里塌陷
+        /// 的方向恰好是最坏的那个 —— 撤掉一根其实正在服务的模组的探测批准。
+        #[test]
+        fn an_unknown_candidate_is_refused_rather_than_assumed_free() {
+            let seen = [claimed("serial:usb:1-2", Some("868019060490134"))];
+            let managed = ["868019060490134".to_string()];
+            let refusal = revocation_refusal("serial:usb:9-9", &seen, &managed)
+                .expect("认不出的候选必须拒绝，而不是假定它没被纳管");
+            assert!(!refusal.is_empty());
         }
     }
 

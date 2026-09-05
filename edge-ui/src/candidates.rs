@@ -215,6 +215,43 @@ impl ClaimState {
     }
 }
 
+/// 撤销一个串口的探测批准。
+///
+/// 和 `claim` 成对。服务端会拒绝撤销一根**已经纳管**的模组 —— 撤了那个串口
+/// 就不再被打开，而纳管记录还在，机队上会多一根没人说话的模组。那条拒绝的
+/// 文案里写着正确顺序（先取消纳管），照原样显示给运维。
+async fn revoke(state: StatusState, claims: ClaimState, key: String) {
+    claims.set(&key, ClaimNote::Pending);
+    let body = edge_panel_api::ClaimCandidateBody {
+        candidate_key: key.clone(),
+    };
+    let got: Load<edge_panel_api::RevokeReceipt> =
+        api::post("/api/discoveries/revoke", &body, "撤销探测批准").await;
+    match got {
+        Load::Ready(receipt) => {
+            if receipt.candidate_key != key {
+                claims.set(&key, ClaimNote::Failed("回执与候选不一致".into()));
+                return;
+            }
+            // `not-approved` 也是成功 —— 但它说的是「本来就没批准过」，
+            // 通常意味着点错了行。不能和「撤掉了」显示成同一件事。
+            if receipt.status == "not-approved" {
+                claims.set(&key, ClaimNote::Failed("这个候选本来就没有被批准过".into()));
+                return;
+            }
+            claims.set(&key, ClaimNote::Revoked);
+            set_timeout(
+                move || {
+                    leptos::task::spawn_local(async move { crate::status::poll(state).await });
+                },
+                std::time::Duration::from_millis(STATUS_EVERY_MS),
+            );
+        }
+        Load::Failed(why) => claims.set(&key, ClaimNote::Failed(why)),
+        Load::Loading => {}
+    }
+}
+
 async fn claim(state: StatusState, claims: ClaimState, key: String) {
     claims.set(&key, ClaimNote::Pending);
     let body = edge_panel_api::ClaimCandidateBody {
@@ -374,6 +411,7 @@ fn Row(
     // `usb_device`（1-1.2 / 1-1.3.1）才是区分它们的东西，也正是运维推理「哪一根
     // 插在哪」时用的东西。原版显示的就是它（`d.usb_device || candidateKey(d)`），
     // 搬迁时我错换成了控制口。控制口仍然画出来，只是降为次要信息。
+    let key_for_revoke = key.clone();
     let identity = c
         .usb_device
         .clone()
@@ -444,6 +482,11 @@ fn Row(
                             <Caption1>"已确认纳入探测；等待下一轮轮询尝试 AT+CGSN。"</Caption1>
                         }
                             .into_any()
+                    } else if note.get() == Some(ClaimNote::Revoked) {
+                        view! {
+                            <Caption1>"已撤销探测批准；下一轮起不再打开这个口。"</Caption1>
+                        }
+                        .into_any()
                     } else if let Some(ClaimNote::Failed(why)) = note.get() {
                         view! {
                             <MessageBar
@@ -487,6 +530,34 @@ fn Row(
                                 </Button>
                             }
                         })}
+                    {move || {
+                        // 只有已批准的行才谈得上撤销。用 `held` 而不是
+                        // `skey == "claimed"`：这一次会话里刚批准过、服务端
+                        // 还没来得及改状态的那一行，也该能立刻撤回来。
+                        held.get().then(|| {
+                            let key = key_for_revoke.clone();
+                            view! {
+                                <Button
+                                    disabled=busy
+                                    on_click=move |_| {
+                                        if !confirmed(
+                                            "撤销这个串口的探测批准？\n\
+                                             下一轮轮询起不再打开它。\n\
+                                             已经纳管的模组会被拒绝——那种要先取消纳管。",
+                                        ) {
+                                            return;
+                                        }
+                                        let key = key.clone();
+                                        leptos::task::spawn_local(async move {
+                                            revoke(state, claims, key).await
+                                        });
+                                    }
+                                >
+                                    {move || if busy.get() { "撤销中…" } else { "撤销批准" }}
+                                </Button>
+                            }
+                        })
+                    }}
                     {adoptable
                         .then(|| {
                             let key = key.clone();

@@ -315,8 +315,14 @@ async fn every_endpoint_the_panel_calls_is_registered_on_the_router() {
         "/api/usb-reset",
         "/api/rescan",
         "/api/discoveries/claim",
+        // 撤销探测批准。和 claim 成对 —— 一个人点头说「打开这个口试试」，
+        // 就得有一条路把那句话收回来。
+        "/api/discoveries/revoke",
         "/api/modems/register",
         "/api/modems/unregister",
+        // 重新确认一根被闸标记的模组：重跑一遍闸，过了清标记，
+        // 没过就把隔离期倒计时拨回起点。不碰纳管履历。
+        "/api/modems/reconfirm",
     ];
     for endpoint in KNOWN {
         assert!(
