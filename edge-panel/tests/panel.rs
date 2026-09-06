@@ -330,6 +330,30 @@ async fn every_endpoint_the_panel_calls_is_registered_on_the_router() {
         // 只有备注可改；registered_at / registered_by 是履历不是字段。
         "/api/modems/update",
     ];
+    // 🔴 管册子那一块自己必须凑齐 CRUD 四样。
+    //
+    // 这条是一个真实缺陷的墓碑。C/R/U 做完、部署完、API 实测通了，而 D 只
+    // 存在于左栏危险区、针对**选中的模组** —— 手工建的那一根没有硬件、不在
+    // 模组列表里、选不中，于是它建得出来删不掉。验收时点着屏幕才发现。
+    //
+    // ⚠️ 所以这条**按文件**查，不是查「某处调用过」。第一版就是那么写的，
+    // 而它抓不到这个缺陷：`danger.rs` 也打 unregister，于是把纳管那一块的
+    // 删除按钮整个拿掉，守卫照样绿。一个只有危险区够得到的动作，对够不到
+    // 危险区的那些行来说等于不存在。
+    let adoption_ui = include_str!("../../edge-ui/src/status.rs");
+    let adoption_sites = panel_call_sites(adoption_ui);
+    for (action, endpoint) in [
+        ("手工新建", "/api/modems/create"),
+        ("改备注", "/api/modems/update"),
+        ("取消纳管", "/api/modems/unregister"),
+    ] {
+        assert!(
+            adoption_sites.iter().any(|path| path == endpoint),
+            "纳管那一块缺了「{action}」：status.rs 没有一处调用 {endpoint}。\n\
+             别处调用过不算 —— 手工建的那一根选不中，够不到左栏危险区。"
+        );
+    }
+
     for endpoint in KNOWN {
         assert!(
             sites.iter().any(|path| path == endpoint),

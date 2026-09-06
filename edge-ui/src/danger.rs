@@ -303,6 +303,55 @@ pub fn DangerZone(status: StatusState, state: DangerState) -> impl IntoView {
                     // 处境——AT-only 的模组够不到 QMI，射频开关和 USB 复位都不可用。
                     <Caption1Strong>{heading}</Caption1Strong>
 
+            // 🔴 闸标记和「重新确认」画在这里，而不是只画在舰队总览里。
+            //
+            // 原来只在总览里：想给被标记的那一根按「重新确认」，最自然的
+            // 动作是先点它 —— 而点下去按钮连同闸的理由一起消失。这是那个
+            // 「功能找不到」缺陷的最后一个实例。
+            //
+            // 放进危险区是因为它已经是「关于选中这一根」的常驻块。不放进
+            // 模组卡：那张卡本身是个 button，里面套按钮既是非法 HTML，
+            // 也会和「点一下选中」抢点击。
+            {
+                let imei = imei.clone();
+                move || {
+                    let imei = imei.clone();
+                    let gate = match status.load.get() {
+                        crate::api::Load::Ready(body) => body
+                            .modems
+                            .into_iter()
+                            .find(|m| m.imei == imei)
+                            .and_then(|m| m.gate_failure),
+                        _ => None,
+                    }?;
+                    let notice = crate::gate::gate_notice(
+                        &gate,
+                        crate::status::now_ms() as i64,
+                        status.retro_enforcing(),
+                    );
+                    let for_click = imei.clone();
+                    Some(view! {
+                        <MessageBar intent=MessageBarIntent::Warning
+                            layout=MessageBarLayout::Multiline>
+                            <MessageBarBody>
+                                {notice}
+                                <Button
+                                    size=ButtonSize::Small
+                                    on_click=move |_| {
+                                        let imei = for_click.clone();
+                                        leptos::task::spawn_local(async move {
+                                            crate::status::reconfirm(status, imei).await
+                                        });
+                                    }
+                                >
+                                    "重新确认"
+                                </Button>
+                            </MessageBarBody>
+                        </MessageBar>
+                    })
+                }
+            }
+
                     {move || {
                         state
                             .note

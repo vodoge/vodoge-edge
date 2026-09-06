@@ -258,7 +258,9 @@ pub fn Panel() -> impl IntoView {
                             }
                             view! {
                         <div class="vd-pane">
-                            <div class="vd-pane-head vd-tabs">
+                            // 回程的字。没有它，toggle 不算一条明显的路 ——
+                        // 运维不会去猜「再点一次那张卡」这件事。
+                        <div class="vd-pane-head vd-tabs">
                                 <TabList selected_value=tab>
                                     {Panel::ALL
                                         .iter()
@@ -269,6 +271,9 @@ pub fn Panel() -> impl IntoView {
                                         })
                                         .collect_view()}
                                 </TabList>
+                                <span class="vd-pane-head-end vd-faint">
+                                    "再点一次左边那张卡回到舰队"
+                                </span>
                             </div>
                             <div class="vd-pane-body">
                                 {move || match Panel::from_key(&tab.get()) {
@@ -296,6 +301,15 @@ pub fn Panel() -> impl IntoView {
                                     Panel::Console => {
                                         view! { <ConsolePage active=state.active state=console /> }
                                             .into_any()
+                                    }
+                                    // 纳管管理：手工新建、改备注、看履历。
+                                    //
+                                    // 🔴 和另外五块不同，这一块**不针对选中的那一根** ——
+                                    // 它管的是整本册子。放进标签是因为运维一旦点了任何
+                                    // 一根模组（打开面板后最自然的第一个动作），舰队总览
+                                    // 就不见了，而这些控件原本只画在那里。
+                                    Panel::Adopt => {
+                                        view! { <status::AdoptPage state=state /> }.into_any()
                                     }
                                 }}
                             </div>

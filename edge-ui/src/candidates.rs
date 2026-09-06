@@ -113,7 +113,7 @@ fn hardware(c: &DiscoveryBody) -> Option<String> {
 /// ⚠️ 用原生的而不是 Thaw 的 `Dialog`：这两个按钮各自会改变现场硬件的行为，
 /// 而原生确认框是**模态**的、无法被样式表藏起来、也不会因为这段 wasm 出问题就
 /// 静默放行。这里要的正是这几点。
-fn confirmed(message: &str) -> bool {
+pub fn confirmed(message: &str) -> bool {
     web_sys::window()
         .and_then(|w| w.confirm_with_message(message).ok())
         .unwrap_or(false)

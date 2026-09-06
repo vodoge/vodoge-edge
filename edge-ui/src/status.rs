@@ -44,6 +44,30 @@ pub enum ClaimNote {
     Failed(String),
 }
 
+/// 取消纳管。CRUD 里的 D，从册子这一侧。
+///
+/// 🔴 左栏危险区那个「取消纳管」针对的是**选中的模组**，而手工建的那一根
+/// 没有硬件、不在模组列表里，选不中 —— 于是它建得出来、删不掉。
+/// 验收时点出来的：CRUD 少了一半的 D。
+///
+/// 这里这一条按 IMEI 直接删册子上的行，对发现来的和手工建的一视同仁。
+async fn drop_adoption(state: StatusState, imei: String) {
+    let body = edge_panel_api::RegistrationBody {
+        imei: imei.clone(),
+        note: None,
+    };
+    let got: Load<edge_panel_api::RegistrationResult> =
+        crate::api::post("/api/modems/unregister", &body, "取消纳管").await;
+    match got {
+        Load::Ready(_) => {
+            state.reconfirm.set(Some((imei, "已取消纳管".into())));
+            leptos::task::spawn_local(async move { poll(state).await });
+        }
+        Load::Failed(why) => state.reconfirm.set(Some((imei, format!("取消纳管失败 · {why}")))),
+        Load::Loading => {}
+    }
+}
+
 /// 改一条纳管记录的备注。CRUD 里的 U。
 ///
 /// 🔴 只改备注。`registered_at` / `registered_by` 是履历，屏幕上只读 —— 在此
@@ -73,7 +97,7 @@ async fn save_note(state: StatusState, imei: String, note: String) {
 /// 服务端会重新跑一遍闸。两种结局都写回这一页的提示条：闸过了就说清标记
 /// 已清；没过就把闸的理由原样显示出来 —— **不能显示成成功**，否则运维会
 /// 以为自己修好过一次，而下一轮它又会被标记。
-async fn reconfirm(state: StatusState, imei: String) {
+pub async fn reconfirm(state: StatusState, imei: String) {
     let body = edge_panel_api::RegistrationBody { imei: imei.clone(), note: None };
     let got: Load<edge_panel_api::ReconfirmResult> =
         crate::api::post("/api/modems/reconfirm", &body, "重新确认纳管").await;
@@ -128,6 +152,15 @@ pub struct StatusState {
 }
 
 impl StatusState {
+    /// 本机的追溯执行会不会真的解绑。
+    ///
+    /// 读不到就当**不会**：闸提示的文案在这两种模式下差别很大（只标记时
+    /// 倒计时是「持续了多久」，会真删时是「还剩多久」），而把「读不到」
+    /// 画成「会删」是在吓唬人。
+    pub fn retro_enforcing(self) -> bool {
+        matches!(self.load.get(), Load::Ready(body) if body.retro_enforcing)
+    }
+
     pub fn new() -> Self {
         Self {
             load: RwSignal::new(Load::Loading),
@@ -418,6 +451,44 @@ const TRACE_COLS_WIDE: usize = crate::trace::TRACE_KEEP;
 ///
 /// 现在放舰队总览：三根模组的轨迹**对齐**铺开一小时。轮换是三根之间的相位
 /// 关系，单看一根看不出来；这块地方够宽，正好画得下。
+/// 纳管管理那一整块：手工新建 + 每一条记录的备注编辑。
+///
+/// 🔴 抽成一个组件，是因为它要出现在**两个地方**：舰队总览里（没选中模组
+/// 时看得到），以及中栏的「纳管」标签里（选中了模组也看得到）。
+///
+/// 只画在总览里那一版是错的，而且错得不明显：功能在、部署了、API 通了，
+/// 但运维点任意一根模组之后这块就消失 —— 而那正是打开面板后最自然的第一个
+/// 动作。**画在一个「什么都没选」的状态里，等于藏起来。**
+#[component]
+pub fn AdoptPage(state: StatusState) -> impl IntoView {
+    view! {
+        <div class="vd-adoptions">
+            <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
+            <CreateModem state=state />
+            {move || {
+                let rows = match state.load.get() {
+                    Load::Ready(body) => body.adoptions,
+                    // 读不到就说读不到，不画一张空表 —— 空表读起来像「一根都
+                    // 没纳管」，那是一句和「这一轮没读到」完全不同的话。
+                    _ => Vec::new(),
+                };
+                if rows.is_empty() {
+                    return view! {
+                        <Caption1 class="vd-faint">
+                            "册子上还没有任何一条。上面那个表单可以手工建第一条。"
+                        </Caption1>
+                    }
+                        .into_any();
+                }
+                rows.into_iter()
+                    .map(|row| view! { <AdoptionRow row=row state=state /> })
+                    .collect_view()
+                    .into_any()
+            }}
+        </div>
+    }
+}
+
 /// 手工建一条纳管记录。CRUD 里的 C —— 不经发现的那一条。
 ///
 /// 「确认纳入探测 → 纳管」那条路要求硬件此刻就在总线上。这一条不要求：
@@ -492,6 +563,7 @@ fn CreateModem(state: StatusState) -> impl IntoView {
 #[component]
 fn AdoptionRow(row: edge_panel_api::AdoptionBody, state: StatusState) -> impl IntoView {
     let imei = row.imei.clone();
+    let imei_for_drop = row.imei.clone();
     // 草稿。每行一份 —— 共享一个的话，在一行里打到一半切到另一行，
     // 那半句会跟着跑过去，而它下一次被保存时是保到别人头上。
     let draft = RwSignal::new(row.note.clone().unwrap_or_default());
@@ -522,6 +594,32 @@ fn AdoptionRow(row: edge_panel_api::AdoptionBody, state: StatusState) -> impl In
                     }
                 >
                     {move || if saving.get() { "保存中…" } else { "保存备注" }}
+                </Button>
+                // 取消纳管就在这一行上。
+                //
+                // 左栏危险区那一个只对得上「选中的模组」，而手工建的那一根
+                // 没有硬件、选不中 —— 只有那一个的话，它建得出来删不掉。
+                <Button
+                    disabled=saving
+                    on_click=move |_| {
+                        // 原生确认框：这一步会让这一根不再被轮询，而它的历史
+                        // 是留着的。和危险区那个用同一种说法。
+                        if !crate::candidates::confirmed(&format!(
+                            "取消纳管 {imei_for_drop}？\n\
+                             它会从册子上消失、不再被轮询；已经产生的历史留着。\n\
+                             手工建的那种取消之后要重新建，发现来的下一轮会重新出现在待纳管里。"
+                        )) {
+                            return;
+                        }
+                        let imei = imei_for_drop.clone();
+                        saving.set(true);
+                        leptos::task::spawn_local(async move {
+                            drop_adoption(state, imei).await;
+                            saving.set(false);
+                        });
+                    }
+                >
+                    "取消纳管"
                 </Button>
             </Flex>
         </div>
@@ -558,6 +656,21 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                 <span><i class="vd-tick vd-tick--gone"></i>"不在列表里"</span>
                 <span><i class="vd-tick vd-tick--unread"></i>"没问到 agent（不是模组的事）"</span>
             </div>
+
+            // 🔴 纳管那一块画在这里，**在下面那个闭包之外**。
+            //
+            // 闭包里有两处提前返回（「还没有观测」「还没读到模组列表」）。
+            // 一台读不到 agent 的机器会走第二处：poll 在失败帧上照样推轨迹，
+            // 所以 trace 非空过了第一关，但 stale 从没成功过是 None，于是整个
+            // 闭包返回一句话 —— 而那台机器一根模组都没有、选不中任何一根，
+            // 「纳管」标签也进不去，手工新建就完全够不着了。
+            //
+            // 册子是关于**这台机器**的，不该由「这一轮有没有读到观测」决定画不画。
+            // 它读的是 state.load，本来就不依赖轨迹。
+            //
+            // 和「纳管」标签里是同一个组件，不是抄一份：抄一份的代价这个仓库付过，
+            // 两处会漂移，而漂移的那一份正是没人看的那一份。
+            <AdoptPage state=state />
 
             {move || {
                 let t = state.trace.get();
@@ -618,24 +731,7 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                     //
                     // 放在这里而不是模组卡上：整张卡是点击选中的，卡里塞一个输入框会让
                     // 「点一下选中」和「点一下改字」抢同一次点击。
-                    {
-                        // 🔴 这一整块**不**按「有没有纳管记录」显示。
-                        //
-                        // 手工新建那个表单恰恰在一根都没有的时候最需要 ——
-                        // 一台刚装好、还没纳管过任何东西的机器，如果表单藏在
-                        // 「有记录才显示」的分支里，就永远建不出第一条。
-                        let adoptions = body.adoptions.clone();
-                        view! {
-                            <div class="vd-adoptions">
-                                <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
-                                <CreateModem state=state />
-                                {adoptions
-                                    .into_iter()
-                                    .map(|row| view! { <AdoptionRow row=row state=state /> })
-                                    .collect_view()}
-                            </div>
-                        }
-                    }
+
                     <div class="vd-fleetrows">
                         {body
                             .modems
@@ -796,9 +892,28 @@ fn ModemCard(modem: ModemBody, state: StatusState) -> impl IntoView {
         let imei = imei.clone();
         move || state.active.get().as_deref() == Some(imei.as_str())
     };
+    // 🔴 toggle，不是无条件 set(Some)。
+    //
+    // 原来只写了去程：一旦点了任意一张卡，舰队总览这一整块在这次会话里
+    // 就再也回不去，只能刷新页面 —— 而屏幕上没有一个字说要刷新。那是
+    // 「纳管功能找不到」和「重新确认按钮消失」两个缺陷的共同根因：不是
+    // 那些控件画错了地方，是这一步有去无回。
+    //
+    // 回程的字写在中栏头上（lib.rs），因为按判据，没有屏幕上的字，
+    // toggle 不算一条明显的路。
     let on_click = {
         let imei = imei.clone();
-        move |_| state.active.set(Some(imei.clone()))
+        move |_| {
+            state
+                .active
+                .update(|current| {
+                    *current = if current.as_deref() == Some(imei.as_str()) {
+                        None
+                    } else {
+                        Some(imei.clone())
+                    }
+                })
+        }
     };
 
     let home = modem.home.clone();

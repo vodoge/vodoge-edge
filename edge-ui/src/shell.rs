@@ -38,6 +38,17 @@ pub enum Panel {
     Network,
     Sms,
     Esim,
+    /// 纳管管理：手工新建、改备注、看纳管履历。
+    ///
+    /// 🔴 它必须是一个标签，不能只画在舰队总览里。
+    ///
+    /// 一开始就是那么做的，而结果是：选中任意一根模组，这一整块就消失 ——
+    /// 而点一根模组是运维打开面板后最自然的第一个动作。功能在、部署了、
+    /// API 通了，人却找不到。**画在一个「什么都没选」的状态里，等于藏起来。**
+    ///
+    /// 它和另外五块不同：那五块问的是「这一根怎么样」，它问的是「册子上有
+    /// 哪几根」。所以它不针对选中的那一根，选没选中都画同样的东西。
+    Adopt,
     Console,
 }
 
@@ -47,6 +58,12 @@ impl Panel {
         Panel::Network,
         Panel::Sms,
         Panel::Esim,
+        // ⚠️ 纳管排在控制台**之前**。
+        //
+        // `the_panels_are_in_triage_order_with_the_console_last` 钉着「控制台
+        // 必须最后」，理由是它是唯一能把任意命令打进模组的地方。我第一版把
+        // 纳管放在它后面，那条守卫立刻红了 —— 守卫是对的，所以改的是顺序。
+        Panel::Adopt,
         Panel::Console,
     ];
 
@@ -57,6 +74,7 @@ impl Panel {
             Panel::Network => "网络",
             Panel::Sms => "短信",
             Panel::Esim => "eSIM",
+            Panel::Adopt => "纳管",
             Panel::Console => "控制台",
         }
     }
@@ -68,6 +86,7 @@ impl Panel {
             Panel::Network => "network",
             Panel::Sms => "sms",
             Panel::Esim => "esim",
+            Panel::Adopt => "adopt",
             Panel::Console => "console",
         }
     }
@@ -151,6 +170,27 @@ mod tests {
 
     /// 顺序即排障顺序：先看这一根还行不行，再看它能上哪个网，会动硬件的排后面，
     /// 控制台最后——它是唯一能把任意命令打进模组的地方。
+    /// 🔴 管册子那一块必须是一个标签，不能只活在「什么都没选」的状态里。
+    ///
+    /// 这条测试是一个真实缺陷的墓碑：手动管理模组的 CRUD 做完了、部署了、
+    /// API 实测通了，而老板打开面板说「功能在哪里」—— 因为那些控件只画在
+    /// 舰队总览里，而选中任意一根模组（打开面板后最自然的第一个动作）会把
+    /// 整块换掉。
+    ///
+    /// 一个只在某个特定空状态下才出现的入口，等于没有入口。
+    #[test]
+    fn managing_the_register_is_reachable_with_a_modem_selected() {
+        assert!(
+            Panel::ALL.contains(&Panel::Adopt),
+            "纳管不在标签表里 —— 那它就只剩舰队总览一条路，选中模组就没了"
+        );
+        assert_eq!(
+            Panel::from_key("adopt"),
+            Panel::Adopt,
+            "刷新页面之后回不到这一块"
+        );
+    }
+
     #[test]
     fn the_panels_are_in_triage_order_with_the_console_last() {
         assert_eq!(
