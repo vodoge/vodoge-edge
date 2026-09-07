@@ -308,6 +308,26 @@ fn heartbeat(last_seen: Option<i64>, now: f64) -> String {
 }
 
 /// 接口类型的短标签。⚠️ 只认 agent 真写的三种，别的原样显示。
+/// 本机号那一格上写什么。
+///
+/// 🔴 空有两种，写同一个「—」就是把其中一种说成了另一种。
+///
+/// 号码是按卡记的，换卡即作废（存储层的 `msisdn_iccid`）。所以运维会看到号码
+/// 突然消失 —— 而一个突然消失的字段如果不解释，看起来就跟「这张卡本来就没号码」
+/// 一模一样，可这两件事要做的相反：一个再等一轮，一个到此为止。
+///
+/// 上一版的毛病不是显示得少，是显示得**错**：号码无条件继承，换卡之后旧号码
+/// 挂在新卡名下。运维正是靠这一格认卡的，所以那是个会把短信发给错的人的答案。
+fn msisdn_cell(msisdn: Option<&str>, pending: bool) -> String {
+    match (msisdn, pending) {
+        (Some(number), _) => number.to_string(),
+        // 说「待读」而不是「读取中」：轮询会再问，但读不读得到不由界面担保，
+        // 而一个不会兑现的进行时比一横杠更伤信任。
+        (None, true) => "待读（刚换卡）".into(),
+        (None, false) => "—".into(),
+    }
+}
+
 fn discovery_label(raw: &str) -> &str {
     match raw {
         "qmi" => "QMI",
@@ -838,7 +858,7 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                                 "固件 {} · IMSI {} · 本机号 {}",
                                                 m.firmware.clone().unwrap_or_else(|| "—".into()),
                                                 m.imsi.clone().unwrap_or_else(|| "—".into()),
-                                                m.msisdn.clone().unwrap_or_else(|| "—".into()),
+                                                msisdn_cell(m.msisdn.as_deref(), m.msisdn_pending),
                                             )}
                                         </span>
                                         <TraceStripWide state=st imei=imei />
@@ -1230,6 +1250,36 @@ pub fn answering(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// 本机号空着的时候，屏幕上得说清是哪一种空。
+    ///
+    /// 换卡之后号码会被正确地清掉（那是修好的部分：旧号码不再挂在新卡名下）。
+    /// 但清掉之后剩下的那一格，如果和「这张卡没号码」写得一样，运维就没法知道
+    /// 该不该再等一轮 —— 修好了数据却没修好那句话。
+    #[test]
+    fn an_empty_number_cell_says_which_kind_of_empty_it_is() {
+        assert_eq!(msisdn_cell(Some("+8613800138000"), false), "+8613800138000");
+        assert_eq!(
+            msisdn_cell(None, false),
+            "—",
+            "问过了、这张卡没有号码 —— 这是个结论，别拿它吊着人"
+        );
+        assert_ne!(
+            msisdn_cell(None, true),
+            "—",
+            "还没为这张卡问出来，画一横杠等于替它下了个还没有的结论"
+        );
+        assert!(
+            msisdn_cell(None, true).contains("换卡"),
+            "得说出为什么是空的，不然运维只看见号码凭空没了"
+        );
+        assert_eq!(
+            msisdn_cell(Some("+8613800138000"), true),
+            "+8613800138000",
+            "号码已经在手上，别在同一格里再说一遍还没读到"
+        );
+    }
+
     use super::port_label;
 
     fn modem(imei: &str, state: &str) -> ModemBody {
@@ -1250,6 +1300,7 @@ mod tests {
             imsi: None,
             last_seen: None,
             msisdn: None,
+            msisdn_pending: false,
             network: None,
             network_numeric: None,
         }

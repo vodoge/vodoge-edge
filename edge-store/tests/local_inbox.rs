@@ -11,6 +11,7 @@ fn local_inbox_survives_duplicate_seq() {
         direction: "inbound".into(),
         received_at: 10,
         modem_imei: Some("867018069509705".into()),
+            iccid: None,
     };
     store.insert_local_message(&first).expect("insert");
     store
@@ -167,4 +168,70 @@ fn a_sighting_nothing_has_seen_for_a_day_is_forgotten() {
 fn pruning_an_empty_table_removes_nothing_and_succeeds() {
     let store = Store::open_in_memory().expect("open");
     assert_eq!(store.forget_stale_discoveries(1_000).expect("prune"), 0);
+}
+
+/// 一条短信记得它是从哪张卡收到的，而且那件事不会被后来的换卡改写。
+///
+/// 🔴 短信此前只挂 IMEI。IMEI 认的是那根棒，不是那张卡 —— 换一张卡，同一根棒
+/// 继续收，历史里两张卡的消息就混在一起。而且**分不回去**：当时是哪张卡从来没被
+/// 记下来过，事后没有任何依据能重建。这跟号码那件事是同一个毛病的两面。
+///
+/// ⚠️ 这里刻意用两条不同 seq 的消息，而不是改同一条：真实的换卡场景是「旧卡收过
+/// 一批，新卡再收一批」，要证的是**旧的那批不会被重新上色**。
+#[test]
+fn a_message_remembers_the_card_it_arrived_on() {
+    let store = Store::open_in_memory().expect("open");
+    let on_card = |seq: u64, body: &str, card: Option<&str>| LocalMessage {
+        seq,
+        peer: "10086".into(),
+        body: body.into(),
+        bearer: "cellular".into(),
+        direction: "inbound".into(),
+        received_at: seq as i64,
+        modem_imei: Some("867018069509705".into()),
+        iccid: card.map(Into::into),
+    };
+
+    store.insert_local_message(&on_card(1, "旧卡收的", Some("8986001"))).expect("insert");
+    // 换卡了。同一根棒，同一个 IMEI。
+    store.insert_local_message(&on_card(2, "新卡收的", Some("8986002"))).expect("insert");
+    // 这一条收下的时候不知道是哪张卡 —— 那是「不知道」，不是「没有卡」。
+    store.insert_local_message(&on_card(3, "不知道哪张卡", None)).expect("insert");
+
+    let messages = store.list_local_messages().expect("list");
+    let card_of = |body: &str| {
+        messages
+            .iter()
+            .find(|m| m.body == body)
+            .unwrap_or_else(|| panic!("{body} 不见了"))
+            .iccid
+            .clone()
+    };
+
+    assert_eq!(
+        card_of("旧卡收的").as_deref(),
+        Some("8986001"),
+        "换卡不能把旧消息重新上色 —— 那正是这个字段存在的理由"
+    );
+    assert_eq!(card_of("新卡收的").as_deref(), Some("8986002"));
+    assert_eq!(
+        card_of("不知道哪张卡"),
+        None,
+        "不知道就留空。塌成空串的话下游读起来像一个答案"
+    );
+
+    // 同一条消息被重放，而这一次当场读不出卡号。收下的那一刻知道，就该永远知道 ——
+    // 写 NULL 等于把一条本来说得清的消息改成说不清。
+    store
+        .insert_local_message(&LocalMessage {
+            body: "旧卡收的".into(),
+            ..on_card(1, "旧卡收的", None)
+        })
+        .expect("replay");
+    let after = store.list_local_messages().expect("list");
+    assert_eq!(
+        after.iter().find(|m| m.seq == 1).expect("seq 1").iccid.as_deref(),
+        Some("8986001"),
+        "重放读不出卡号时不许覆盖 —— 一条说得清的消息不该被改成说不清"
+    );
 }

@@ -6041,6 +6041,8 @@ mod linux {
             // 这一趟根本没跟它说上话 —— 连问都谈不上。掉线不等于卡被拔了，
             // 所以已存的卡号不许被这条合成快照抹掉。
             card_read: edge_store::CardRead::Unasked,
+            // 没说上话，所以也就没有「从哪张卡读的」可言。
+            msisdn_iccid: None,
             imsi: None,
             home: None,
             serving: None,
@@ -6141,6 +6143,9 @@ mod linux {
             state: "online",
             registration,
             family,
+            // AT 这条路没有缓存：下面那个 `AT+CNUM` 是这一轮在同一个已经打开的
+            // 口上现问的，所以它的答案（包括「没有」）属于这一轮读到的这张卡。
+            msisdn_iccid: iccid.clone(),
             iccid,
             card_read,
             imsi,
@@ -6226,6 +6231,7 @@ mod linux {
             // would be a second round trip every eight seconds for a card
             // that has already said it has no number.
             if snapshot.discovery == Discovery::At {
+                // 指针在 AT 探测里就填好了（那一轮现问的 CNUM）。
                 continue;
             }
             let stored = known.iter().find(|modem| modem.imei == snapshot.imei);
@@ -6235,6 +6241,9 @@ mod linux {
                 // already been asked and had nothing to say.
                 if stored.msisdn_iccid.is_some() && stored.msisdn_iccid == snapshot.iccid {
                     snapshot.msisdn = stored.msisdn.clone();
+                    // 连指针一起搬。搬号码不搬指针的话，一张问过、答案是「没有」
+                    // 的卡会上行成「还没问出来」，从此永远挂在读取中。
+                    snapshot.msisdn_iccid = stored.msisdn_iccid.clone();
                     continue;
                 }
             }
@@ -6248,6 +6257,9 @@ mod linux {
             match read {
                 Ok(number) => {
                     snapshot.msisdn = number.clone();
+                    // 「问过了」是一个独立于答案的事实 —— 下面那次写库存的正是
+                    // 它，指针得跟着一起上行，否则云端看到的还是「没问过」。
+                    snapshot.msisdn_iccid = snapshot.iccid.clone();
                     // Written even when the answer was nothing: that is the
                     // fact that keeps the next poll from asking again.
                     if let Err(error) = shared.0.lock().expect("store").set_modem_msisdn(
@@ -6259,6 +6271,8 @@ mod linux {
                     }
                 }
                 Err(error) => {
+                    // 指针**不动**：它还指着上一张卡（或者是空的），而那正是
+                    // 「这张卡还没问出来」的说法。写成当前卡等于宣布问过了。
                     log_line(format!("msisdn for {} unavailable: {error}", snapshot.imei))
                 }
             }
@@ -6429,6 +6443,24 @@ mod linux {
             ));
         }
 
+        // 这一根现在插的是哪张卡。循环外读一次：一次清扫里所有消息收自同一张卡，
+        // 而在锁里逐条读会让一次清扫多握几十次存储锁。
+        //
+        // 🔴 读库失败是「不知道」，不是「没有卡」—— 所以是 `None` 而不是报错：
+        // 一条读到了的短信不该因为查不出卡号就丢掉。
+        let card = shared
+            .0
+            .lock()
+            .expect("store")
+            .list_local_modems()
+            .ok()
+            .and_then(|modems| {
+                modems
+                    .into_iter()
+                    .find(|modem| modem.imei == imei)
+                    .and_then(|modem| modem.iccid)
+            });
+
         let mut stored_fingerprints: Vec<String> = Vec::new();
         let mut carried = 0usize;
         for settled in &settlement.ready {
@@ -6447,6 +6479,14 @@ mod linux {
                 direction: "inbound".into(),
                 received_at: now,
                 modem_imei: Some(imei.to_string()),
+                // ⚠️ 和 QMI 那条路不同：这里手上只有 IMEI，卡号得从存储层取
+                // 上一轮 AT 探测（`AT+QCCID`/`AT+CCID`）读到的那张。所以它最多
+                // 落后一个轮询周期，而不是当场从模组读的。
+                //
+                // 读不出来就留 `None`。宁可说不知道，也不拿别的东西顶上：这一格
+                // 将来是用来回答「这条短信是哪张卡收的」的，一个像模像样的错答案
+                // 比空白难查得多。
+                iccid: card.clone(),
             };
             shared
                 .0
@@ -6459,6 +6499,7 @@ mod linux {
                 imei,
                 &message.sender,
                 &message.body,
+                card.as_deref(),
                 settled.encoding,
                 now,
             )?;
@@ -7370,6 +7411,8 @@ mod linux {
                 direction: "inbound".into(),
                 received_at: now,
                 modem_imei: Some(imei.clone()),
+                // 这一轮刚从模组读出来的卡号 —— 就是收下这条消息的那张卡。
+                iccid: iccid.clone(),
             };
             shared
                 .0
@@ -7382,6 +7425,7 @@ mod linux {
                 &imei,
                 &message.sender,
                 &message.body,
+                iccid.as_deref(),
                 settled.encoding,
                 now,
             )?;
@@ -7430,6 +7474,8 @@ mod linux {
             // （卡不在），不是「没问成」。照写，让它清空是对的 —— 否则拔掉
             // 的卡永远拔不掉。
             card_read: edge_store::CardRead::Answered,
+            // 号码不在这条路上读 —— `fill_msisdn` 随后会连号码带指针一起填。
+            msisdn_iccid: None,
             imsi,
             home,
             serving: serving_plmn,
@@ -7452,20 +7498,48 @@ mod linux {
         })
     }
 
+    /// 把一条收到的短信送上行。
+    ///
+    /// 🔴 `card` 是收下它的那张卡，`None` 表示**不知道**是哪张。
+    ///
+    /// 这个位置以前是写死的空串。空串在下游读起来像一个答案，而它其实是「没问」——
+    /// 缺席塌成了空。而这件事只有此刻说得清：IMEI 认的是那根棒，换一张卡之后同一
+    /// 根棒的历史消息会全部挂到新卡名下，事后没有任何依据能分回去。
     fn enqueue_sms(
         outbox: &Arc<Mutex<DurableOutbox>>,
         imei: &str,
         peer: &str,
         body: &str,
+        card: Option<&str>,
         encoding: &str,
         now: i64,
     ) -> Result<(), String> {
-        let payload = serde_json::json!({
+        append_kind(outbox, "SmsReceived", sms_payload(imei, peer, body, card, encoding, now))
+    }
+
+    /// 一条 `SmsReceived` 上行的形状。
+    ///
+    /// 从 `enqueue_sms` 里分出来只为一件事：让它可测。这个 payload 里有一个字段
+    /// 长期是错的，而没有任何测试看得见它。
+    fn sms_payload(
+        imei: &str,
+        peer: &str,
+        body: &str,
+        card: Option<&str>,
+        encoding: &str,
+        now: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
             "modem_imei": imei,
             "peer": peer,
             "body": body,
             "received_at": now,
-            "iccid": "",
+            // 🔴 不知道就送 null，不送空串。
+            //
+            // 这里写死过 `""`。空串在下游读起来像一个答案（「这条短信没有卡」），
+            // 而它其实是「压根没问」—— 缺席塌成了空，正是这个仓库反复禁止的那种
+            // 塌陷。而云端拿这一格来回答「这条短信是哪张卡收的」。
+            "iccid": card,
             // The contract's bearer is how the message was *delivered* —
             // `cs`, `ims` or `nas` — not which radio it arrived on. Messages
             // are read out of modem storage over QMI WMS, which does not say
@@ -7477,8 +7551,7 @@ mod linux {
             // more useful way for binary OTA traffic, where it is the field
             // that explains why the body is hex.
             "encoding": encoding
-        });
-        append_kind(outbox, "SmsReceived", payload)
+        })
     }
 
     /// What one AT pass over a module's control port produced.
@@ -7840,6 +7913,15 @@ mod linux {
         /// plenty of operators never write it, so `None` means the card did
         /// not say rather than that there is no number.
         msisdn: Option<String>,
+        /// 上面那个号码是从**哪张卡**读出来的。
+        ///
+        /// 🔴 号码为空有两种意思，而只有这个字段能把它们分开：
+        /// 指着当前这张卡 = 问过了，答案就是没有；对不上（或空）= 还没问出来。
+        /// 两种要运维做的事相反 —— 一个到此为止，一个再等一轮。
+        ///
+        /// 存储层早就按卡记号码了（`local_modems.msisdn_iccid`，0011 建的），
+        /// 但那个事实一直没上过行，于是云端控制台只能画一个不说话的横杠。
+        msisdn_iccid: Option<String>,
         /// The kernel node this module is driven through.
         control_port: Option<String>,
         /// Packet data profiles, as JSON. `None` means not read this pass --
@@ -7948,6 +8030,10 @@ mod linux {
                 // the family they were used to detect.
                 "firmware": modem.firmware,
                 "msisdn": modem.msisdn,
+                // 号码是从哪张卡读的。云端靠它把「问过、没号码」和「还没问出来」
+                // 分开 —— 少了它，控制台只能对两种情况画同一个横杠，而运维正是
+                // 靠号码认卡的，两种情况该做的事正好相反。
+                "msisdn_iccid": modem.msisdn_iccid,
                 // Physical topology. The cloud cannot see the edge machine's
                 // /dev or sysfs, so without these an operator diagnosing a
                 // silent stick has to ask somebody with a shell on the box.
@@ -9447,9 +9533,104 @@ mod linux {
     }
 
     #[cfg(test)]
+    mod sms_payload_tests {
+        use super::sms_payload;
+
+        /// 一条短信上行时带着收下它的那张卡，而「不知道」是 null，不是空串。
+        ///
+        /// 🔴 这一格从一开始就写死成 `""`，而没有任何测试看得见它。后果不是少显示
+        /// 一个字段：短信只挂 IMEI，而 IMEI 认的是那根棒不是那张卡 —— 换一张卡，
+        /// 同一根棒的历史消息会全部挂到新卡名下，而且**分不回去**，因为当时是哪张
+        /// 卡从来没被记下来过。等一天就永久少一天的归属。
+        ///
+        /// 空串和 null 的区别在这里不是洁癖：云端拿这一格回答「这条短信是哪张卡
+        /// 收的」，空串读起来像「这条没有卡」——一个看着合理的错答案。
+        #[test]
+        fn a_message_carries_the_card_it_arrived_on() {
+            let with_card = sms_payload("867018069509705", "10086", "hi", Some("8986001"), "gsm7", 7);
+            assert_eq!(with_card["iccid"], "8986001");
+            assert_eq!(with_card["modem_imei"], "867018069509705");
+
+            let unknown = sms_payload("867018069509705", "10086", "hi", None, "gsm7", 7);
+            assert!(
+                unknown["iccid"].is_null(),
+                "不知道是哪张卡时必须是 null。空串在云端读起来像「这条没有卡」—— \
+                 缺席塌成了空，而这一格正是用来分辨两张卡的"
+            );
+            assert_ne!(unknown["iccid"], "", "空串正是这个改动要修掉的那个值");
+        }
+    }
+
+    #[cfg(test)]
     mod device_state_tests {
-        use super::{device_state_payload, HostStats};
+        use super::{device_state_payload, Discovery, HostStats, ModemSnapshot, RadioQuality};
         use edge_core::CapabilityMatrix;
+
+        /// 一根 QMI 模组，插着 `card` 那张卡，号码是从 `read_from` 读出来的。
+        fn snapshot(card: Option<&str>, msisdn: Option<&str>, read_from: Option<&str>) -> ModemSnapshot {
+            ModemSnapshot {
+                imei: "867018069509705".into(),
+                state: "online",
+                registration: "registered",
+                family: "EC20".into(),
+                iccid: card.map(Into::into),
+                card_read: edge_store::CardRead::Answered,
+                imsi: None,
+                home: None,
+                serving: None,
+                quality: RadioQuality::default(),
+                discovery: Discovery::Qmi,
+                usb: None,
+                firmware: None,
+                msisdn: msisdn.map(Into::into),
+                msisdn_iccid: read_from.map(Into::into),
+                control_port: None,
+                apn_contexts: None,
+                manageable: true,
+            }
+        }
+
+        /// 号码是从哪张卡读的，这件事必须上行。
+        ///
+        /// 🔴 没有它，云端只有一个 `msisdn: null`，而那个 null 有两种意思：
+        /// 「问过了，这张卡没号码」和「换了卡，还没问出来」。控制台对两种画同一个
+        /// 横杠 —— 运维正是靠号码认卡的，一个该到此为止，一个该再等一轮。
+        ///
+        /// 边缘端本地早就分得开（0011 建的 `msisdn_iccid`），只是这个事实一直
+        /// 停在 agent 的 SQLite 里没走出去。
+        #[test]
+        fn the_card_a_number_was_read_from_goes_upstream() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[snapshot(Some("8986001"), None, Some("8986001"))],
+                &HostStats::default(),
+                None,
+                None,
+                None,
+                7,
+            );
+            let modem = &payload["modems"][0];
+            assert_eq!(
+                modem["msisdn_iccid"], "8986001",
+                "指针不上行的话，云端分不出两种空 —— 这是这个字段存在的全部理由"
+            );
+
+            // 换了卡、新卡还没问出来：指针留在上一张卡上，云端据此说「待读」。
+            let swapped = device_state_payload(
+                &matrix(),
+                &[snapshot(Some("8986002"), None, Some("8986001"))],
+                &HostStats::default(),
+                None,
+                None,
+                None,
+                7,
+            );
+            assert_eq!(swapped["modems"][0]["msisdn_iccid"], "8986001");
+            assert_ne!(
+                swapped["modems"][0]["msisdn_iccid"], swapped["modems"][0]["iccid"],
+                "对不上当前的卡，正是「这张卡还没问出来」的说法"
+            );
+        }
 
         fn matrix() -> CapabilityMatrix {
             CapabilityMatrix::builtin().expect("built-in matrix")

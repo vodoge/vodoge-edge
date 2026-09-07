@@ -136,6 +136,20 @@ pub struct ModemBody {
     /// without taking the radio away from the poll loop.
     pub firmware: Option<String>,
     pub msisdn: Option<String>,
+    /// 号码那一格是空的时候，空的是哪一种。
+    ///
+    /// 🔴 `msisdn: None` 有两种意思，而它们要运维做的事完全相反：
+    ///
+    ///   `false` —— 这张卡问过了，它就是没有号码。屏幕上一横杠，到此为止。
+    ///   `true`  —— 还没为**这张**卡问出来（刚换了卡，或者上一次读失败了）。
+    ///              下一轮会再问，此刻画一横杠等于替这张卡下了个还没有的结论。
+    ///
+    /// 以前这一格只有一种空，因为号码根本不会变空：它是无条件继承的，换卡之后
+    /// 旧号码会活下来挂在新卡名下 —— 那比空更坏，因为它是个看着合理的错答案，
+    /// 而运维正是靠这个字段认卡的。现在号码按卡记（`local_modems.msisdn_iccid`），
+    /// 换卡即作废，于是屏幕上第一次出现了「刚变空」这种状态，得有话说。
+    #[serde(default)]
+    pub msisdn_pending: bool,
     /// The carrier half of the capability-matrix key, derived from the home
     /// network. Shown because it is half of what a new rule must be written
     /// against, and it is not readable off the operator name.
@@ -202,6 +216,13 @@ pub struct MessageBody {
     pub direction: String,
     pub received_at: i64,
     pub modem_imei: Option<String>,
+    /// 收下这条消息的那张卡。
+    ///
+    /// 🔴 IMEI 认的是那根棒，卡是更细的一层：同一根棒换过卡之后，两张卡的往来
+    /// 会落在同一个 IMEI 名下。`None` 是「不知道」（这条消息比这个字段更早，
+    /// 或者收下时读不出卡号），不是「没有卡」。
+    #[serde(default)]
+    pub iccid: Option<String>,
 }
 
 /* ── 动作结果 ───────────────────────────────────────────────────────

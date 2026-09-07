@@ -1109,6 +1109,23 @@ fn modem_body(
     // The enum itself now, not a hand-written spelling of it: `serde` owns
     // the wire names, and the browser deserialises into the same type.
     let capability_origin = matrix.query(&family, &carrier).origin;
+    // 号码空着的两种意思，靠「这张卡问过没有」分开。
+    //
+    // 问过的凭据是 `msisdn_iccid` 指着当前这张卡：`set_modem_msisdn` 在答案是
+    // 「没有号码」时也会写下它 —— 那一笔存在的全部理由就是记下「问过了」，
+    // 好让下一轮不用再问。所以指针对得上 = 有结论，对不上 = 还没有结论。
+    //
+    // 换卡会让它对不上（新卡还没问），这一轮读失败也会（存储层按卡作废时把
+    // 指针一起清了）。两种都是「还没问出来」，对运维是同一件事：再等一轮。
+    //
+    // ⚠️ AT-only 那条路不走这个判断。它没有缓存：每一轮都在已经打开的口上重发
+    // 一次 `AT+CNUM`（`fill_msisdn` 因此对它直接 `continue`）。那里的 `None`
+    // 当场就是这一轮的答案，永远不存在「还没问」—— 不排除它的话，一张真的没有
+    // 号码的 AT 卡会被永远标成「读取中」，那是个永远不会兑现的承诺。
+    let msisdn_pending = value.msisdn.is_none()
+        && value.discovery != "at"
+        && value.msisdn_iccid != value.iccid;
+
     ModemBody {
         imei: value.imei,
         family: value.family,
@@ -1125,6 +1142,7 @@ fn modem_body(
         control_port: value.control_port,
         firmware: value.firmware,
         msisdn: value.msisdn,
+        msisdn_pending,
         carrier_profile: carrier.as_str().to_string(),
         capability_origin,
         gate_failure: gate.map(|gate| GateFailureBody {
@@ -1177,6 +1195,7 @@ fn message_body(value: LocalMessage) -> MessageBody {
             direction: value.direction,
             received_at: value.received_at,
             modem_imei: value.modem_imei,
+            iccid: value.iccid,
         }
     }
 }

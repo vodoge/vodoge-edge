@@ -613,6 +613,7 @@ mod tests {
             control_port: Some("/dev/ttyUSB4".into()),
             firmware: None,
             msisdn: None,
+            msisdn_pending: false,
             carrier_profile: String::new(),
             capability_origin: CapabilityOrigin::Rule,
             gate_failure: None,

@@ -38,6 +38,7 @@ async fn main() {
                 direction: "inbound".into(),
                 received_at: 1_700_000_000_000,
                 modem_imei: Some("867018069509705".into()),
+                iccid: None,
             },
             LocalMessage {
                 seq: 2,
@@ -47,6 +48,7 @@ async fn main() {
                 direction: "outbound".into(),
                 received_at: 1_700_000_100_000,
                 modem_imei: Some("860000000000001".into()),
+                iccid: None,
             },
             // ⚠️ 故意留一条**没记模组**的。这一条在「只看某一根」时也必须还在 ——
             // 因为一个字段缺失就丢行，是收件箱悄悄丢信的方式。
@@ -58,6 +60,7 @@ async fn main() {
                 direction: "inbound".into(),
                 received_at: 1_700_000_200_000,
                 modem_imei: None,
+                iccid: None,
             },
         ],
         modems: vec![

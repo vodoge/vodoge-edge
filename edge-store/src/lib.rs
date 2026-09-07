@@ -121,6 +121,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0015_registered_modems.sql"),
     include_str!("../migrations/0016_registration_gate.sql"),
     include_str!("../migrations/0017_discovery_identity.sql"),
+    include_str!("../migrations/0018_message_card.sql"),
 ];
 
 /// An opened edge database with migrations applied.
@@ -319,15 +320,20 @@ impl Store {
 
     pub fn insert_local_message(&self, message: &LocalMessage) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO local_messages (seq, peer, body, bearer, direction, received_at, modem_imei)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO local_messages
+                 (seq, peer, body, bearer, direction, received_at, modem_imei, iccid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(seq) DO UPDATE SET
                 peer = excluded.peer,
                 body = excluded.body,
                 bearer = excluded.bearer,
                 direction = excluded.direction,
                 received_at = excluded.received_at,
-                modem_imei = excluded.modem_imei",
+                modem_imei = excluded.modem_imei,
+                -- ⚠️ 读不出卡号时**不覆盖**已经记下的那张卡。这一条重放时
+                -- 若当场不知道卡号，写 NULL 等于把一条本来说得清的消息改成
+                -- 说不清 —— 收下的那一刻知道，就永远知道。
+                iccid = COALESCE(excluded.iccid, local_messages.iccid)",
             params![
                 message.seq as i64,
                 message.peer,
@@ -336,6 +342,7 @@ impl Store {
                 message.direction,
                 message.received_at,
                 message.modem_imei,
+                message.iccid,
             ],
         )?;
         Ok(())
@@ -421,7 +428,7 @@ impl Store {
 
     pub fn list_local_messages(&self) -> Result<Vec<LocalMessage>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT seq, peer, body, bearer, direction, received_at, modem_imei
+            "SELECT seq, peer, body, bearer, direction, received_at, modem_imei, iccid
                FROM local_messages
               ORDER BY received_at DESC, seq DESC
               LIMIT 200",
@@ -436,6 +443,7 @@ impl Store {
                     direction: row.get(4)?,
                     received_at: row.get(5)?,
                     modem_imei: row.get(6)?,
+                    iccid: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -451,11 +459,47 @@ impl Store {
         modem: &LocalModem,
         card: CardRead,
     ) -> Result<(), StoreError> {
-        let iccid_rule = match card {
-            CardRead::Answered => "iccid = excluded.iccid,",
-            CardRead::Unasked => {
-                "iccid = COALESCE(excluded.iccid, local_modems.iccid),"
-            }
+        // 这一轮之后这一行的卡号会是什么 —— 卡侧字段能不能继承，全看它。
+        //
+        // 两处都用同一个表达式：iccid 自己的赋值，和「旧值还算不算数」的判断。
+        // 写成两份会漂移，而漂移的后果正是这个函数要防的那件事。
+        let effective_iccid = match card {
+            CardRead::Answered => "excluded.iccid",
+            CardRead::Unasked => "COALESCE(excluded.iccid, local_modems.iccid)",
+        };
+        let iccid_rule = format!("iccid = {effective_iccid},");
+
+        // 🔴 卡侧字段的继承规则：**卡没换才继承**。
+        //
+        // 0011 建 `msisdn_iccid` 时就把理由写下来了 ——「没有它，一个号码会活得
+        // 比它的卡还久、被显示在下一张卡名下，那比什么都不显示更坏，因为它是
+        // 一个看起来合理的错答案」。但那一列当时只被用作缓存判据（读取侧判
+        // 「这个号是不是已经知道了」），没有用来作废：换卡之后新卡的号一时读
+        // 不出来，无条件的 COALESCE 就把旧号原样留着，而运维正是靠这个字段
+        // 认卡的。
+        //
+        // ⚠️ `IS` 是 SQLite 的空安全比较（两边都 NULL 算相等），不能写成 `=`：
+        // 一根还没读出卡号的模组两边都是 NULL，用 `=` 会判成不等，于是每一轮
+        // 都把刚读到的东西擦掉。
+        let card_scoped = |column: &str| {
+            format!(
+                "{column} = CASE
+                    WHEN excluded.{column} IS NOT NULL THEN excluded.{column}
+                    WHEN local_modems.msisdn_iccid IS {effective_iccid}
+                        THEN local_modems.{column}
+                    ELSE NULL
+                END,"
+            )
+        };
+        let msisdn_rule = card_scoped("msisdn");
+        let msisdn_iccid_rule = card_scoped("msisdn_iccid");
+        let apn_rule = card_scoped("apn_contexts");
+        let home_mcc_rule = card_scoped("home_mcc");
+        let home_mnc_rule = card_scoped("home_mnc");
+        // 最后一项不带逗号。
+        let imsi_rule_tail = {
+            let rule = card_scoped("imsi");
+            rule.trim_end_matches(',').to_string()
         };
         // SQL 里只有这一处随参数变，其余照旧是常量字符串。占位符仍然是
         // 位置绑定，`iccid_rule` 本身来自上面那个封闭的 match，不接受外部输入。
@@ -492,14 +536,13 @@ impl Store {
                              THEN local_modems.family
                              ELSE excluded.family
                          END,
-                -- Same policy as the card identity below: a pass that could
-                -- not read one of these keeps the last that could. Firmware
-                -- is only re-read on a probe that got that far, and the
-                -- number is only re-read when the card underneath changes.
+                -- 固件只在探到那一步的轮次里重读，不随卡变。
                 firmware = COALESCE(excluded.firmware, local_modems.firmware),
-                msisdn = COALESCE(excluded.msisdn, local_modems.msisdn),
-                msisdn_iccid = COALESCE(excluded.msisdn_iccid, local_modems.msisdn_iccid),
-                apn_contexts = COALESCE(excluded.apn_contexts, local_modems.apn_contexts),
+                {msisdn_rule}
+                {msisdn_iccid_rule}
+                -- APN 上下文同样按卡算：读取侧（fill_apn_contexts）本来就拿
+                -- msisdn_iccid 判「这张卡的还在不在」，写入侧要跟它一致。
+                {apn_rule}
                 {iccid_rule}
                 state = excluded.state,
                 last_seen = excluded.last_seen,
@@ -511,11 +554,12 @@ impl Store {
                 -- blinking out every time it re-registers.
                 mcc = COALESCE(excluded.mcc, local_modems.mcc),
                 mnc = COALESCE(excluded.mnc, local_modems.mnc),
-                -- A read that failed leaves the card's identity alone rather
-                -- than blanking it; one bad poll must not lose what is known.
-                home_mcc = COALESCE(excluded.home_mcc, local_modems.home_mcc),
-                home_mnc = COALESCE(excluded.home_mnc, local_modems.home_mnc),
-                imsi = COALESCE(excluded.imsi, local_modems.imsi)"
+                -- 归属网和 IMSI 也是卡上的事实，同一条规则：卡换了就不许继承。
+                -- 闸 2 按 (型号 × 运营商) 查规则，而运营商画像正是从归属网推出来的
+                -- —— 拿上一张卡的归属网做判定，会让一根本该被拦下的模组过闸。
+                {home_mcc_rule}
+                {home_mnc_rule}
+                {imsi_rule_tail}"
             ),
             params![
                 modem.imei,
@@ -1020,6 +1064,14 @@ pub struct LocalMessage {
     pub direction: String,
     pub received_at: i64,
     pub modem_imei: Option<String>,
+    /// 收到这条短信的那张卡。
+    ///
+    /// 🔴 `None` 是「不知道是哪张卡」，**不是**「没有卡」。上行契约里这个位置
+    /// 长期填的是空串，而空串在下游读起来像一个答案 —— 缺席塌成了空。
+    ///
+    /// IMEI 认的是棒不是卡：换一张卡，同一根棒收到的消息会全部挂到新卡名下，
+    /// 而且事后重建不回来。所以这件事必须在收下的那一刻记住。
+    pub iccid: Option<String>,
 }
 
 /// One locally observed modem for the offline panel.

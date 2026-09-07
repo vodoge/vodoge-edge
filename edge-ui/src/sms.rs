@@ -248,6 +248,22 @@ fn hhmmss(at: f64) -> String {
     )
 }
 
+/// 消息表里「卡」那一格上写什么。
+///
+/// 只画尾号：ICCID 有十九二十位，整串会把这张已经很挤的表撑开，而认卡靠的是尾部。
+///
+/// 🔴 `None` 是「不知道是哪张卡」，不是「没有卡」——那条消息要么比这个字段更早，
+/// 要么收下的时候读不出卡号。写「无」会被读成「这条没有卡」，是个错答案：旁边
+/// 那一格的 IMEI 认的是棒，而同一根棒换过卡之后两张卡的往来会落在一起，这一格
+/// 正是用来把它们分开的。
+fn card_cell(iccid: Option<&str>) -> String {
+    match iccid {
+        Some(card) if card.len() > 8 => format!("…{}", &card[card.len() - 8..]),
+        Some(card) => card.to_string(),
+        None => "未记录".into(),
+    }
+}
+
 fn direction_label(direction: &str) -> &'static str {
     match direction {
         "in" | "inbound" | "mt" => "收",
@@ -516,6 +532,7 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
                                         <TableHeaderCell>"时间"</TableHeaderCell>
                                         <TableHeaderCell>"方向"</TableHeaderCell>
                                         <TableHeaderCell>"对端"</TableHeaderCell>
+                                        <TableHeaderCell>"卡"</TableHeaderCell>
                                         <TableHeaderCell>"模组"</TableHeaderCell>
                                         <TableHeaderCell>"内容"</TableHeaderCell>
                                     </TableRow>
@@ -535,6 +552,11 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
                                                         </Badge>
                                                     </TableCell>
                                                     <TableCell>{m.peer}</TableCell>
+                                                    // 卡是比 IMEI 更细的一层：同一根棒换过卡之后，两张卡的往来
+                                                    // 会落在同一个 IMEI 名下，只看棒分不开。
+                                                    <TableCell>
+                                                        <Caption1>{card_cell(m.iccid.as_deref())}</Caption1>
+                                                    </TableCell>
                                                     // 方向和模组都在载荷里，而改版前的面板把两者都
                                                     // 扔了 —— 三根棒子的往来落在同一个列表里。
                                                     <TableCell>
@@ -559,6 +581,27 @@ pub fn SmsPage(state: SmsState, status: StatusState) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+
+    /// 卡那一格：分得开同一根棒上的两张卡，也分得开「不知道」和「没有」。
+    ///
+    /// 🔴 短信此前只挂 IMEI，而 IMEI 认的是棒不是卡 —— 换一张卡，同一根棒的两批
+    /// 消息落在一个列表里，事后分不回去。这一格是把它们分开的唯一依据。
+    #[test]
+    fn the_card_cell_tells_two_cards_on_one_stick_apart() {
+        let a = card_cell(Some("8986003031401770106"));
+        let b = card_cell(Some("8985200014632179571"));
+        assert_ne!(a, b, "同一根棒上的两张卡必须看得出不同 —— 否则这一列没有意义");
+        assert!(a.ends_with("01770106"), "认卡靠尾号，尾号必须留全");
+        assert!(a.starts_with('…'), "截过的号要看得出是截过的，别被当成完整卡号");
+
+        assert_eq!(
+            card_cell(None),
+            "未记录",
+            "不知道是哪张卡 —— 写「无」会被读成「这条没有卡」，那是个错答案"
+        );
+        assert_eq!(card_cell(Some("8986")), "8986", "短到不用截的就别截");
+    }
+
     use super::*;
 
     /// 🔴 一条「已提交给代理」留在另一根旁边，读起来就是那一根发出去了。
@@ -589,6 +632,7 @@ mod tests {
             direction: "in".into(),
             received_at: 0,
             modem_imei: imei.map(str::to_string),
+            iccid: None,
         }
     }
 

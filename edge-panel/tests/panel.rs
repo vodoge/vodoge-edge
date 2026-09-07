@@ -505,6 +505,7 @@ async fn panel_serves_embedded_html_and_local_json() {
             direction: "inbound".into(),
             received_at: 1_700_000_000_000,
             modem_imei: Some("867018069509705".into()),
+                iccid: None,
         }],
         modems: vec![LocalModem {
             imei: "867018069509705".into(),
@@ -617,6 +618,123 @@ async fn panel_serves_embedded_html_and_local_json() {
 /// (family, carrier) pair -- the pair the agent itself looks up.
 ///
 /// This is what decides whether a human is interrupted, so the two ways of
+/// 号码那一格空着的时候，它得说清是哪一种空。
+///
+/// 🔴 这个测试存在的理由是一次真实的坏答案：号码曾经是无条件继承的，换卡之后
+/// 上一张卡的号码会活下来，挂在新卡名下显示。运维正是靠这个字段认卡的，认错的
+/// 代价是短信发给错的人 —— 一个看着合理的错答案比空白坏得多。
+///
+/// 现在号码按卡记（`msisdn_iccid` 记的是「这号码是从哪张卡读出来的」），换卡即
+/// 作废。于是屏幕上第一次出现了「刚刚变空」这种状态，而它和「这张卡本来就没有
+/// 号码」长得一模一样，却要运维做完全不同的事：前者等下一轮，后者到此为止。
+///
+/// `msisdn_pending` 就是把这两种空分开的那一位。没有它，界面只能画一横杠，
+/// 等于替一张还没问过的卡下了结论。
+#[tokio::test]
+async fn an_empty_number_says_whether_the_card_was_ever_asked() {
+    fn at_modem(imei: &str, card: Option<&str>) -> LocalModem {
+        LocalModem {
+            discovery: "at".into(),
+            ..modem(imei, None, None, card)
+        }
+    }
+
+    fn modem(imei: &str, msisdn: Option<&str>, read_from: Option<&str>, card: Option<&str>) -> LocalModem {
+        LocalModem {
+            imei: imei.into(),
+            family: "EC20".into(),
+            firmware: None,
+            msisdn: msisdn.map(Into::into),
+            msisdn_iccid: read_from.map(Into::into),
+            apn_contexts: None,
+            iccid: card.map(Into::into),
+            state: "registered".into(),
+            last_seen: Some(1_700_000_000_000),
+            mcc: Some(460),
+            mnc: Some(0),
+            home_mcc: Some(460),
+            home_mnc: Some(0),
+            imsi: None,
+            discovery: "qmi".into(),
+            manageable: true,
+            control_port: Some("/dev/cdc-wdm0".into()),
+        }
+    }
+
+    let app = router(Arc::new(MemoryInbox {
+        modems: vec![
+            // 有号码。没有悬念，也不该被标成待读。
+            modem("867018069509705", Some("+8613800138000"), Some("8986001"), Some("8986001")),
+            // 问过这张卡了，它就是没有号码 —— `set_modem_msisdn` 在答案是「没有」
+            // 时也会写下 msisdn_iccid，那一笔就是「问过了」的凭据。
+            modem("867018069514820", None, Some("8986002"), Some("8986002")),
+            // 刚换的卡：号码是从上一张卡读的，这一张还没问出来。
+            modem("862547055142811", None, Some("8986003"), Some("8986004")),
+            // 换卡且这一轮读失败，连指针都被清了 —— 同样是「还没问出来」。
+            modem("867018069509706", None, None, Some("8986005")),
+            // AT-only：没有缓存，每轮重问，所以指针永远是空的。空指针在这条路上
+            // 不是「还没问」，而是「刚问过，答案是没有」。
+            at_modem("868019060490134", Some("8986006")),
+            // 号码读到了、这一轮的卡号没读出来：`set_modem_msisdn(Some(号码), None)`
+            // 就落成这个形状，指针因此对不上当前的卡。手上已经有号码了，
+            // 这时候还说「读取中」是在同一格里给两个矛盾的答案。
+            modem("867517061922113", Some("+8613800138001"), None, Some("8986007")),
+        ],
+        ..MemoryInbox::default()
+    }));
+
+    let status = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(body["modems"][0]["msisdn"], "+8613800138000");
+    assert_eq!(
+        body["modems"][0]["msisdn_pending"], false,
+        "有号码就没有悬念，标成待读会让人去等一个已经到了的答案"
+    );
+
+    assert_eq!(body["modems"][1]["msisdn"], serde_json::Value::Null);
+    assert_eq!(
+        body["modems"][1]["msisdn_pending"], false,
+        "问过、答案是没有 —— 这是个结论，不能显示成还在读"
+    );
+
+    assert_eq!(body["modems"][2]["msisdn"], serde_json::Value::Null);
+    assert_eq!(
+        body["modems"][2]["msisdn_pending"], true,
+        "号码是上一张卡的，这张卡还没问过；画一横杠等于替它下了个没有的结论"
+    );
+
+    assert_eq!(
+        body["modems"][3]["msisdn_pending"], true,
+        "指针被清掉同样是「这张卡还没问出来」，不是「这张卡没号码」"
+    );
+
+    assert_eq!(
+        body["modems"][4]["discovery"], "at",
+        "夹具没生效的话下面那条断言会因为别的原因通过"
+    );
+    assert_eq!(
+        body["modems"][4]["msisdn_pending"], false,
+        "AT 路每轮重问，指针永远是空的；照搬指针判断会把它永远钉在「读取中」"
+    );
+
+    assert_eq!(body["modems"][5]["msisdn"], "+8613800138001");
+    assert_eq!(
+        body["modems"][5]["msisdn_pending"], false,
+        "号码已经在手上，指针对不上也不该再说「读取中」—— 那是同一格里的两个答案"
+    );
+}
+
 /// being wrong both matter. A recognised family is not enough: `UFI103S` is a
 /// `ModemFamily` variant with no rules in the built-in matrix. And a rule that
 /// says `probe` is still a rule: `EC20` outside China resolves to
