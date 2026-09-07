@@ -42,150 +42,499 @@
     }
   },
   "x-vodoge-message-catalog": {
-    "Resume": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 16384 },
-    "ResumeAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
-    "UplinkAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
-    "UplinkGap": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 16384 },
-    "UplinkGapAck": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 16384 },
-    "Ping": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 1024 },
-    "Pong": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 1024 },
-    "CommandDeliver": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 131072 },
-    "CommandReceipt": { "direction": "edge_to_cloud", "sequenced": false, "max_payload_bytes": 4096 },
-    "SmsReceived": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
-    "SmsStatusReport": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 4096 },
-    "DeviceState": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
-    "CommandResult": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
-    "EsimInventory": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 131072 },
-    "Alert": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 32768 },
-    "ProxyTraffic": { "direction": "edge_to_cloud", "sequenced": true, "max_payload_bytes": 65536 },
-    "ProtocolError": { "direction": "cloud_to_edge", "sequenced": false, "max_payload_bytes": 4096 }
+    "Resume": {
+      "direction": "edge_to_cloud",
+      "sequenced": false,
+      "max_payload_bytes": 16384
+    },
+    "ResumeAck": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 16384
+    },
+    "UplinkAck": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 16384
+    },
+    "UplinkGap": {
+      "direction": "edge_to_cloud",
+      "sequenced": false,
+      "max_payload_bytes": 16384
+    },
+    "UplinkGapAck": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 16384
+    },
+    "Ping": {
+      "direction": "edge_to_cloud",
+      "sequenced": false,
+      "max_payload_bytes": 1024
+    },
+    "Pong": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 1024
+    },
+    "CommandDeliver": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 131072
+    },
+    "CommandReceipt": {
+      "direction": "edge_to_cloud",
+      "sequenced": false,
+      "max_payload_bytes": 4096
+    },
+    "SmsReceived": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 32768
+    },
+    "SmsStatusReport": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 4096
+    },
+    "DeviceState": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 131072
+    },
+    "CommandResult": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 32768
+    },
+    "EsimInventory": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 131072
+    },
+    "Alert": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 32768
+    },
+    "ProxyTraffic": {
+      "direction": "edge_to_cloud",
+      "sequenced": true,
+      "max_payload_bytes": 65536
+    },
+    "ProtocolError": {
+      "direction": "cloud_to_edge",
+      "sequenced": false,
+      "max_payload_bytes": 4096
+    }
   },
   "$defs": {
     "Envelope": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["v", "kind", "id", "ts", "device_id", "payload"],
+      "required": [
+        "v",
+        "kind",
+        "id",
+        "ts",
+        "device_id",
+        "payload"
+      ],
       "properties": {
-        "v": { "const": 1 },
-        "kind": { "$ref": "#/$defs/MessageKind" },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "ts": { "$ref": "#/$defs/EpochMillis" },
-        "device_id": { "$ref": "#/$defs/Uuid" },
-        "seq": { "$ref": "#/$defs/SequenceNumber" },
-        "trace_id": { "$ref": "#/$defs/Uuid" },
+        "v": {
+          "const": 1
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "ts": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "seq": {
+          "$ref": "#/$defs/SequenceNumber"
+        },
+        "trace_id": {
+          "$ref": "#/$defs/Uuid"
+        },
         "payload": {}
       },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "const": "Resume" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "Resume"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/ResumePayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ResumePayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "ResumeAck" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ResumeAck"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/ResumeAckPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ResumeAckPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "UplinkAck" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "UplinkAck"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/UplinkAckPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/UplinkAckPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "UplinkGap" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "UplinkGap"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/UplinkGapPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/UplinkGapPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "UplinkGapAck" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "UplinkGapAck"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/UplinkGapAckPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/UplinkGapAckPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "Ping" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "Ping"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/PingPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/PingPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "Pong" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "Pong"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/PongPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/PongPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "CommandDeliver" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "CommandDeliver"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/CommandDeliverPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/CommandDeliverPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "CommandReceipt" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "CommandReceipt"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/CommandReceiptPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/CommandReceiptPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "SmsReceived" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "SmsReceived"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/SmsReceivedPayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/SmsReceivedPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "SmsStatusReport" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "SmsStatusReport"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/SmsStatusReportPayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/SmsStatusReportPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "DeviceState" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "DeviceState"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/DeviceStatePayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/DeviceStatePayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "CommandResult" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "CommandResult"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/CommandResultPayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/CommandResultPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "EsimInventory" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "EsimInventory"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/EsimInventoryPayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/EsimInventoryPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "Alert" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "Alert"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "required": ["seq"],
-            "properties": { "payload": { "$ref": "#/$defs/AlertPayload" } }
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/AlertPayload"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "ProtocolError" } }, "required": ["kind"] },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ProtocolError"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
           "then": {
-            "not": { "required": ["seq"] },
-            "properties": { "payload": { "$ref": "#/$defs/ProtocolErrorPayload" } }
+            "not": {
+              "required": [
+                "seq"
+              ]
+            },
+            "properties": {
+              "payload": {
+                "$ref": "#/$defs/ProtocolErrorPayload"
+              }
+            }
           }
         }
       ]
@@ -242,10 +591,17 @@
     "SequenceRange": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["from", "through"],
+      "required": [
+        "from",
+        "through"
+      ],
       "properties": {
-        "from": { "$ref": "#/$defs/SequenceNumber" },
-        "through": { "$ref": "#/$defs/SequenceNumber" }
+        "from": {
+          "$ref": "#/$defs/SequenceNumber"
+        },
+        "through": {
+          "$ref": "#/$defs/SequenceNumber"
+        }
       },
       "x-vodoge-invariant": "numeric from is less than or equal to numeric through"
     },
@@ -293,24 +649,40 @@
       "pattern": "^https://"
     },
     "NullableString": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "maxLength": 1024
     },
     "ContextValue": {
       "anyOf": [
-        { "type": "null" },
-        { "type": "boolean" },
-        { "type": "number" },
-        { "type": "string", "maxLength": 4096 },
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "maxLength": 4096
+        },
         {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/ContextValue" }
+          "items": {
+            "$ref": "#/$defs/ContextValue"
+          }
         },
         {
           "type": "object",
           "maxProperties": 64,
-          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+          "additionalProperties": {
+            "$ref": "#/$defs/ContextValue"
+          }
         }
       ]
     },
@@ -326,25 +698,52 @@
         "capability_matrix_version"
       ],
       "properties": {
-        "connection_id": { "$ref": "#/$defs/Uuid" },
-        "last_assigned_seq": { "$ref": "#/$defs/SequenceCursor" },
+        "connection_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "last_assigned_seq": {
+          "$ref": "#/$defs/SequenceCursor"
+        },
         "lowest_retained_seq": {
           "anyOf": [
-            { "$ref": "#/$defs/SequenceNumber" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/SequenceNumber"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "last_acked_seq": { "$ref": "#/$defs/SequenceCursor" },
+        "last_acked_seq": {
+          "$ref": "#/$defs/SequenceCursor"
+        },
         "pending_gap_ids": {
           "type": "array",
           "maxItems": 128,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/Uuid" }
+          "items": {
+            "$ref": "#/$defs/Uuid"
+          }
         },
-        "capability_matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "edge_version": { "type": "string", "maxLength": 128 },
-        "queue_records": { "type": "integer", "minimum": 0, "maximum": 1000000 },
-        "queue_bytes": { "type": "integer", "minimum": 0, "maximum": 10737418240 }
+        "capability_matrix_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "edge_version": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "queue_records": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "queue_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10737418240
+        }
       },
       "x-vodoge-invariant": "last_acked_seq <= last_assigned_seq; lowest_retained_seq is null exactly when no unacknowledged records are retained"
     },
@@ -360,142 +759,343 @@
         "server_time"
       ],
       "properties": {
-        "connection_id": { "$ref": "#/$defs/Uuid" },
-        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
+        "connection_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "committed_through": {
+          "$ref": "#/$defs/SequenceCursor"
+        },
         "missing_ranges": {
           "type": "array",
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/SequenceRange" }
+          "items": {
+            "$ref": "#/$defs/SequenceRange"
+          }
         },
-        "more_missing": { "type": "boolean" },
-        "max_in_flight": { "type": "integer", "minimum": 1, "maximum": 2048 },
-        "server_time": { "$ref": "#/$defs/EpochMillis" }
+        "more_missing": {
+          "type": "boolean"
+        },
+        "max_in_flight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "server_time": {
+          "$ref": "#/$defs/EpochMillis"
+        }
       }
     },
     "UplinkAckPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["connection_id", "committed_through", "missing_ranges", "more_missing", "max_in_flight"],
+      "required": [
+        "connection_id",
+        "committed_through",
+        "missing_ranges",
+        "more_missing",
+        "max_in_flight"
+      ],
       "properties": {
-        "connection_id": { "$ref": "#/$defs/Uuid" },
-        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
+        "connection_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "committed_through": {
+          "$ref": "#/$defs/SequenceCursor"
+        },
         "missing_ranges": {
           "type": "array",
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/SequenceRange" }
+          "items": {
+            "$ref": "#/$defs/SequenceRange"
+          }
         },
-        "more_missing": { "type": "boolean" },
-        "max_in_flight": { "type": "integer", "minimum": 1, "maximum": 2048 }
+        "more_missing": {
+          "type": "boolean"
+        },
+        "max_in_flight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        }
       }
     },
     "UplinkGapPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gap_id", "ranges", "reason", "dropped_records", "occurred_at", "drop_policy"],
+      "required": [
+        "gap_id",
+        "ranges",
+        "reason",
+        "dropped_records",
+        "occurred_at",
+        "drop_policy"
+      ],
       "properties": {
-        "gap_id": { "$ref": "#/$defs/Uuid" },
+        "gap_id": {
+          "$ref": "#/$defs/Uuid"
+        },
         "ranges": {
           "type": "array",
           "minItems": 1,
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/SequenceRange" }
+          "items": {
+            "$ref": "#/$defs/SequenceRange"
+          }
         },
         "reason": {
           "type": "string",
-          "enum": ["queue_capacity", "storage_corruption", "operator_purge"]
+          "enum": [
+            "queue_capacity",
+            "storage_corruption",
+            "operator_purge"
+          ]
         },
-        "dropped_records": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-        "occurred_at": { "$ref": "#/$defs/EpochMillis" },
-        "drop_policy": { "const": "oldest_non_verification_only" },
-        "detail": { "$ref": "#/$defs/NullableString" }
+        "dropped_records": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "drop_policy": {
+          "const": "oldest_non_verification_only"
+        },
+        "detail": {
+          "$ref": "#/$defs/NullableString"
+        }
       },
       "x-vodoge-invariant": "ranges are non-overlapping, each covers only records that are no longer retained, and dropped_records equals their total cardinality"
     },
     "UplinkGapAckPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gap_id", "accepted", "committed_through"],
+      "required": [
+        "gap_id",
+        "accepted",
+        "committed_through"
+      ],
       "properties": {
-        "gap_id": { "$ref": "#/$defs/Uuid" },
-        "accepted": { "type": "boolean" },
-        "committed_through": { "$ref": "#/$defs/SequenceCursor" },
-        "reason_code": { "$ref": "#/$defs/NullableString" }
+        "gap_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "committed_through": {
+          "$ref": "#/$defs/SequenceCursor"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/NullableString"
+        }
       }
     },
     "PingPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["connection_id", "sent_at"],
+      "required": [
+        "connection_id",
+        "sent_at"
+      ],
       "properties": {
-        "connection_id": { "$ref": "#/$defs/Uuid" },
-        "sent_at": { "$ref": "#/$defs/EpochMillis" }
+        "connection_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "sent_at": {
+          "$ref": "#/$defs/EpochMillis"
+        }
       }
     },
     "PongPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["connection_id", "ping_id", "server_time"],
+      "required": [
+        "connection_id",
+        "ping_id",
+        "server_time"
+      ],
       "properties": {
-        "connection_id": { "$ref": "#/$defs/Uuid" },
-        "ping_id": { "$ref": "#/$defs/Uuid" },
-        "server_time": { "$ref": "#/$defs/EpochMillis" }
+        "connection_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "ping_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "server_time": {
+          "$ref": "#/$defs/EpochMillis"
+        }
       }
     },
     "CommandDeliverPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cmd_id", "issued_at", "expires_at", "command"],
+      "required": [
+        "cmd_id",
+        "issued_at",
+        "expires_at",
+        "command"
+      ],
       "properties": {
-        "cmd_id": { "$ref": "#/$defs/Uuid" },
-        "issued_at": { "$ref": "#/$defs/EpochMillis" },
-        "expires_at": { "$ref": "#/$defs/EpochMillis" },
-        "attempt": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-        "command": { "$ref": "#/$defs/Command" }
+        "cmd_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "command": {
+          "$ref": "#/$defs/Command"
+        }
       },
       "x-vodoge-invariant": "expires_at is greater than issued_at; the envelope id is the physical delivery_id and cmd_id is the logical command id"
     },
     "CommandReceiptPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cmd_id", "delivery_id", "status", "received_at"],
+      "required": [
+        "cmd_id",
+        "delivery_id",
+        "status",
+        "received_at"
+      ],
       "properties": {
-        "cmd_id": { "$ref": "#/$defs/Uuid" },
-        "delivery_id": { "$ref": "#/$defs/Uuid" },
-        "status": { "type": "string", "enum": ["accepted", "duplicate", "retry_later"] },
-        "received_at": { "$ref": "#/$defs/EpochMillis" },
-        "retry_after_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
-        "reason_code": { "$ref": "#/$defs/NullableString" }
+        "cmd_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "duplicate",
+            "retry_later"
+          ]
+        },
+        "received_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "reason_code": {
+          "$ref": "#/$defs/NullableString"
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "retry_later" } }, "required": ["status"] },
-          "then": { "required": ["retry_after_ms"] }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "retry_later"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "retry_after_ms"
+            ]
+          }
         }
       ]
     },
     "SmsReceivedPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["modem_imei", "peer", "body", "received_at", "iccid", "bearer", "encoding"],
+      "required": [
+        "modem_imei",
+        "peer",
+        "body",
+        "received_at",
+        "iccid",
+        "bearer",
+        "encoding"
+      ],
       "properties": {
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "peer": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "body": { "type": "string", "maxLength": 16384 },
-        "received_at": { "$ref": "#/$defs/EpochMillis" },
-        "iccid": { "$ref": "#/$defs/Iccid" },
-        "bearer": { "type": "string", "enum": ["cs", "ims", "nas", "unknown"] },
-        "encoding": { "type": "string", "enum": ["gsm7", "ucs2", "8bit", "unknown"] },
-        "modem_storage_index": { "type": "integer", "minimum": 0, "maximum": 65535 }
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "peer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "received_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "iccid": {
+          "description": "收下这条消息的那张卡。null 表示不知道是哪张 —— 边缘读不出卡号，或这条消息早于这个字段。IMEI 认的是那根棒不是那张卡，换卡之后同一根棒的历史消息会全部挂到新卡名下，而且事后重建不回来，所以这件事只有收下的那一刻说得清。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Iccid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bearer": {
+          "type": "string",
+          "enum": [
+            "cs",
+            "ims",
+            "nas",
+            "unknown"
+          ]
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "gsm7",
+            "ucs2",
+            "8bit",
+            "unknown"
+          ]
+        },
+        "modem_storage_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
       }
     },
     "SmsStatusReportPayload": {
       "type": "object",
       "additionalProperties": false,
       "description": "An SMS-STATUS-REPORT the network sent about a message this device submitted. Not a command receipt: that says the modem took the message, this says the network handed it over.",
-      "required": ["modem_imei", "peer", "reference", "status", "reported_at"],
+      "required": [
+        "modem_imei",
+        "peer",
+        "reference",
+        "status",
+        "reported_at"
+      ],
       "properties": {
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "peer": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "peer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
         "reference": {
           "type": "integer",
           "minimum": 0,
@@ -504,68 +1104,124 @@
         },
         "status": {
           "type": "string",
-          "enum": ["delivered", "pending", "failed", "unknown"],
+          "enum": [
+            "delivered",
+            "pending",
+            "failed",
+            "unknown"
+          ],
           "description": "TP-ST reduced to an outcome. `pending` means the service centre is still trying, which is neither delivered nor failed."
         },
-        "status_code": { "type": "integer", "minimum": 0, "maximum": 255 },
-        "reported_at": { "$ref": "#/$defs/EpochMillis" },
-        "submitted_at": { "$ref": "#/$defs/EpochMillis" },
-        "delivered_at": { "$ref": "#/$defs/EpochMillis" }
+        "status_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "reported_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "submitted_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "delivered_at": {
+          "$ref": "#/$defs/EpochMillis"
+        }
       }
     },
     "ProxyTrafficPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reported_at", "instances"],
+      "required": [
+        "reported_at",
+        "instances"
+      ],
       "properties": {
-        "reported_at": { "$ref": "#/$defs/EpochMillis" },
+        "reported_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
         "instances": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ProxyTrafficEntry" }
+          "items": {
+            "$ref": "#/$defs/ProxyTrafficEntry"
+          }
         }
       }
     },
     "ProxyTrafficEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["instance_id", "bytes_up", "bytes_down", "connections"],
+      "required": [
+        "instance_id",
+        "bytes_up",
+        "bytes_down",
+        "connections"
+      ],
       "properties": {
-        "instance_id": { "$ref": "#/$defs/Uuid" },
-        "bytes_up": { "type": "integer", "minimum": 0 },
-        "bytes_down": { "type": "integer", "minimum": 0 },
-        "connections": { "type": "integer", "minimum": 0 },
-        "errors": { "type": "integer", "minimum": 0 }
+        "instance_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "bytes_up": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes_down": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "connections": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "DeviceStatePayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observed_at", "modems"],
+      "required": [
+        "observed_at",
+        "modems"
+      ],
       "properties": {
-        "observed_at": { "$ref": "#/$defs/EpochMillis" },
+        "observed_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
         "modems": {
           "type": "array",
           "minItems": 0,
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/ModemState" }
+          "items": {
+            "$ref": "#/$defs/ModemState"
+          }
         },
         "host": {
           "anyOf": [
-            { "$ref": "#/$defs/HostState" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/HostState"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "managed_imeis": {
           "description": "Every module this agent has been told to manage, including ones it cannot currently find. Sent explicitly rather than inferred from `modems`, because inference makes a partial report destructive: a pass that failed to enumerate would read as an instruction to unmanage the fleet. Absent means the agent did not say, which the cloud treats as no change.",
           "type": "array",
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/Imei" }
+          "items": {
+            "$ref": "#/$defs/Imei"
+          }
         },
         "discoveries": {
           "description": "Modem-shaped endpoints the agent has seen but has not been told to probe. Carried so the cloud can approve one: the edge panel could always show and claim these, and an operator who works from the console had no way to see that a new stick had been plugged in at all.",
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/DiscoveryCandidate" }
+          "items": {
+            "$ref": "#/$defs/DiscoveryCandidate"
+          }
         }
       }
     },
@@ -574,68 +1230,124 @@
       "additionalProperties": false,
       "required": [],
       "properties": {
-        "public_ip": { "$ref": "#/$defs/NullableString" },
+        "public_ip": {
+          "$ref": "#/$defs/NullableString"
+        },
         "cpu_percent": {
           "anyOf": [
-            { "type": "number", "minimum": 0, "maximum": 100 },
-            { "type": "null" }
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "memory_used_bytes": {
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "memory_total_bytes": {
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "disk_used_bytes": {
           "description": "Used and total bytes of the filesystem holding the agent's own databases, not of every mount. That is the one whose exhaustion stops the outbox committing, which is the failure this number exists to see coming.",
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "disk_total_bytes": {
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "net_rx_bytes_per_sec": {
           "description": "Throughput across the host's physical interfaces, averaged over the interval between two polls rather than since boot. Loopback and the modems' own wwan interfaces are excluded: this is the box's link to the world, not its traffic to its own hardware.",
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "net_tx_bytes_per_sec": {
           "anyOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "cpu_model": {
           "description": "Host hardware identity. Static for the life of a machine, so it is sent with every state rather than tracked for change: the payload is a snapshot, and a field that appears only on the first one after a restart is a field the cloud cannot rely on.",
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 128 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "kernel": {
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 128 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "hostname": {
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 128 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -643,93 +1355,206 @@
     "ModemState": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["modem_imei", "state", "registration", "capability"],
+      "required": [
+        "modem_imei",
+        "state",
+        "registration",
+        "capability"
+      ],
       "properties": {
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "state": { "type": "string", "enum": ["online", "offline", "recovering", "unknown"] },
-        "registration": { "type": "string", "enum": ["registered", "searching", "denied", "unregistered", "unknown"] },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "online",
+            "offline",
+            "recovering",
+            "unknown"
+          ]
+        },
+        "registration": {
+          "type": "string",
+          "enum": [
+            "registered",
+            "searching",
+            "denied",
+            "unregistered",
+            "unknown"
+          ]
+        },
         "iccid": {
           "anyOf": [
-            { "$ref": "#/$defs/Iccid" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Iccid"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "signal_dbm": {
           "anyOf": [
-            { "type": "integer", "minimum": -160, "maximum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": -160,
+              "maximum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "rsrp": {
           "anyOf": [
-            { "type": "integer", "minimum": -156, "maximum": -30 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": -156,
+              "maximum": -30
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "rsrq": {
           "anyOf": [
-            { "type": "integer", "minimum": -40, "maximum": 0 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": -40,
+              "maximum": 0
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "sinr": {
           "anyOf": [
-            { "type": "integer", "minimum": -20, "maximum": 40 },
-            { "type": "null" }
+            {
+              "type": "integer",
+              "minimum": -20,
+              "maximum": 40
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "discovery": { "type": "string", "enum": ["qmi", "at"] },
-        "manageable": { "type": "boolean" },
+        "discovery": {
+          "type": "string",
+          "enum": [
+            "qmi",
+            "at"
+          ]
+        },
+        "manageable": {
+          "type": "boolean"
+        },
         "family": {
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 64 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "imsi": {
           "anyOf": [
-            { "$ref": "#/$defs/Imsi" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Imsi"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "home_plmn": {
           "anyOf": [
-            { "$ref": "#/$defs/Plmn" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Plmn"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "serving_plmn": {
           "anyOf": [
-            { "$ref": "#/$defs/Plmn" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Plmn"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "firmware": {
           "description": "Firmware revision as the module reports it, e.g. EC20CEHCLGR06A08M1G_AUD. Both identity probes already read this to detect the family; it is carried so the cloud stops having to ask for a diagnostic report to answer 'which build is on that stick'.",
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 128 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "msisdn": {
           "description": "The card's own number, from AT+CNUM or EF_MSISDN. Frequently absent: many operators leave the field blank on the card, so null means 'the card did not say' and never 'this card has no number'.",
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 32 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "msisdn_iccid": {
+          "description": "上面那个 msisdn 是从哪张卡读出来的。null 表示这张卡还没被问出号码来。号码属于卡而不属于模组：换卡之后旧号码若继续显示，是个看起来合理的错答案，而运维正是靠号码认卡的。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Iccid"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "control_port": {
           "description": "The kernel node the agent drives this module through. Physical topology the cloud cannot otherwise see, and the first thing asked for when a stick stops answering.",
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 256 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "usb_device": {
           "description": "sysfs USB topology key, e.g. 2-4.2. Stable across tty renumbering, which the control port is not.",
           "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 64 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "apn_contexts": {
@@ -738,62 +1563,121 @@
             {
               "type": "array",
               "maxItems": 32,
-              "items": { "$ref": "#/$defs/ApnContext" }
+              "items": {
+                "$ref": "#/$defs/ApnContext"
+              }
             },
-            { "type": "null" }
+            {
+              "type": "null"
+            }
           ]
         },
         "adoption_note": {
           "description": "Why this module is being managed, as somebody wrote it down when adopting it or edited it later. Absent means nobody has written one. Carried up because the answer lived only in the agent's SQLite: the cloud could adopt a module with a note and then had no way to read it back, and the console had no way to show or change it.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         },
         "adopted_at": {
           "description": "When the module was adopted, in milliseconds since the epoch. Provenance, not an editable field: the only way to move it is to unregister and re-adopt, which is what UpdateModem exists to avoid.",
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "adopted_by": {
           "description": "Who made the decision -- `panel`, `cloud`, or `migration`. Says who, not where the code ran: both entry points share one implementation, so hard-coding either would make a cloud-issued adoption claim to have happened on the LAN panel.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 32
         },
-        "capability": { "$ref": "#/$defs/CapabilitySummary" }
+        "capability": {
+          "$ref": "#/$defs/CapabilitySummary"
+        }
       }
     },
     "DiscoveryCandidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["candidate_key", "transport", "control_port", "state"],
+      "required": [
+        "candidate_key",
+        "transport",
+        "control_port",
+        "state"
+      ],
       "properties": {
         "candidate_key": {
           "description": "What a claim addresses. Derived from the endpoint's stable USB topology rather than its Linux device name, which changes when a module re-enumerates.",
           "type": "string",
           "maxLength": 128
         },
-        "usb_device": { "$ref": "#/$defs/NullableString" },
-        "transport": { "type": "string", "enum": ["qmi", "at", "serial"] },
-        "control_port": { "type": "string", "maxLength": 128 },
-        "vendor_id": { "$ref": "#/$defs/NullableString" },
-        "product_id": { "$ref": "#/$defs/NullableString" },
+        "usb_device": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "qmi",
+            "at",
+            "serial"
+          ]
+        },
+        "control_port": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "vendor_id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "product_id": {
+          "$ref": "#/$defs/NullableString"
+        },
         "state": {
           "description": "found = seen and never written to; claimed = an operator approved a probe; the rest describe what a probe found.",
           "type": "string",
-          "enum": ["manageable", "probe_failed", "at_only", "found", "claimed"]
+          "enum": [
+            "manageable",
+            "probe_failed",
+            "at_only",
+            "found",
+            "claimed"
+          ]
         },
-        "imei": { "$ref": "#/$defs/NullableString" },
-        "detail": { "type": "string", "maxLength": 256 },
-        "last_seen": { "$ref": "#/$defs/EpochMillis" }
+        "imei": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "last_seen": {
+          "$ref": "#/$defs/EpochMillis"
+        }
       }
     },
     "RenameEsimProfileCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "iccid"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "iccid"
+      ],
       "properties": {
-        "kind": { "const": "RenameEsimProfile" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "iccid": { "$ref": "#/$defs/Iccid" },
+        "kind": {
+          "const": "RenameEsimProfile"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "iccid": {
+          "$ref": "#/$defs/Iccid"
+        },
         "nickname": {
           "description": "The new name, at most the 64 bytes SGP.22 allows. An empty string clears it, which the edge sends as an absent field rather than an empty one: a card that stores a zero-length nickname reports back a name that renders as nothing, which is not the same as having none.",
           "type": "string",
@@ -804,20 +1688,38 @@
     "DisableEsimProfileCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "iccid"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "iccid"
+      ],
       "properties": {
-        "kind": { "const": "DisableEsimProfile" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "iccid": { "$ref": "#/$defs/Iccid" }
+        "kind": {
+          "const": "DisableEsimProfile"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "iccid": {
+          "$ref": "#/$defs/Iccid"
+        }
       }
     },
     "DeleteEsimProfileCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "iccid"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "iccid"
+      ],
       "properties": {
-        "kind": { "const": "DeleteEsimProfile" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "kind": {
+          "const": "DeleteEsimProfile"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
         "iccid": {
           "description": "Which profile to remove. Irreversible: the card keeps no copy, and a profile that was paid for generally cannot be re-downloaded without the operator issuing a fresh activation code. A card refuses to delete the profile it is running on, so a disable comes first.",
           "$ref": "#/$defs/Iccid"
@@ -827,9 +1729,14 @@
     "RegisterModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "RegisterModem" },
+        "kind": {
+          "const": "RegisterModem"
+        },
         "modem_imei": {
           "description": "The module to start managing. It must be one the agent has already identified: adopting an IMEI nobody has seen would put a row in the registry that no probe can ever satisfy, and the operator would be left wondering why it is permanently offline.",
           "$ref": "#/$defs/Imei"
@@ -844,9 +1751,15 @@
     "CreateModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "family"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "family"
+      ],
       "properties": {
-        "kind": { "const": "CreateModem" },
+        "kind": {
+          "const": "CreateModem"
+        },
         "modem_imei": {
           "description": "The module to adopt without waiting for the agent to discover it. The C in this catalogue's CRUD that RegisterModem does not cover: that one refuses an IMEI the agent has not seen, which is right when the hardware is on the bus and wrong when somebody is building the register ahead of the machine arriving.",
           "$ref": "#/$defs/Imei"
@@ -858,7 +1771,10 @@
         },
         "note": {
           "description": "Why it is being created. Optional, but this is the one moment somebody can still answer it.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         }
       }
@@ -866,9 +1782,14 @@
     "UnregisterModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "UnregisterModem" },
+        "kind": {
+          "const": "UnregisterModem"
+        },
         "modem_imei": {
           "description": "The module to stop managing. History it produced is deliberately kept: unmanaging is a statement about the future, not a retraction of what the module did.",
           "$ref": "#/$defs/Imei"
@@ -878,9 +1799,14 @@
     "ReconfirmModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ReconfirmModem" },
+        "kind": {
+          "const": "ReconfirmModem"
+        },
         "modem_imei": {
           "description": "The marked module to re-run the adoption gates against. Not a way to silence the mark: the agent clears it only when the gates pass again, and otherwise keeps the mark while restarting the quarantine countdown, so somebody fixing the real cause is not raced by the grace period. Adoption provenance is never touched.",
           "$ref": "#/$defs/Imei"
@@ -890,16 +1816,24 @@
     "UpdateModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "UpdateModem" },
+        "kind": {
+          "const": "UpdateModem"
+        },
         "modem_imei": {
           "description": "The adopted module whose record is being edited.",
           "$ref": "#/$defs/Imei"
         },
         "note": {
           "description": "Why this module is being managed. Absent means clear it -- there is no way to say \"leave it alone\", because a caller who wants that does not send this command. The adoption date and who made the decision are provenance rather than fields: the only way to change them was unregister-and-re-register, which rewrites them to today, and that is what this command exists to avoid.",
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         }
       }
@@ -907,9 +1841,14 @@
     "ClaimModemCandidateCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "candidate_key"],
+      "required": [
+        "kind",
+        "candidate_key"
+      ],
       "properties": {
-        "kind": { "const": "ClaimModemCandidate" },
+        "kind": {
+          "const": "ClaimModemCandidate"
+        },
         "candidate_key": {
           "description": "Which observed endpoint to approve for an identity probe. Deliberately the only input: the command approves something the agent already saw, and taking a port or an IMEI here would let the cloud describe hardware nobody has looked at.",
           "type": "string",
@@ -920,9 +1859,14 @@
     "RevokeModemCandidateCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "candidate_key"],
+      "required": [
+        "kind",
+        "candidate_key"
+      ],
       "properties": {
-        "kind": { "const": "RevokeModemCandidate" },
+        "kind": {
+          "const": "RevokeModemCandidate"
+        },
         "candidate_key": {
           "description": "Which approved endpoint to stop probing. The mirror of ClaimModemCandidate: somebody nodded at a serial port, and this is the way to take that back. The agent refuses when the module behind it is currently managed -- revoking then would leave a registered module that nothing talks to, and that state does not announce itself.",
           "type": "string",
@@ -933,9 +1877,13 @@
     "ReadLogsCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "properties": {
-        "kind": { "const": "ReadLogs" },
+        "kind": {
+          "const": "ReadLogs"
+        },
         "after": {
           "description": "Return only lines newer than this cursor. The agent's ring is bounded, so a cursor older than what it still holds returns what remains rather than failing.",
           "type": "integer",
@@ -957,10 +1905,19 @@
     "ConfigureApnCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "cid", "apn"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "cid",
+        "apn"
+      ],
       "properties": {
-        "kind": { "const": "ConfigureApn" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
+        "kind": {
+          "const": "ConfigureApn"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
         "cid": {
           "description": "Which context to write. The same identifier AT+CGACT activates, so writing cid 1 rewrites the context the module is most likely already using.",
           "type": "integer",
@@ -970,22 +1927,42 @@
         "pdp_type": {
           "description": "IP, IPV6 or IPV4V6. Absent leaves the module's own default for the context, which is what an operator who only wants to change credentials means.",
           "type": "string",
-          "enum": ["IP", "IPV6", "IPV4V6"]
+          "enum": [
+            "IP",
+            "IPV6",
+            "IPV4V6"
+          ]
         },
-        "apn": { "type": "string", "maxLength": 128 },
-        "username": { "type": "string", "maxLength": 64 },
+        "apn": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 64
+        },
         "password": {
           "description": "Write-only. It is carried down to the module and never reported back up: the state payload has has_password and no field this could be read into.",
           "type": "string",
           "maxLength": 64
         },
-        "auth": { "type": "string", "enum": ["none", "pap", "chap", "pap_or_chap"] }
+        "auth": {
+          "type": "string",
+          "enum": [
+            "none",
+            "pap",
+            "chap",
+            "pap_or_chap"
+          ]
+        }
       }
     },
     "ApnContext": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cid"],
+      "required": [
+        "cid"
+      ],
       "properties": {
         "cid": {
           "description": "Context identifier. What AT+CGACT and the QMI profile index both address, so it is the handle for everything else.",
@@ -993,7 +1970,10 @@
           "minimum": 0,
           "maximum": 255
         },
-        "pdp_type": { "type": "string", "maxLength": 16 },
+        "pdp_type": {
+          "type": "string",
+          "maxLength": 16
+        },
         "apn": {
           "description": "Empty where the module holds a context with no name, which is a normal unconfigured slot rather than a failed read.",
           "type": "string",
@@ -1007,7 +1987,12 @@
         "auth": {
           "description": "Authentication method. Absent means it was not read, which is not the same as \"none\": a context whose method is unknown must not be shown as one that needs no password.",
           "type": "string",
-          "enum": ["none", "pap", "chap", "pap_or_chap"]
+          "enum": [
+            "none",
+            "pap",
+            "chap",
+            "pap_or_chap"
+          ]
         },
         "has_password": {
           "description": "Whether a password is set. The password itself never leaves the module -- the AT+QICSGP read returns it in clear, and the edge reduces it to this boolean at the point of parsing.",
@@ -1016,18 +2001,44 @@
         "source": {
           "description": "Where the context came from. \"configured\" means this agent wrote it and remembers doing so; absent means it is whatever the module was already carrying.",
           "type": "string",
-          "enum": ["configured"]
+          "enum": [
+            "configured"
+          ]
         }
       }
     },
     "CapabilitySummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sms_mo", "sms_mt", "matrix_version"],
+      "required": [
+        "sms_mo",
+        "sms_mt",
+        "matrix_version"
+      ],
       "properties": {
-        "sms_mo": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
-        "sms_mt": { "type": "string", "enum": ["supported", "degraded", "unsupported", "unknown"] },
-        "matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sms_mo": {
+          "type": "string",
+          "enum": [
+            "supported",
+            "degraded",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "sms_mt": {
+          "type": "string",
+          "enum": [
+            "supported",
+            "degraded",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "matrix_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
         "carrier_profile": {
           "description": "The carrier half of the matrix key, derived from the home network. Carried because it is half of what a support-ledger rule is written against, and it cannot be read off an operator name.",
           "type": "string",
@@ -1036,26 +2047,61 @@
         "origin": {
           "description": "\"rule\" when the matrix has an entry for this (family, carrier) pair, \"fallback\" when it has never heard of the combination. Deliberately not called \"measured\": a rule may say probe, which is a decision somebody took, while a fallback is nobody having considered the pair. Only the second is worth interrupting an operator about.",
           "type": "string",
-          "enum": ["rule", "fallback"]
+          "enum": [
+            "rule",
+            "fallback"
+          ]
         },
-        "reason": { "$ref": "#/$defs/NullableString" }
+        "reason": {
+          "$ref": "#/$defs/NullableString"
+        }
       }
     },
     "CommandResultPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cmd_id", "status", "completed_at", "attempts"],
+      "required": [
+        "cmd_id",
+        "status",
+        "completed_at",
+        "attempts"
+      ],
       "properties": {
-        "cmd_id": { "$ref": "#/$defs/Uuid" },
-        "status": { "type": "string", "enum": ["succeeded", "failed", "unknown", "expired", "cancelled"] },
-        "completed_at": { "$ref": "#/$defs/EpochMillis" },
-        "attempts": { "type": "integer", "minimum": 0, "maximum": 1000000 },
-        "reason_code": { "$ref": "#/$defs/NullableString" },
-        "reason": { "$ref": "#/$defs/NullableString" },
+        "cmd_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "unknown",
+            "expired",
+            "cancelled"
+          ]
+        },
+        "completed_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "reason_code": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "reason": {
+          "$ref": "#/$defs/NullableString"
+        },
         "details": {
           "anyOf": [
-            { "$ref": "#/$defs/ContextValue" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/ContextValue"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -1063,29 +2109,61 @@
     "EsimInventoryPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["modem_imei", "eid", "collected_at", "profiles"],
+      "required": [
+        "modem_imei",
+        "eid",
+        "collected_at",
+        "profiles"
+      ],
       "properties": {
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "eid": { "type": "string", "pattern": "^[0-9]{32}$" },
-        "collected_at": { "$ref": "#/$defs/EpochMillis" },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "eid": {
+          "type": "string",
+          "pattern": "^[0-9]{32}$"
+        },
+        "collected_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
         "profiles": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/EsimProfile" }
+          "items": {
+            "$ref": "#/$defs/EsimProfile"
+          }
         }
       }
     },
     "EsimProfile": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["iccid", "state"],
+      "required": [
+        "iccid",
+        "state"
+      ],
       "properties": {
-        "iccid": { "$ref": "#/$defs/Iccid" },
-        "state": { "type": "string", "enum": ["enabled", "disabled", "deleted", "unknown"] },
+        "iccid": {
+          "$ref": "#/$defs/Iccid"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "enabled",
+            "disabled",
+            "deleted",
+            "unknown"
+          ]
+        },
         "nickname": {
           "anyOf": [
-            { "type": "string", "maxLength": 256 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -1093,95 +2171,244 @@
     "AlertPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["level", "code", "message", "occurred_at", "context"],
+      "required": [
+        "level",
+        "code",
+        "message",
+        "occurred_at",
+        "context"
+      ],
       "properties": {
-        "level": { "type": "string", "enum": ["info", "warning", "error", "critical"] },
-        "code": { "type": "string", "pattern": "^[a-z0-9_]{1,128}$" },
-        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
-        "occurred_at": { "$ref": "#/$defs/EpochMillis" },
+        "level": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            "critical"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,128}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/EpochMillis"
+        },
         "context": {
           "type": "object",
           "maxProperties": 64,
-          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+          "additionalProperties": {
+            "$ref": "#/$defs/ContextValue"
+          }
         }
       }
     },
     "Command": {
       "oneOf": [
-        { "$ref": "#/$defs/SendSmsCommand" },
-        { "$ref": "#/$defs/RestartModemCommand" },
-        { "$ref": "#/$defs/SwitchEsimProfileCommand" },
-      { "$ref": "#/$defs/ListEsimProfilesCommand" },
-      { "$ref": "#/$defs/ReadEsimInfoCommand" },
-      { "$ref": "#/$defs/RetrieveEsimNotificationCommand" },
-      { "$ref": "#/$defs/InitiateEsimAuthenticationCommand" },
-      { "$ref": "#/$defs/DownloadEsimProfileCommand" },
-      { "$ref": "#/$defs/RunAtCommandCommand" },
-      { "$ref": "#/$defs/SendUssdCommand" },
-      { "$ref": "#/$defs/SetRadioCommand" },
-      { "$ref": "#/$defs/ScanOperatorsCommand" },
-      { "$ref": "#/$defs/SelectOperatorCommand" },
-      { "$ref": "#/$defs/ModemReportCommand" },
-      { "$ref": "#/$defs/ResetModemUsbCommand" },
-      { "$ref": "#/$defs/SetDataNetworkCommand" },
-      { "$ref": "#/$defs/ConfigureApnCommand" },
-      { "$ref": "#/$defs/SetUsbnetModeCommand" },
-      { "$ref": "#/$defs/ReregisterNetworkCommand" },
-      { "$ref": "#/$defs/RefreshModemsCommand" },
-      { "$ref": "#/$defs/ReadLogsCommand" },
-      { "$ref": "#/$defs/ClaimModemCandidateCommand" },
-      { "$ref": "#/$defs/RevokeModemCandidateCommand" },
-      { "$ref": "#/$defs/RegisterModemCommand" },
-      { "$ref": "#/$defs/CreateModemCommand" },
-      { "$ref": "#/$defs/UnregisterModemCommand" },
-      { "$ref": "#/$defs/ReconfirmModemCommand" },
-      { "$ref": "#/$defs/UpdateModemCommand" },
-      { "$ref": "#/$defs/RenameEsimProfileCommand" },
-      { "$ref": "#/$defs/DisableEsimProfileCommand" },
-      { "$ref": "#/$defs/DeleteEsimProfileCommand" },
-      { "$ref": "#/$defs/ConfigureProxyCommand" },
-      { "$ref": "#/$defs/ProxyLifecycleCommand" },
-      { "$ref": "#/$defs/ProbeUpstreamProxyCommand" },
-      { "$ref": "#/$defs/RotateIpCommand" },
-        { "$ref": "#/$defs/UpdateCardPolicyCommand" },
-        { "$ref": "#/$defs/UpdateCapabilityMatrixCommand" },
-        { "$ref": "#/$defs/SelfUpdateCommand" }
+        {
+          "$ref": "#/$defs/SendSmsCommand"
+        },
+        {
+          "$ref": "#/$defs/RestartModemCommand"
+        },
+        {
+          "$ref": "#/$defs/SwitchEsimProfileCommand"
+        },
+        {
+          "$ref": "#/$defs/ListEsimProfilesCommand"
+        },
+        {
+          "$ref": "#/$defs/ReadEsimInfoCommand"
+        },
+        {
+          "$ref": "#/$defs/RetrieveEsimNotificationCommand"
+        },
+        {
+          "$ref": "#/$defs/InitiateEsimAuthenticationCommand"
+        },
+        {
+          "$ref": "#/$defs/DownloadEsimProfileCommand"
+        },
+        {
+          "$ref": "#/$defs/RunAtCommandCommand"
+        },
+        {
+          "$ref": "#/$defs/SendUssdCommand"
+        },
+        {
+          "$ref": "#/$defs/SetRadioCommand"
+        },
+        {
+          "$ref": "#/$defs/ScanOperatorsCommand"
+        },
+        {
+          "$ref": "#/$defs/SelectOperatorCommand"
+        },
+        {
+          "$ref": "#/$defs/ModemReportCommand"
+        },
+        {
+          "$ref": "#/$defs/ResetModemUsbCommand"
+        },
+        {
+          "$ref": "#/$defs/SetDataNetworkCommand"
+        },
+        {
+          "$ref": "#/$defs/ConfigureApnCommand"
+        },
+        {
+          "$ref": "#/$defs/SetUsbnetModeCommand"
+        },
+        {
+          "$ref": "#/$defs/ReregisterNetworkCommand"
+        },
+        {
+          "$ref": "#/$defs/RefreshModemsCommand"
+        },
+        {
+          "$ref": "#/$defs/ReadLogsCommand"
+        },
+        {
+          "$ref": "#/$defs/ClaimModemCandidateCommand"
+        },
+        {
+          "$ref": "#/$defs/RevokeModemCandidateCommand"
+        },
+        {
+          "$ref": "#/$defs/RegisterModemCommand"
+        },
+        {
+          "$ref": "#/$defs/CreateModemCommand"
+        },
+        {
+          "$ref": "#/$defs/UnregisterModemCommand"
+        },
+        {
+          "$ref": "#/$defs/ReconfirmModemCommand"
+        },
+        {
+          "$ref": "#/$defs/UpdateModemCommand"
+        },
+        {
+          "$ref": "#/$defs/RenameEsimProfileCommand"
+        },
+        {
+          "$ref": "#/$defs/DisableEsimProfileCommand"
+        },
+        {
+          "$ref": "#/$defs/DeleteEsimProfileCommand"
+        },
+        {
+          "$ref": "#/$defs/ConfigureProxyCommand"
+        },
+        {
+          "$ref": "#/$defs/ProxyLifecycleCommand"
+        },
+        {
+          "$ref": "#/$defs/ProbeUpstreamProxyCommand"
+        },
+        {
+          "$ref": "#/$defs/RotateIpCommand"
+        },
+        {
+          "$ref": "#/$defs/UpdateCardPolicyCommand"
+        },
+        {
+          "$ref": "#/$defs/UpdateCapabilityMatrixCommand"
+        },
+        {
+          "$ref": "#/$defs/SelfUpdateCommand"
+        }
       ]
     },
     "SendSmsCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "to", "body"],
+      "required": [
+        "kind",
+        "to",
+        "body"
+      ],
       "properties": {
-        "kind": { "const": "SendSms" },
-        "to": { "type": "string", "pattern": "^\\+?[0-9]{1,15}$" },
-        "body": { "type": "string", "minLength": 1, "maxLength": 16384 },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "iccid": { "$ref": "#/$defs/Iccid" }
+        "kind": {
+          "const": "SendSms"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\+?[0-9]{1,15}$"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "iccid": {
+          "$ref": "#/$defs/Iccid"
+        }
       },
       "anyOf": [
-        { "required": ["modem_imei"] },
-        { "required": ["iccid"] }
+        {
+          "required": [
+            "modem_imei"
+          ]
+        },
+        {
+          "required": [
+            "iccid"
+          ]
+        }
       ]
     },
     "RestartModemCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "RestartModem" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "RestartModem"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "RunAtCommandCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "command"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "command"
+      ],
       "properties": {
-        "kind": { "const": "RunAtCommand" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "command": { "type": "string", "minLength": 2, "maxLength": 1024 },
-        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 300000 },
+        "kind": {
+          "const": "RunAtCommand"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 1024
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300000
+        },
         "force": {
           "description": "Send a command the agent classifies as disruptive anyway. Absent or false means the agent refuses those and answers with the classification, so that reaching a modem's radio, call, message or card state through the raw AT console is a deliberate act rather than a typo. It is not a permission: the console's own roles decide who may ask.",
           "type": "boolean"
@@ -1191,246 +2418,542 @@
     "SendUssdCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "code"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "code"
+      ],
       "properties": {
-        "kind": { "const": "SendUssd" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "code": { "type": "string", "minLength": 1, "maxLength": 182 },
-        "stage": { "type": "string", "enum": ["start", "continue", "cancel"] }
+        "kind": {
+          "const": "SendUssd"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 182
+        },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "start",
+            "continue",
+            "cancel"
+          ]
+        }
       }
     },
     "SetRadioCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "enabled"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "enabled"
+      ],
       "properties": {
-        "kind": { "const": "SetRadio" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "enabled": { "type": "boolean" }
+        "kind": {
+          "const": "SetRadio"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "ScanOperatorsCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ScanOperators" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ScanOperators"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "SelectOperatorCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "mode"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "mode"
+      ],
       "properties": {
-        "kind": { "const": "SelectOperator" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "mode": { "type": "string", "enum": ["automatic", "manual"] },
-        "plmn": { "$ref": "#/$defs/Plmn" }
+        "kind": {
+          "const": "SelectOperator"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "automatic",
+            "manual"
+          ]
+        },
+        "plmn": {
+          "$ref": "#/$defs/Plmn"
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "mode": { "const": "manual" } }, "required": ["mode"] },
-          "then": { "required": ["plmn"] }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "manual"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "plmn"
+            ]
+          }
         }
       ]
     },
     "ModemReportCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ModemReport" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ModemReport"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "ResetModemUsbCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ResetModemUsb" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ResetModemUsb"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "SetDataNetworkCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "enabled"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "enabled"
+      ],
       "properties": {
-        "kind": { "const": "SetDataNetwork" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "enabled": { "type": "boolean" }
+        "kind": {
+          "const": "SetDataNetwork"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "SetUsbnetModeCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "mode"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "mode"
+      ],
       "properties": {
-        "kind": { "const": "SetUsbnetMode" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "mode": { "type": "string", "enum": ["rmnet", "ecm", "mbim", "rndis"] }
+        "kind": {
+          "const": "SetUsbnetMode"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "rmnet",
+            "ecm",
+            "mbim",
+            "rndis"
+          ]
+        }
       }
     },
     "ReregisterNetworkCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ReregisterNetwork" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ReregisterNetwork"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "RefreshModemsCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "properties": {
-        "kind": { "const": "RefreshModems" }
+        "kind": {
+          "const": "RefreshModems"
+        }
       }
     },
     "ListEsimProfilesCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ListEsimProfiles" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ListEsimProfiles"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "ReadEsimInfoCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "ReadEsimInfo" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "ReadEsimInfo"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "RetrieveEsimNotificationCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "sequence_number"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "sequence_number"
+      ],
       "properties": {
-        "kind": { "const": "RetrieveEsimNotification" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "sequence_number": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+        "kind": {
+          "const": "RetrieveEsimNotification"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "sequence_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
       }
     },
     "InitiateEsimAuthenticationCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "InitiateEsimAuthentication" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "smdp_address": { "$ref": "#/$defs/SmdpAddress" }
+        "kind": {
+          "const": "InitiateEsimAuthentication"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "smdp_address": {
+          "$ref": "#/$defs/SmdpAddress"
+        }
       }
     },
     "DownloadEsimProfileCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "activation_code"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "activation_code"
+      ],
       "properties": {
-        "kind": { "const": "DownloadEsimProfile" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "activation_code": { "$ref": "#/$defs/ActivationCode" },
-        "confirmation_code": { "$ref": "#/$defs/ConfirmationCode" }
+        "kind": {
+          "const": "DownloadEsimProfile"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "activation_code": {
+          "$ref": "#/$defs/ActivationCode"
+        },
+        "confirmation_code": {
+          "$ref": "#/$defs/ConfirmationCode"
+        }
       }
     },
     "ConfigureProxyCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "instances", "upstreams"],
+      "required": [
+        "kind",
+        "instances",
+        "upstreams"
+      ],
       "properties": {
-        "kind": { "const": "ConfigureProxy" },
-        "instances": { "type": "array", "items": { "$ref": "#/$defs/ProxyInstanceSpec" } },
-        "upstreams": { "type": "array", "items": { "$ref": "#/$defs/ProxyUpstreamSpec" } }
+        "kind": {
+          "const": "ConfigureProxy"
+        },
+        "instances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProxyInstanceSpec"
+          }
+        },
+        "upstreams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProxyUpstreamSpec"
+          }
+        }
       }
     },
     "ProxyInstanceSpec": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["id", "modem_imei", "protocol", "listen_addr", "listen_port", "enabled"],
+      "required": [
+        "id",
+        "modem_imei",
+        "protocol",
+        "listen_addr",
+        "listen_port",
+        "enabled"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/Uuid" },
-        "name": { "type": "string", "maxLength": 128 },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "protocol": { "type": "string", "enum": ["socks5", "http"] },
-        "listen_addr": { "type": "string", "maxLength": 64 },
-        "listen_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "auth_enabled": { "type": "boolean" },
-        "username": { "type": "string", "maxLength": 128 },
-        "password": { "type": "string", "maxLength": 256 },
-        "upstream_id": { "type": "string", "maxLength": 64 },
-        "enabled": { "type": "boolean" }
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "socks5",
+            "http"
+          ]
+        },
+        "listen_addr": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "listen_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "auth_enabled": {
+          "type": "boolean"
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "password": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "upstream_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "ProxyUpstreamSpec": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["id", "address", "protocol"],
+      "required": [
+        "id",
+        "address",
+        "protocol"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/Uuid" },
-        "name": { "type": "string", "maxLength": 128 },
-        "address": { "type": "string", "maxLength": 256 },
-        "protocol": { "type": "string", "enum": ["socks5", "http"] },
-        "username": { "type": "string", "maxLength": 128 },
-        "password": { "type": "string", "maxLength": 256 },
-        "enabled": { "type": "boolean" }
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "socks5",
+            "http"
+          ]
+        },
+        "username": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "password": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "ProxyLifecycleCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "instance_id", "action"],
+      "required": [
+        "kind",
+        "instance_id",
+        "action"
+      ],
       "properties": {
-        "kind": { "const": "ProxyLifecycle" },
-        "instance_id": { "$ref": "#/$defs/Uuid" },
-        "action": { "type": "string", "enum": ["start", "stop", "restart"] }
+        "kind": {
+          "const": "ProxyLifecycle"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "start",
+            "stop",
+            "restart"
+          ]
+        }
       }
     },
     "ProbeUpstreamProxyCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "upstream_id"],
+      "required": [
+        "kind",
+        "upstream_id"
+      ],
       "properties": {
-        "kind": { "const": "ProbeUpstreamProxy" },
-        "upstream_id": { "$ref": "#/$defs/Uuid" }
+        "kind": {
+          "const": "ProbeUpstreamProxy"
+        },
+        "upstream_id": {
+          "$ref": "#/$defs/Uuid"
+        }
       }
     },
     "RotateIpCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei"],
+      "required": [
+        "kind",
+        "modem_imei"
+      ],
       "properties": {
-        "kind": { "const": "RotateIp" },
-        "modem_imei": { "$ref": "#/$defs/Imei" }
+        "kind": {
+          "const": "RotateIp"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        }
       }
     },
     "SwitchEsimProfileCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "modem_imei", "target_iccid"],
+      "required": [
+        "kind",
+        "modem_imei",
+        "target_iccid"
+      ],
       "properties": {
-        "kind": { "const": "SwitchEsimProfile" },
-        "modem_imei": { "$ref": "#/$defs/Imei" },
-        "target_iccid": { "$ref": "#/$defs/Iccid" }
+        "kind": {
+          "const": "SwitchEsimProfile"
+        },
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "target_iccid": {
+          "$ref": "#/$defs/Iccid"
+        }
       }
     },
     "UpdateCardPolicyCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "policy_version", "policies"],
+      "required": [
+        "kind",
+        "policy_version",
+        "policies"
+      ],
       "properties": {
-        "kind": { "const": "UpdateCardPolicy" },
-        "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": {
+          "const": "UpdateCardPolicy"
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
         "policies": {
           "type": "array",
           "minItems": 1,
           "maxItems": 128,
-          "items": { "$ref": "#/$defs/CardPolicy" }
+          "items": {
+            "$ref": "#/$defs/CardPolicy"
+          }
         }
       }
     },
@@ -1440,61 +2963,144 @@
       "additionalProperties": false,
       "required": [],
       "properties": {
-        "sms_send": { "type": ["boolean", "null"] },
-        "sms_receive": { "type": ["boolean", "null"] },
-        "data": { "type": ["boolean", "null"] },
-        "voice": { "type": ["boolean", "null"] }
+        "sms_send": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sms_receive": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "data": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "voice": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
       }
     },
     "CardPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["iccid", "cellular_enabled", "vertical"],
+      "required": [
+        "iccid",
+        "cellular_enabled",
+        "vertical"
+      ],
       "properties": {
-        "iccid": { "$ref": "#/$defs/Iccid" },
-        "cellular_enabled": { "type": "boolean" },
-        "vertical": { "type": "string", "enum": ["cn", "intl"] },
-        "apn": {
-          "anyOf": [
-            { "type": "string", "minLength": 1, "maxLength": 128 },
-            { "type": "null" }
+        "iccid": {
+          "$ref": "#/$defs/Iccid"
+        },
+        "cellular_enabled": {
+          "type": "boolean"
+        },
+        "vertical": {
+          "type": "string",
+          "enum": [
+            "cn",
+            "intl"
           ]
         },
-        "capability": { "$ref": "#/$defs/SubscriptionCapability" }
+        "apn": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capability": {
+          "$ref": "#/$defs/SubscriptionCapability"
+        }
       }
     },
     "UpdateCapabilityMatrixCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "matrix_version", "matrix_sha256", "matrix"],
+      "required": [
+        "kind",
+        "matrix_version",
+        "matrix_sha256",
+        "matrix"
+      ],
       "properties": {
-        "kind": { "const": "UpdateCapabilityMatrix" },
-        "matrix_version": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "matrix_sha256": { "$ref": "#/$defs/Sha256" },
+        "kind": {
+          "const": "UpdateCapabilityMatrix"
+        },
+        "matrix_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "matrix_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
         "matrix": {
           "type": "object",
           "minProperties": 1,
           "maxProperties": 4096,
-          "additionalProperties": { "$ref": "#/$defs/ContextValue" }
+          "additionalProperties": {
+            "$ref": "#/$defs/ContextValue"
+          }
         }
       }
     },
     "SelfUpdateCommand": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "version", "url", "sha256", "signature"],
+      "required": [
+        "kind",
+        "version",
+        "url",
+        "sha256",
+        "signature"
+      ],
       "properties": {
-        "kind": { "const": "SelfUpdate" },
-        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "url": { "$ref": "#/$defs/HttpsUrl" },
-        "sha256": { "$ref": "#/$defs/Sha256" },
-        "signature": { "type": "string", "minLength": 16, "maxLength": 1024, "contentEncoding": "base64" }
+        "kind": {
+          "const": "SelfUpdate"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "url": {
+          "$ref": "#/$defs/HttpsUrl"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 1024,
+          "contentEncoding": "base64"
+        }
       }
     },
     "ProtocolErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "related_message_id", "retryable"],
+      "required": [
+        "code",
+        "message",
+        "related_message_id",
+        "retryable"
+      ],
       "properties": {
         "code": {
           "type": "string",
@@ -1510,15 +3116,29 @@
             "rate_limited"
           ]
         },
-        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
         "related_message_id": {
           "anyOf": [
-            { "$ref": "#/$defs/Uuid" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "retryable": { "type": "boolean" },
-        "retry_after_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+        "retryable": {
+          "type": "boolean"
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
       }
     }
   }

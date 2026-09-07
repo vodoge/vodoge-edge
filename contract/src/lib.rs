@@ -271,8 +271,8 @@ pub struct SmsReceivedPayload {
     pub body: String,
     #[serde(rename = "received_at")]
     pub received_at: i64,
-    #[serde(rename = "iccid")]
-    pub iccid: String,
+    #[serde(rename = "iccid", default, skip_serializing_if = "Option::is_none")]
+    pub iccid: Option<String>,
     #[serde(rename = "bearer")]
     pub bearer: String,
     #[serde(rename = "encoding")]
@@ -403,6 +403,8 @@ pub struct ModemState {
     pub firmware: Option<String>,
     #[serde(rename = "msisdn", default, skip_serializing_if = "Option::is_none")]
     pub msisdn: Option<String>,
+    #[serde(rename = "msisdn_iccid", default, skip_serializing_if = "Option::is_none")]
+    pub msisdn_iccid: Option<String>,
     #[serde(rename = "control_port", default, skip_serializing_if = "Option::is_none")]
     pub control_port: Option<String>,
     #[serde(rename = "usb_device", default, skip_serializing_if = "Option::is_none")]

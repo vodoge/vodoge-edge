@@ -9533,6 +9533,86 @@ mod linux {
     }
 
     #[cfg(test)]
+    /// 上行发出去的形状，必须是契约类型接得住的形状。
+    ///
+    /// 🔴 这一族测试之前不存在，于是**两侧各自漂了**：
+    ///
+    ///   `sms_payload` 的 iccid 长期是写死的空串，而契约把它声明为
+    ///   `^[0-9]{19,20}$` 且必填 —— 一个从来没能满足过的约束。
+    ///
+    ///   `device_state_payload` 后来多送了 `msisdn_iccid`，而 `ModemState` 上有
+    ///   `deny_unknown_fields`、schema 里是 `additionalProperties: false`。
+    ///   云端网关今天不校验，所以生产没炸 —— 但契约上它是错的，谁把校验打开
+    ///   谁就把整个机队打掉。
+    ///
+    /// 把真实 payload 塞回契约类型，是唯一能同时抓住这两种漂移的地方：
+    /// 多送一个字段会被 `deny_unknown_fields` 拒绝，类型不对会被反序列化拒绝。
+    #[cfg(test)]
+    mod contract_shape_tests {
+        use super::{device_state_payload, sms_payload, Discovery, HostStats, ModemSnapshot, RadioQuality};
+        use edge_core::CapabilityMatrix;
+
+        #[test]
+        fn a_received_sms_is_a_shape_the_contract_accepts() {
+            // 读到了卡号的那一种。
+            let known = sms_payload("867018069509705", "10086", "hi", Some("8986003031401770106"), "gsm7", 7);
+            let parsed: vodoge_contract::SmsReceivedPayload =
+                serde_json::from_value(known).expect("带卡号的短信必须是契约认的形状");
+            assert_eq!(parsed.iccid.as_deref(), Some("8986003031401770106"));
+
+            // 没读到的那一种。契约必须容得下「不知道」——
+            // 一根读不出卡号的模组收到的短信，不该因此上不了行。
+            let unknown = sms_payload("867018069509705", "10086", "hi", None, "gsm7", 7);
+            let parsed: vodoge_contract::SmsReceivedPayload = serde_json::from_value(unknown)
+                .expect("读不出卡号时的短信也必须能上行 —— 契约不能要求一个保证不了的事实");
+            assert_eq!(
+                parsed.iccid, None,
+                "不知道就是 None。空串会被下游读成「这条没有卡」，是个看着合理的错答案"
+            );
+        }
+
+        #[test]
+        fn a_modem_observation_is_a_shape_the_contract_accepts() {
+            let payload = device_state_payload(
+                &CapabilityMatrix::builtin().expect("built-in matrix"),
+                &[ModemSnapshot {
+                    imei: "867018069509705".into(),
+                    state: "online",
+                    registration: "registered",
+                    family: "EC20".into(),
+                    iccid: Some("8986003031401770106".into()),
+                    card_read: edge_store::CardRead::Answered,
+                    imsi: None,
+                    home: None,
+                    serving: None,
+                    quality: RadioQuality::default(),
+                    discovery: Discovery::Qmi,
+                    usb: None,
+                    firmware: None,
+                    msisdn: None,
+                    msisdn_iccid: Some("8986003031401770106".into()),
+                    control_port: None,
+                    apn_contexts: None,
+                    manageable: true,
+                }],
+                &HostStats::default(),
+                None,
+                None,
+                None,
+                7,
+            );
+            let modem = payload["modems"][0].clone();
+            let parsed: vodoge_contract::ModemState = serde_json::from_value(modem)
+                .expect("上行的模组对象必须是契约认的形状 —— ModemState 上有 deny_unknown_fields");
+            assert_eq!(
+                parsed.msisdn_iccid.as_deref(),
+                Some("8986003031401770106"),
+                "号码读自哪张卡，是契约里该有的字段，不是偷偷多送的"
+            );
+        }
+    }
+
+    #[cfg(test)]
     mod sms_payload_tests {
         use super::sms_payload;
 
