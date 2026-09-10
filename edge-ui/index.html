@@ -287,6 +287,10 @@
          写死一个十六进制值会在另一半主题上读不清。 */
       .vd-cand-blocked {
         color: var(--colorNeutralForeground3);
+        /* thaw 的 <Text> 自带正文字号（14px 一档），而这一栏（.vd-cand）是
+           11px、同行其它文字走 Caption1（12px）。不写这一行，这句解释会比
+           它旁边的 IMEI 还大一号 —— 一句次要的说明抢了主值的视觉重量。 */
+        font-size: inherit;
         line-height: 1.45;
         flex: 1 1 260px; min-width: 0;
       }

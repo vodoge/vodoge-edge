@@ -1272,7 +1272,19 @@ mod tests {
     /// 这一页的第一个落点。
     #[test]
     fn the_empty_register_points_at_where_the_form_actually_is() {
-        let source = include_str!("status.rs");
+        // 🔴 只看**测试模块之前**的那一段。
+        //
+        // 这条断言 `include_str!` 自己所在的文件，于是它自己的字面量也在搜索
+        // 范围里 —— 而它们在本文件里的相对顺序和真货一样。把 `AdoptPage` 里的
+        // `<CreateModem/>` **整个删掉**之后，`find` 会一路落到下面这段测试代码
+        // 自己的那一份上，`form > rows` 照样成立，测试照样绿。
+        //
+        // 一条能被自己满足的断言，比没有断言更坏：它会替一个已经不存在的
+        // 控件作证。
+        let whole = include_str!("status.rs");
+        let source = &whole[..whole
+            .find("#[cfg(test)]")
+            .expect("找不到测试模块的起点：这条断言的前提没了")];
         let rows = source
             .find("AdoptionRow row=row")
             .expect("找不到册子那一段：这条断言的前提没了");

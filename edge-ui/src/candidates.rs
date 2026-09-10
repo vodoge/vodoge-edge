@@ -93,6 +93,26 @@ fn can_adopt(c: &DiscoveryBody, modems: &[String]) -> bool {
     }
 }
 
+/// 把一句话里「」引号括起来的东西抽出来 —— 那些是界面上的控件名。
+///
+/// 存在的理由是一条守卫：句子里点名的控件，界面上必须真有。抽取规则刻意简单
+/// （只认这一种引号），因为它服务的是一条断言，而不是给人读的排版。
+fn quoted_labels(sentence: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = sentence;
+    while let Some(open) = rest.find('\u{300c}') {
+        let after = &rest[open + '\u{300c}'.len_utf8()..];
+        match after.find('\u{300d}') {
+            Some(close) => {
+                out.push(after[..close].to_string());
+                rest = &after[close + '\u{300d}'.len_utf8()..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 /// 一条拦截理由的中文说法，**每一句都说到下一步做什么**。
 ///
 /// 🔴 按 `reason` 这个稳定短码映射，不翻译 agent 那句英文：那句同时进日志，
@@ -105,7 +125,7 @@ fn block_sentence(reason: &str, subject: Option<&str>, gate: Option<&str>) -> St
     let what = subject.unwrap_or("这块硬件");
     match reason {
         "unreadable_usb_identity" => "读不到它的 USB 身份，没法拿去和受支持设备列表比对。\
-             先按上面的「重新扫描」；还是读不出来，就是这根模组没有正常枚举 —— \
+             先按「重扫 USB」；还是读不出来，就是这根模组没有正常枚举 —— \
              这种十有八九是供电或线的问题，先换一个自供电的口试试。"
             .to_string(),
         "no_strategy" => format!(
@@ -137,7 +157,7 @@ fn block_sentence(reason: &str, subject: Option<&str>, gate: Option<&str>) -> St
         //    但仍然说得出现在该做什么。
         other => format!(
             "闸拒绝了它，理由是 `{other}`，这个界面还不认得这一条。\
-             先看 agent 日志里同一时刻那句话（上面的「日志」页），它写的是完整原因。"
+             去右边的「日志」栏找同一时刻那句话，它写的是完整原因。"
         ),
     }
 }
@@ -780,13 +800,57 @@ mod tests {
             );
             // 「下一步」在中文里落在一个动词上。不去数关键词——那只会逼出
             // 一句塞满关键词的废话——而是要求它至少点名一个具体去处或动作。
-            let actionable = ["重新扫描", "换", "改", "补", "等", "先", "查", "测", "看"]
+            let actionable = ["按", "换", "改", "补", "等", "先", "查", "测", "看", "去"]
                 .iter()
                 .any(|verb| sentence.contains(verb));
             assert!(
                 actionable,
                 "{reason} 的说法没有告诉运维现在该做什么：{sentence}"
             );
+        }
+    }
+
+    /// 🔴 句子里点名的每一个界面标签，界面上必须真有那个东西。
+    ///
+    /// 这条断言是拿两次真错换来的。`unreadable_usb_identity` 那一句原本写着
+    /// 「先按上面的『重新扫描』」——而那个按钮的文案是「重扫 USB」
+    /// （candidates.rs 的 RescanButton，status.rs 里既有的那句提示也是这么写的），
+    /// 界面上根本没有「重新扫描」四个字。兜底那一句原本写着「上面的『日志』页」——
+    /// 而日志是右栏一个常驻 Pane（lib.rs），既不在上面，也不是一个「页」。
+    ///
+    /// ⚠️ 更糟的是**上面那条断言当时把错标签一起钉住了**：它的动词表里写着
+    ///    「重新扫描」。一条守卫把错答案冻起来，比没有守卫更难发现。
+    ///
+    /// 所以这里不再检查「有没有动词」，而是检查**指路本身成不成立**：把句子里
+    /// 每一个「」引号里的东西抽出来，要求它在界面源码里作为一个真的渲染字符串
+    /// 出现过。编一个不存在的控件名，这条会红。
+    #[test]
+    fn every_label_the_sentence_names_exists_on_screen() {
+        // 界面的三份源码：候选页、状态页（含各种提示）、外壳（Pane 的标题）。
+        let screen = concat!(
+            include_str!("candidates.rs"),
+            include_str!("status.rs"),
+            include_str!("lib.rs"),
+        );
+
+        let cases = [
+            ("unreadable_usb_identity", None, None),
+            ("no_strategy", Some("USB 2c7c:0125"), None),
+            ("not_in_catalogue", Some("USB 2c7c:0125"), Some("absent")),
+            ("not_in_catalogue", Some("USB 2c7c:0125"), Some("disabled")),
+            ("not_identified_yet", None, None),
+            ("never_measured", Some("EC20 × 中国移动"), None),
+            ("a_reason_added_tomorrow", None, None),
+        ];
+        for (reason, subject, gate) in cases {
+            let sentence = block_sentence(reason, subject, gate);
+            for label in quoted_labels(&sentence) {
+                assert!(
+                    screen.contains(&format!("\"{label}")),
+                    "{reason} 的说法让运维去找「{label}」，而界面源码里没有这个字样 —— \
+                     指错方向的一句话，比不指路更坏"
+                );
+            }
         }
     }
 
