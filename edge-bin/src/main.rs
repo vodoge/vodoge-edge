@@ -8130,6 +8130,36 @@ mod linux {
         if let (Some(managed), Some(map)) = (managed, payload.as_object_mut()) {
             map.insert("managed_imeis".into(), serde_json::json!(managed));
         }
+        // 纳管记录本身，作为一等的上行事实。
+        //
+        // 🔴 这三样（谁、什么时候、为什么）以前只**塞在 `modems[]` 每一项里**
+        // 随观测走。对手工新建的那一类模组是致命的：它按定义就没有观测
+        // （硬件还没到），进不了 `modems[]`，于是云端只收到 `managed_imeis`
+        // 里一个裸 IMEI —— 控制台既显示不了它，也取消不了它。
+        //
+        // 「数据库里是唯一依据」要成立，这条记录必须自己走，而不是搭观测的车。
+        //
+        // ⚠️ 和 `managed_imeis` 同一条规矩：读不到注册表时这个键**根本不出现**，
+        // 而不是发一个空数组。空数组是一句 agent 没说过的话，而云端会照着它办。
+        if let (Some(rows), Some(map)) = (adoptions, payload.as_object_mut()) {
+            map.insert(
+                "adoptions".into(),
+                serde_json::json!(rows
+                    .iter()
+                    .map(|row| serde_json::json!({
+                        "modem_imei": row.imei,
+                        "adopted_at": row.registered_at,
+                        "adopted_by": row.registered_by,
+                        // 人在新建时填的型号。没有观测能补出它 —— 那正是
+                        // 这条记录要自己走的理由。
+                        "family": row.family,
+                        "adoption_note": row.note,
+                        // 当初长什么样。证据，不是查找键。
+                        "usb_device": row.usb_device,
+                    }))
+                    .collect::<Vec<_>>()),
+            );
+        }
         payload
     }
 
@@ -9571,6 +9601,40 @@ mod linux {
             );
         }
 
+        /// 顶层多出来的 `adoptions` 也必须是契约认的形状。
+        ///
+        /// 🔴 DeviceStatePayload 是 additionalProperties: false。上一次给
+        /// ModemState 偷偷多送一个字段，生产没炸只因为网关的 violations()
+        /// 只查枚举、而且只报不拒 —— 谁把校验收紧谁就把整个机队打掉。
+        /// 这条测试就是为了不再让那件事发生第二次。
+        #[test]
+        fn the_adoption_registry_is_a_shape_the_contract_accepts() {
+            let payload = device_state_payload(
+                &CapabilityMatrix::builtin().expect("built-in matrix"),
+                &[],
+                &HostStats::default(),
+                None,
+                Some(&["860000000000042".to_string()]),
+                Some(&[edge_store::RegisteredModem {
+                    imei: "860000000000042".into(),
+                    registered_at: 1_700_000_000_000,
+                    registered_by: "manual".into(),
+                    usb_device: None,
+                    family: Some("EC20".into()),
+                    note: Some("先建后到货".into()),
+                }]),
+                7,
+            );
+            let parsed: vodoge_contract::DeviceStatePayload =
+                serde_json::from_value(payload).expect("整封 DeviceState 必须是契约认的形状");
+            let rows = parsed.adoptions.expect("adoptions 应当在场");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].modem_imei, "860000000000042");
+            assert_eq!(rows[0].adopted_by, "manual");
+            assert_eq!(rows[0].family.as_deref(), Some("EC20"));
+            assert_eq!(rows[0].adoption_note.as_deref(), Some("先建后到货"));
+        }
+
         #[test]
         fn a_modem_observation_is_a_shape_the_contract_accepts() {
             let payload = device_state_payload(
@@ -9638,6 +9702,110 @@ mod linux {
                  缺席塌成了空，而这一格正是用来分辨两张卡的"
             );
             assert_ne!(unknown["iccid"], "", "空串正是这个改动要修掉的那个值");
+        }
+    }
+
+    #[cfg(test)]
+    mod adoption_uplink_tests {
+        use super::{device_state_payload, HostStats};
+        use edge_core::CapabilityMatrix;
+
+        fn matrix() -> CapabilityMatrix {
+            CapabilityMatrix::builtin().expect("built-in matrix")
+        }
+
+        fn adopted(imei: &str, by: &str, note: Option<&str>) -> edge_store::RegisteredModem {
+            edge_store::RegisteredModem {
+                imei: imei.into(),
+                registered_at: 1_700_000_000_000,
+                registered_by: by.into(),
+                usb_device: None,
+                family: Some("EC20".into()),
+                note: note.map(Into::into),
+            }
+        }
+
+        /// 纳管这件事**本身**要上行，不能只挂在观测上。
+        ///
+        /// 🔴 在这之前，「谁、什么时候、为什么纳管的」这三样是**塞在 `modems[]`
+        /// 每一项里**随观测一起走的，而顶层只有一个光秃秃的 `managed_imeis`
+        /// 字符串数组。
+        ///
+        /// 后果对一类模组是致命的：手工新建的那种**按定义就没有观测**
+        /// （硬件还没到），于是它进不了 `modems[]`，云端只收到一个裸 IMEI ——
+        /// 是谁建的、什么时候、备注写了什么，**根本没被送出去**。
+        /// 控制台因此既显示不了它，也取消不了它。
+        ///
+        /// 用户当初的话是「数据库里是唯一依据」。要让那句话成立，纳管记录必须
+        /// 自己是一等的上行事实，而不是观测的附属品。
+        #[test]
+        fn the_registry_travels_even_for_hardware_that_was_never_seen() {
+            let payload = device_state_payload(
+                &matrix(),
+                // 一根都没观测到 —— 手工新建的那一根正是这个处境。
+                &[],
+                &HostStats::default(),
+                None,
+                Some(&["860000000000042".to_string()]),
+                Some(&[adopted("860000000000042", "manual", Some("先建后到货"))]),
+                7,
+            );
+            let map = payload.as_object().expect("payload is a map");
+
+            let rows = map
+                .get("adoptions")
+                .and_then(|v| v.as_array())
+                .expect("纳管记录必须自己上行，不能只挂在观测里");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["modem_imei"], "860000000000042");
+            assert_eq!(
+                rows[0]["adopted_by"], "manual",
+                "「谁纳管的」是这条记录的全部意义之一，不能丢"
+            );
+            assert_eq!(rows[0]["adoption_note"], "先建后到货");
+            assert_eq!(rows[0]["adopted_at"], 1_700_000_000_000i64);
+            assert_eq!(
+                rows[0]["family"], "EC20",
+                "手工新建时人填的型号 —— 没有观测能补出它"
+            );
+        }
+
+        /// 读不到注册表时，这个键必须**根本不出现**。
+        ///
+        /// 和 `managed_imeis` 同一条规矩：写一个空数组等于替 agent 说
+        /// 「这台机器一根都没纳管」，而云端会照着它把整台设备清空。
+        #[test]
+        fn a_failed_registry_read_omits_the_adoptions_key() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                None,
+                None,
+                None,
+                7,
+            );
+            assert!(
+                !payload.as_object().expect("map").contains_key("adoptions"),
+                "读不到就不要说话 —— 空数组是一句它没说过的话"
+            );
+        }
+
+        /// 「一根都没纳管」是一句真话，要发。
+        #[test]
+        fn an_empty_registry_is_a_statement_and_is_sent_too() {
+            let payload = device_state_payload(
+                &matrix(),
+                &[],
+                &HostStats::default(),
+                None,
+                Some(&[]),
+                Some(&[]),
+                7,
+            );
+            let map = payload.as_object().expect("map");
+            assert!(map.contains_key("adoptions"));
+            assert_eq!(map["adoptions"].as_array().map(Vec::len), Some(0));
         }
     }
 

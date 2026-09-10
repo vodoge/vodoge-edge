@@ -1215,6 +1215,13 @@
             "$ref": "#/$defs/Imei"
           }
         },
+        "adoptions": {
+          "description": "这台机器的纳管册子，完整一份。 和 `managed_imeis` 同一条规矩：读不到注册表时这个键**根本不出现**， 而不是发一个空数组 —— 空数组是一句 agent 没说过的话， 而云端会照着它把整台设备的纳管清掉。空数组只在「确实一根都没纳管」时发。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Adoption"
+          }
+        },
         "discoveries": {
           "description": "Modem-shaped endpoints the agent has seen but has not been told to probe. Carried so the cloud can approve one: the edge panel could always show and claim these, and an operator who works from the console had no way to see that a new stick had been plugged in at all.",
           "type": "array",
@@ -1222,6 +1229,65 @@
           "items": {
             "$ref": "#/$defs/DiscoveryCandidate"
           }
+        }
+      }
+    },
+    "Adoption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modem_imei",
+        "adopted_at",
+        "adopted_by"
+      ],
+      "description": "一条纳管记录：谁、什么时候、为什么把这个 IMEI 收进管理。 这是一个**决定**，不是一次观测 —— 所以它自己上行，不搭 `modems` 的车。 手工新建的模组按定义没有观测（硬件还没到），它只能从这里到达云端； 在这个数组出现之前，它在上行里只是 `managed_imeis` 中一个裸 IMEI， 谁建的、备注写了什么都收不到，控制台因此既显示不了也取消不了它。",
+      "properties": {
+        "modem_imei": {
+          "$ref": "#/$defs/Imei"
+        },
+        "adopted_at": {
+          "description": "决定作出的时刻，Unix 毫秒。",
+          "type": "integer"
+        },
+        "adopted_by": {
+          "description": "谁做的决定：panel / cloud / migration / manual。",
+          "type": "string",
+          "minLength": 1
+        },
+        "family": {
+          "description": "型号。手工新建时由人填 —— 没有任何观测能补出它，这正是这条记录必须自己走的理由之一。 null 表示当初没填。",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adoption_note": {
+          "description": "运维当时写下的理由。null 表示没写，不是「写了空的」。",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usb_device": {
+          "description": "纳管当时它在哪个 USB 位置。**证据，不是查找键** —— 位置会变，IMEI 不会。",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },

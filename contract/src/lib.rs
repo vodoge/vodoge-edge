@@ -337,8 +337,27 @@ pub struct DeviceStatePayload {
     pub host: Option<HostState>,
     #[serde(rename = "managed_imeis", default, skip_serializing_if = "Option::is_none")]
     pub managed_imeis: Option<Vec<String>>,
+    #[serde(rename = "adoptions", default, skip_serializing_if = "Option::is_none")]
+    pub adoptions: Option<Vec<Adoption>>,
     #[serde(rename = "discoveries", default, skip_serializing_if = "Option::is_none")]
     pub discoveries: Option<Vec<DiscoveryCandidate>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Adoption {
+    #[serde(rename = "modem_imei")]
+    pub modem_imei: String,
+    #[serde(rename = "adopted_at")]
+    pub adopted_at: i64,
+    #[serde(rename = "adopted_by")]
+    pub adopted_by: String,
+    #[serde(rename = "family", default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(rename = "adoption_note", default, skip_serializing_if = "Option::is_none")]
+    pub adoption_note: Option<String>,
+    #[serde(rename = "usb_device", default, skip_serializing_if = "Option::is_none")]
+    pub usb_device: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
