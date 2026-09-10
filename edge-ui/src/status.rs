@@ -484,7 +484,16 @@ pub fn AdoptPage(state: StatusState) -> impl IntoView {
     view! {
         <div class="vd-adoptions">
             <Caption1>"纳管记录 · 备注可改，日期和来源是履历"</Caption1>
-            <CreateModem state=state />
+            // 🔴 册子在前，手工新建在后。
+            //
+            // 原来是反的，而那个顺序把最少用、也最危险的一条路放在了第一个
+            // 落点上：手工建一条**绕过两道闸**（没有观测就没有 USB 身份、
+            // 没有归属网，闸无从判起），它在册子上留下的行要等硬件真出现的
+            // 那一轮才第一次被判定。
+            //
+            // 运维打开这一页十次有九次是来看「现在管着哪几根」的。把答案摆在
+            // 表单后面，等于每次都要先跨过一个自己用不上、且按错了会留下一行
+            // 没过闸记录的输入框。
             {move || {
                 let rows = match state.load.get() {
                     Load::Ready(body) => body.adoptions,
@@ -495,7 +504,7 @@ pub fn AdoptPage(state: StatusState) -> impl IntoView {
                 if rows.is_empty() {
                     return view! {
                         <Caption1 class="vd-faint">
-                            "册子上还没有任何一条。上面那个表单可以手工建第一条。"
+                            "册子上还没有任何一条。下面那个表单可以手工建第一条。"
                         </Caption1>
                     }
                         .into_any();
@@ -505,6 +514,7 @@ pub fn AdoptPage(state: StatusState) -> impl IntoView {
                     .collect_view()
                     .into_any()
             }}
+            <CreateModem state=state />
         </div>
     }
 }
@@ -1250,6 +1260,39 @@ pub fn answering(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// 空册子那句话指的方向，必须和表单实际在的位置一致。
+    ///
+    /// ⚠️ 这两样在源码里隔着三十行，改动其中一个不会让另一个报错 ——
+    ///    正是会悄悄漂移的形状，而漂移之后最难被发现：一句语法正确、读起来
+    ///    完全正常、只是把人指错了方向的话。
+    ///
+    /// 顺序本身也是这条断言的一半：册子在前、手工新建在后。手工建一条
+    /// **绕过两道闸**（没有观测就没有 USB 身份也没有归属网），它不该占住
+    /// 这一页的第一个落点。
+    #[test]
+    fn the_empty_register_points_at_where_the_form_actually_is() {
+        let source = include_str!("status.rs");
+        let rows = source
+            .find("AdoptionRow row=row")
+            .expect("找不到册子那一段：这条断言的前提没了");
+        let form = source
+            .find("<CreateModem state=state />")
+            .expect("找不到手工新建表单");
+        assert!(
+            form > rows,
+            "手工新建又跑到册子前面去了 —— 那条路绕过两道闸，不该是第一个落点"
+        );
+
+        let empty = source
+            .find("册子上还没有任何一条")
+            .expect("找不到空册子那句话");
+        let sentence: String = source[empty..].chars().take(40).collect();
+        assert!(
+            sentence.contains("下面"),
+            "表单在册子下面，那句话却把人往上指：{sentence}"
+        );
+    }
 
     /// 本机号空着的时候，屏幕上得说清是哪一种空。
     ///

@@ -99,6 +99,33 @@ pub struct GateFailureBody {
     pub passes: u32,
 }
 
+/// 这个候选**现在按下「纳管」会被哪一道闸拒**。
+///
+/// 🔴 它存在的理由是按钮在说谎。`can_adopt` 只查了两件事（有 IMEI、还没被管），
+///    而真正的判定是 `edge_core::bind_gates` 的两道闸。于是一根这个 build
+///    根本驱动不了的硬件，按钮照样是亮的，按下去才拿到一句英文报错 ——
+///    而那一刻运维已经以为自己纳管成功了。
+///
+/// `None` 是「这一根现在能纳管」。判定由 agent 用**和真纳管完全相同的那次
+/// 调用**算出来（同一个 `bind_gates`、同一份候选行、同一份矩阵），所以预览和
+/// 结果不会分家。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdoptBlockBody {
+    /// `BindRefusal::wire()` —— 稳定短码。
+    ///
+    /// ⚠️ 界面按这个值映射中文，**不翻译** agent 那边的英文句子：那些句子
+    /// 同时进日志，改一次措辞就会让界面上的文案跟着变，而两边的读者不同。
+    pub reason: String,
+    /// 这条理由里随实例变化的那部分（哪块硬件 / 哪一对），已经格式化好。
+    ///
+    /// `None` 表示这条理由本来就没有实例部分，不是没取到。
+    pub subject: Option<String>,
+    /// 只有 `not_in_catalogue` 有：`absent`（没人加过）还是 `disabled`
+    /// （有人明确停用）。两者的下一步不一样，而 `reason` 把它们合成了一个码。
+    #[serde(default)]
+    pub gate: Option<String>,
+}
+
 /// 一条被自动摘掉的纳管履历。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetirementBody {
@@ -198,6 +225,13 @@ pub struct DiscoveryBody {
     pub family: Option<String>,
     pub detail: String,
     pub last_seen: i64,
+    /// 现在按「纳管」会被拒的话，是哪一条理由。`None` = 能纳管。
+    ///
+    /// `serde(default)` 是给旧 agent 留的：面板是内嵌进 agent 的，两边一起
+    /// 发版，但本地开发时会出现新界面对旧 agent 的组合，那时缺这个键
+    /// 应当回到「不知道，按老样子放行」，而不是整条候选行反序列化失败。
+    #[serde(default)]
+    pub adopt_block: Option<AdoptBlockBody>,
 }
 
 /// `GET /api/messages` — the SMS the agent has cached locally.

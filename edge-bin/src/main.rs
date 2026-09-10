@@ -173,6 +173,31 @@ mod linux {
             Ok(out)
         }
 
+        /// 每个候选现在按下「纳管」会撞上哪一道闸。
+        ///
+        /// 🔴 这里刻意**不重写**判定，而是调 `register_modem` 用的那两样：
+        ///    `adoption_inputs`（从候选行凑闸的两个输入）和
+        ///    `edge_core::bind_gates`。按钮说的和闸做的必须是同一句话 ——
+        ///    分开写两遍，分家的样子正好是最坏的那种：亮着的按钮，按下去被拒。
+        ///
+        /// ⚠️ 矩阵是**调用方传进来的那一份**，不在这里另取：面板此刻正按着
+        ///    这一份画能力格，云端推一份新的下来时，按钮和能力格必须同时改变。
+        fn adoption_blocks(
+            &self,
+            candidates: &[edge_store::LocalModemDiscovery],
+            matrix: &edge_core::CapabilityMatrix,
+        ) -> std::collections::BTreeMap<String, edge_core::BindRefusal> {
+            let mut out = std::collections::BTreeMap::new();
+            for candidate in candidates {
+                let (usb, pair) = adoption_inputs(candidate);
+                if let Err(refusal) = edge_core::bind_gates(strategy_registry(), matrix, usb, pair)
+                {
+                    out.insert(candidate.candidate_key.clone(), refusal);
+                }
+            }
+            out
+        }
+
         fn retro_enforcing(&self) -> bool {
             // 同一个函数，不是同一条规则的第二份抄写。
             enforce_mode() == EnforceMode::Unbind
@@ -9086,7 +9111,7 @@ mod linux {
 
     #[cfg(test)]
     mod adoption_tests {
-        use super::{adoption_inputs, strategy_registry};
+        use super::{adoption_inputs, strategy_registry, SharedStore};
         use edge_core::{bind_gates, CapabilityMatrix};
 
         fn candidate(imei: &str) -> edge_store::LocalModemDiscovery {
@@ -9125,6 +9150,59 @@ mod linux {
             assert!(
                 bind_gates(strategy_registry(), &matrix, usb, pair).is_ok(),
                 "一根候选表里已识别的 EC20 + 中国移动，两道闸都该放行"
+            );
+        }
+
+        /// 🔴 按钮问的和闸答的，必须是同一句话。
+        ///
+        /// `can_adopt` 原来只查两件事（有 IMEI、还没被管），而真正决定成败的是
+        /// 这两道闸。于是一根这个 build 根本驱不动的硬件，按钮是亮的、还带着
+        /// 写理由的输入框，运维填完按下去才拿到一句英文报错。
+        ///
+        /// ⚠️ 这条断言刻意**两边都跑**：一边是面板拿去点亮/熄灭按钮的
+        ///    `adoption_blocks`，一边是真纳管路径用的 `bind_gates`。
+        ///    只测其中一边的话，把预览重写成另一套判断照样能通过 ——
+        ///    而「重写成另一套」正是按钮当初说谎的方式。
+        #[test]
+        fn the_preview_and_the_gate_give_the_same_answer() {
+            use edge_panel::Inbox as _;
+
+            let matrix = CapabilityMatrix::builtin().expect("内置矩阵");
+            let store = SharedStore(std::sync::Mutex::new(
+                edge_store::Store::open_in_memory().expect("内存 store"),
+            ));
+
+            // 一块这个 build 没有策略驱动的硬件。IMEI 报出来了、也没被管，
+            // 所以旧的 can_adopt 会认为它可以纳管。
+            let mut undriven = candidate("867018069509705");
+            undriven.candidate_key = "usb1/9-9".into();
+            undriven.vendor_id = Some("dead".into());
+            undriven.product_id = Some("beef".into());
+
+            let ok = candidate("867018069514820");
+
+            let blocks = store.adoption_blocks(&[undriven.clone(), ok.clone()], &matrix);
+
+            // 放行的那一根**不在表里**：缺席就是「能纳管」。
+            assert!(
+                !blocks.contains_key(&ok.candidate_key),
+                "两道闸都放行的候选被标成了拦截"
+            );
+
+            // 被拒的那一根在表里，键是 candidate_key —— 界面按这个键连行，
+            // 而不是 IMEI：一个还没报出 IMEI 的候选同样有键。
+            let seen = blocks
+                .get(&undriven.candidate_key)
+                .expect("闸会拒的候选没有被标出来 —— 按钮又会亮着骗人");
+
+            // 而且是同一个答案：拿真纳管那条路上的同一次调用再算一遍。
+            let (usb, pair) = adoption_inputs(&undriven);
+            let verdict = bind_gates(strategy_registry(), &matrix, usb, pair)
+                .expect_err("这块硬件本来就该被闸 1 拒掉，测试前提没了");
+            assert_eq!(
+                seen.wire(),
+                verdict.wire(),
+                "预览说的理由和闸判的理由不是同一条"
             );
         }
 

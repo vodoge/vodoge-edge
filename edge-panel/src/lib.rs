@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edge_core::{CapabilityMatrix, CarrierProfile, ModemFamily, Network};
 use edge_panel_api::{
-    AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
+    AdoptBlockBody, AtBody, ClaimCandidateBody, ClaimReceipt, DiscoveryBody, GateFailureBody, LogsBody,
     MessageBody, MessagesBody, ModemBody, PanelMode, RadioBody, RadioReceipt, RegistrationBody,
     RescanReceipt, ResetBody, RestartBody, RestartReceipt, RetirementBody, SendBody, SendReceipt,
     ModemCreateBody, ModemUpdateBody, RevokeReceipt, StatusBody, SwitchBody, SwitchReceipt, UssdBody,
@@ -93,6 +93,25 @@ pub trait Inbox: Send + Sync {
     /// 那和「一根都没被标记」在显示上是同一件事。
     fn list_gate_failures(&self) -> Result<BTreeMap<String, GateFailure>, PanelError> {
         Ok(BTreeMap::new())
+    }
+
+    /// 每个候选**现在按下「纳管」会撞上哪一道闸**，按 candidate_key。
+    ///
+    /// 🔴 判定必须和真纳管走同一次 `edge_core::bind_gates` 调用、同一份候选行、
+    ///    同一份矩阵。分成两处算就会分家，而分家的样子正好是最坏的那种：
+    ///    按钮亮着，按下去被拒。
+    ///
+    /// 参数是调用方**已经读出来的**那批行，不在这里重读一次：重读会引入一个
+    /// 会失败的读，而一次读失败只能降级成「没有拦截」——也就是把按钮重新点亮。
+    ///
+    /// 默认返回空 = 「这个 Inbox 不评估闸」，和今天的行为一致（edge-panel 自己
+    /// 的内存 fixture 没有矩阵，也没有 strategy registry）。
+    fn adoption_blocks(
+        &self,
+        _candidates: &[LocalModemDiscovery],
+        _matrix: &CapabilityMatrix,
+    ) -> BTreeMap<String, edge_core::BindRefusal> {
+        BTreeMap::new()
     }
 
     /// 被追溯执行摘掉的纳管履历。
@@ -571,7 +590,16 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                     modem_body(modem, now, is_busy, &matrix, gate)
                 })
                 .collect(),
-            discoveries: discoveries.into_iter().map(discovery_body).collect(),
+            discoveries: {
+                let blocks = state.inbox.adoption_blocks(&discoveries, &matrix);
+                discoveries
+                    .into_iter()
+                    .map(|value| {
+                        let block = blocks.get(&value.candidate_key).cloned();
+                        discovery_body(value, block)
+                    })
+                    .collect()
+            },
             retirements: retirements.into_iter().map(retirement_body).collect(),
             retro_enforcing: state.inbox.retro_enforcing(),
             // 读不到就给空表，不让整个状态页跟着 500：这一份是「当初的决定」，
@@ -1166,7 +1194,10 @@ fn retirement_body(value: Retirement) -> RetirementBody {
     }
 }
 
-fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {
+fn discovery_body(
+    value: LocalModemDiscovery,
+    block: Option<edge_core::BindRefusal>,
+) -> DiscoveryBody {
     {
         DiscoveryBody {
             candidate_key: value.candidate_key,
@@ -1180,6 +1211,13 @@ fn discovery_body(value: LocalModemDiscovery) -> DiscoveryBody {
             family: value.family,
             detail: value.detail,
             last_seen: value.last_seen,
+            // 只送稳定短码和实例值，不送 agent 那句英文：那句同时进日志，
+            // 而日志的读者和面板的读者不是同一批人（见 `BindRefusal::subject`）。
+            adopt_block: block.map(|refusal| AdoptBlockBody {
+                reason: refusal.wire().to_string(),
+                subject: refusal.subject(),
+                gate: refusal.gate().map(|gate| gate.wire().to_string()),
+            }),
         }
     }
 }

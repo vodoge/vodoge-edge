@@ -73,11 +73,72 @@ fn can_claim(c: &DiscoveryBody) -> bool {
     c.transport == "serial" && state_key(&c.state) == "found" && !c.candidate_key.is_empty()
 }
 
-/// 纳管的前提是它已经报出过 IMEI，而且还不在管理列表里。
+/// 纳管的前提是它已经报出过 IMEI、还不在管理列表里，**而且两道闸放行**。
+///
+/// 🔴 第三个条件是后加的，而它才是这个函数原来在说谎的地方。前两条是这个
+///    界面自己能看出来的事实，真正决定成败的却是 `edge_core::bind_gates` 的
+///    两道闸（这个 build 驱不驱得动这块硬件、这一对测没测过）。少了它，
+///    一根注定被拒的候选，按钮是亮的、还带着写理由的输入框，运维填完按下去
+///    才拿到一句英文报错 —— 而那一刻他已经以为自己纳管完了。
+///
+/// 判定不在这里做：wasm 里既没有 strategy registry 也没有矩阵。agent 用
+/// **和真纳管完全相同的那次调用**算好，随候选行一起送下来。
 fn can_adopt(c: &DiscoveryBody, modems: &[String]) -> bool {
+    if c.adopt_block.is_some() {
+        return false;
+    }
     match c.imei.as_deref() {
         Some(imei) if !imei.is_empty() => !modems.iter().any(|m| m == imei),
         _ => false,
+    }
+}
+
+/// 一条拦截理由的中文说法，**每一句都说到下一步做什么**。
+///
+/// 🔴 按 `reason` 这个稳定短码映射，不翻译 agent 那句英文：那句同时进日志，
+///    改一次措辞界面就跟着变，而两边的读者不是同一批人。这条规矩写在
+///    `BindRefusal` 的 `Display` 注释里。
+///
+/// ⚠️ 兜底那一支也必须说出「现在怎么办」。一个只写「未知原因」的兜底，
+///    和把按钮留着亮一样没用 —— 运维在屏幕前，需要的是下一个动作。
+fn block_sentence(reason: &str, subject: Option<&str>, gate: Option<&str>) -> String {
+    let what = subject.unwrap_or("这块硬件");
+    match reason {
+        "unreadable_usb_identity" => "读不到它的 USB 身份，没法拿去和受支持设备列表比对。\
+             先按上面的「重新扫描」；还是读不出来，就是这根模组没有正常枚举 —— \
+             这种十有八九是供电或线的问题，先换一个自供电的口试试。"
+            .to_string(),
+        "no_strategy" => format!(
+            "这个 build 里没有任何策略能驱动 {what}。现在纳管它，只会在册子上留下一行\
+             任何探测都满足不了的记录。要支持它得改代码再发版，换一根已支持的模组更快。"
+        ),
+        "not_in_catalogue" => match gate {
+            // 两件事的下一步完全不同，所以不合成一句（理由写在
+            // `BindRefusal::NotInCatalogue` 的定义处）。
+            Some("disabled") => format!(
+                "{what} 在受支持设备列表里被**明确停用**了。这个 build 驱动得了它，\
+                 所以要改的是目录不是 agent —— 先查清当初是谁、为什么把它关掉，\
+                 确实该放开再去改目录。目录是数据，改完不用发版。"
+            ),
+            _ => format!(
+                "{what} 不在受支持设备列表里。这个 build 驱动得了它，缺的只是目录里\
+                 那一条 —— 补上就能纳管，不用改 agent，也不用发版。"
+            ),
+        },
+        "not_identified_yet" => "型号和归属网络还没同时读到，凑不出闸要查的那一对。\
+             这通常是暂时的：等下一轮探测（几秒钟一轮）就有了。一直不出现的话，\
+             多半是卡没插到位或者还没注册上网。"
+            .to_string(),
+        "never_measured" => format!(
+            "{what} 这一对从来没有过真实测量。先在这台机器上把它测一遍、把结果记进\
+             支持台账，再纳管依赖它的硬件 —— 没测过就纳管，等于拿现场当测试场。"
+        ),
+        // ⚠️ agent 加了新的拒绝理由而这里还没跟上时走到这里。说不出是哪一条，
+        //    但仍然说得出现在该做什么。
+        other => format!(
+            "闸拒绝了它，理由是 `{other}`，这个界面还不认得这一条。\
+             先看 agent 日志里同一时刻那句话（上面的「日志」页），它写的是完整原因。"
+        ),
     }
 }
 
@@ -408,6 +469,25 @@ fn Row(
     let skey = state_key(&c.state);
     let claimable = can_claim(&c);
     let adoptable = can_adopt(&c, &managed);
+    // 被闸拦下的那条理由，画在这一行上。
+    //
+    // 🔴 已经在管的不画：那一根的闸状态由「追溯执行」那套负责（modems 页上的
+    //    闸标记），在候选页再画一遍会让人以为它掉出管理了。这里只回答
+    //    「我为什么按不下纳管」。
+    let already_managed = c
+        .imei
+        .as_deref()
+        .is_some_and(|imei| managed.iter().any(|m| m == imei));
+    let blocked = (!already_managed)
+        .then(|| c.adopt_block.as_ref())
+        .flatten()
+        .map(|block| {
+            block_sentence(
+                &block.reason,
+                block.subject.as_deref(),
+                block.gate.as_deref(),
+            )
+        });
     let imei = c.imei.clone().unwrap_or_default();
     // 视图和动作各拿一份：动作那份会被闭包 move 走。
     let imei_shown = imei.clone();
@@ -605,6 +685,21 @@ fn Row(
                                 </Button>
                             }
                         })}
+                    // 被闸拦下时：这一行照样画，按钮照样在原位 —— 只是按不动，
+                    // 旁边写清为什么、以及现在该做哪一件事。
+                    //
+                    // 🔴 不把行藏起来。藏起来运维会以为这根硬件没被看见，
+                    //    转头去拔插、去重扫 —— 而机器其实早就看见了它，
+                    //    并且已经知道答案。
+                    {blocked
+                        .map(|sentence| {
+                            view! {
+                                <Button appearance=ButtonAppearance::Secondary disabled=true>
+                                    "纳管"
+                                </Button>
+                                <Text class="vd-cand-blocked">{sentence}</Text>
+                            }
+                        })}
                 </Flex>
             </div>
             </div>
@@ -614,6 +709,7 @@ fn Row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edge_panel_api::AdoptBlockBody;
 
     fn candidate() -> DiscoveryBody {
         DiscoveryBody {
@@ -628,7 +724,81 @@ mod tests {
             family: Some("EC20".into()),
             detail: "no identity yet".into(),
             last_seen: 0,
+            adopt_block: None,
         }
+    }
+
+    fn blocked(reason: &str, subject: Option<&str>, gate: Option<&str>) -> AdoptBlockBody {
+        AdoptBlockBody {
+            reason: reason.into(),
+            subject: subject.map(str::to_owned),
+            gate: gate.map(str::to_owned),
+        }
+    }
+
+    /// 🔴 闸会拒的候选，「纳管」不能是亮的。
+    ///
+    /// 这一条钉的是这个函数原来在说谎的地方：有 IMEI、不在管理列表里，
+    /// 于是按钮亮着 —— 而真正决定成败的两道闸在 agent 那边已经算出「拒」。
+    /// 运维填完备注按下去，才拿到一句英文报错。
+    #[test]
+    fn a_candidate_the_gate_will_refuse_does_not_get_a_bright_button() {
+        let mut c = candidate();
+        c.imei = Some("867018069509705".into());
+        // 前两个条件都满足：报过 IMEI，也不在管理列表里。
+        assert!(can_adopt(&c, &[]), "测试前提没了：这一根本来该是可纳管的");
+
+        c.adopt_block = Some(blocked("no_strategy", Some("USB dead:beef"), None));
+        assert!(
+            !can_adopt(&c, &[]),
+            "闸已经判了拒，按钮还是亮的 —— 按下去必然失败"
+        );
+    }
+
+    /// 每一条理由都要说出**现在做什么**，兜底那一条也要。
+    ///
+    /// ⚠️ 一句只写「未知原因」的兜底，和把按钮留着亮一样没用：运维在屏幕前，
+    ///    需要的是下一个动作。所以这里连一个 agent 新加、界面还不认得的码
+    ///    一起测。
+    #[test]
+    fn every_refusal_says_what_to_do_next() {
+        let cases = [
+            ("unreadable_usb_identity", None, None),
+            ("no_strategy", Some("USB 2c7c:0125"), None),
+            ("not_in_catalogue", Some("USB 2c7c:0125"), Some("absent")),
+            ("not_in_catalogue", Some("USB 2c7c:0125"), Some("disabled")),
+            ("not_identified_yet", None, None),
+            ("never_measured", Some("EC20 × 中国移动"), None),
+            // agent 加了新理由、界面还没跟上的那一天。
+            ("a_reason_added_tomorrow", None, None),
+        ];
+        for (reason, subject, gate) in cases {
+            let sentence = block_sentence(reason, subject, gate);
+            assert!(
+                sentence.chars().count() > 20,
+                "{reason} 的说法太短，不可能既说清原因又说出下一步：{sentence}"
+            );
+            // 「下一步」在中文里落在一个动词上。不去数关键词——那只会逼出
+            // 一句塞满关键词的废话——而是要求它至少点名一个具体去处或动作。
+            let actionable = ["重新扫描", "换", "改", "补", "等", "先", "查", "测", "看"]
+                .iter()
+                .any(|verb| sentence.contains(verb));
+            assert!(
+                actionable,
+                "{reason} 的说法没有告诉运维现在该做什么：{sentence}"
+            );
+        }
+    }
+
+    /// `absent` 和 `disabled` 不能合成一句。
+    ///
+    /// 一个是没人加过（去目录里补一条），一个是有人明确停用（先问清为什么）。
+    /// `wire()` 为了云端分组把它们合成了一个码，界面这一层必须把它分回来。
+    #[test]
+    fn nobody_added_it_and_somebody_switched_it_off_are_different_sentences() {
+        let absent = block_sentence("not_in_catalogue", Some("USB 2c7c:0125"), Some("absent"));
+        let disabled = block_sentence("not_in_catalogue", Some("USB 2c7c:0125"), Some("disabled"));
+        assert_ne!(absent, disabled, "两件下一步完全不同的事被写成了同一句话");
     }
 
     /// 认领只对串口候选有意义，而且只在它还没被探测过的时候。

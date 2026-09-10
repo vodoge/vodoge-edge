@@ -93,6 +93,46 @@ impl BindRefusal {
         }
     }
 
+    /// 这条理由里**随实例变化**的那一部分，格式化好。
+    ///
+    /// `wire()` 刻意不含它（云端要按标签分组统计）。可界面上一句
+    /// 「这个 build 里没有策略驱动它」而不说是哪一块硬件，运维还得自己
+    /// 回去翻 USB 身份 —— 而那一格就在同一行上。
+    ///
+    /// ⚠️ 返回 `None` 的两条是**真的没有**实例部分，不是没取到：
+    /// USB 身份读不出来，和型号／归属网还没读到，句子里本来就没有可填的值。
+    ///
+    /// 🔴 给界面的中文是按 `wire()` 映射出来的，不是翻译 `Display`。
+    ///    那条规矩写在 `Display` 的注释里，这个方法是让它做得到的那一半：
+    ///    句子在界面，值在这里，两边不用互相解析对方的字符串。
+    pub fn subject(&self) -> Option<String> {
+        // ⚠️ 穷举，理由同 `kind()`：加变体时这里必须编译失败。
+        match self {
+            Self::UnreadableUsbIdentity | Self::NotIdentifiedYet => None,
+            Self::NoStrategy(identity) => Some(identity.to_string()),
+            Self::NotInCatalogue { usb, .. } => Some(usb.to_string()),
+            Self::NeverMeasured { family, carrier } => Some(format!("{family} × {carrier}")),
+        }
+    }
+
+    /// `not_in_catalogue` 这一条里，是**没人加过**还是**有人明确停用**。
+    ///
+    /// 🔴 `wire()` 把两者合成了一个码（云端要按标签分组），可这两件事的下一步
+    ///    不一样：一个是去目录里加一条，一个是去问「当初是谁、为什么关掉它」。
+    ///    这个仓库在 `NotInCatalogue` 的定义处就写下了要分开，那条规矩需要一个
+    ///    过得去的出口，否则界面上只能合成一句，等于把它悄悄取消掉。
+    ///
+    /// 其它变体没有这一位，返回 `None`。
+    pub fn gate(&self) -> Option<crate::DeviceGate> {
+        match self {
+            Self::NotInCatalogue { gate, .. } => Some(*gate),
+            Self::UnreadableUsbIdentity
+            | Self::NoStrategy(_)
+            | Self::NotIdentifiedYet
+            | Self::NeverMeasured { .. } => None,
+        }
+    }
+
     /// 这条拒绝是证据不足，还是一个真判定。
     pub fn kind(&self) -> RefusalKind {
         // ⚠️ 穷举，不要加 `_ => `。给 `BindRefusal` 添新变体时这里必须
