@@ -435,9 +435,27 @@ pub fn device_id(dir: impl AsRef<Path>, fallback: &str) -> Result<String, Enroll
         .map(|raw| raw.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback.to_string());
-    let certificate = std::fs::read(&paths.certificate)
+    let pem = std::fs::read(&paths.certificate)
         .map_err(|err| EnrollError::Io(format!("{}: {err}", paths.certificate.display())))?;
-    if !contains(&certificate, chosen.as_bytes()) {
+    // 🔴 必须先解成 DER 再找。
+    //
+    // 这一行是拿一次 21 小时的上行停摆换来的（2026-09-10 10:42 → 2026-09-11
+    // 07:32 UTC）。第一版直接在 `device.crt` 的字节里找那串 UUID —— 而
+    // `device.crt` 是 **PEM**，内容是 base64，UUID 的字面字节从来不出现在
+    // 里面。于是这道「核对」**每一次都触发**：uplink_loop 打一行 identity
+    // 错误、睡 60 秒、continue，上行一次都没跑起来。
+    //
+    // ⚠️ 一道永远触发的检查不是「严格」，它是坏的。而这一次它坏的方向最糟：
+    //    它挡住的是正常那条路，而日志上那句话说的是「这两个文件多半来自不同
+    //    的机器」—— 一句把人引向完全错误方向的话。
+    let der = certificates_der(&pem);
+    if der.is_empty() {
+        return Err(EnrollError::BadResponse(format!(
+            "{} 里读不出证书",
+            paths.certificate.display()
+        )));
+    }
+    if !der.iter().any(|block| contains(block, chosen.as_bytes())) {
         return Err(EnrollError::BadResponse(format!(
             "device_id {chosen} 不在 {} 里 —— 自报的身份和证书对不上，\
              网关会逐帧拒掉这条连接（envelope device_id does not match certificate）。\
@@ -446,6 +464,21 @@ pub fn device_id(dir: impl AsRef<Path>, fallback: &str) -> Result<String, Enroll
         )));
     }
     Ok(chosen)
+}
+
+/// 把一份 PEM 里所有 CERTIFICATE 块解成 DER。
+///
+/// 用 `crate::tls::certificates_from_pem` —— 上行那一侧读同一个文件用的就是
+/// 它。自己写第二个解析器的话，两边对「什么算一份证书」的看法会分家。
+fn certificates_der(pem: &[u8]) -> Vec<Vec<u8>> {
+    crate::tls::certificates_from_pem(pem)
+        .map(|certificates| {
+            certificates
+                .into_iter()
+                .map(|certificate| certificate.as_ref().to_vec())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -722,38 +755,45 @@ mod tests {
     /// 写成一个硬编码常量、6 处引用、没有 env 覆盖 —— 于是一台**刚装机成功**
     /// 的机器会带着旧 id 去连，然后每一帧被拒。
     ///
-    /// ⚠️ 这个洞是装机客户端本身造出来的：在有客户端之前，证书是手工签的、
-    ///    CN 就等于那个常量，两者永远一致。加上客户端的那一刻，它们第一次
-    ///    有了分岔的可能。
+    /// ⚠️ 这条断言喂的是**一份真证书**，不是一段含有 UUID 字样的假字符串。
+    ///    第一版喂的是 `"junk CN=b0000000-old junk"`，于是它完全没有发现
+    ///    `device.crt` 是 PEM（base64）——那道核对在生产上每一次都触发，
+    ///    上行被自己的守卫挡了 21 小时（2026-09-10 10:42 → 09-11 07:32 UTC）。
+    ///    一个用假数据喂出来的绿灯，比没有这条断言更坏。
     #[test]
     fn the_reported_device_id_comes_from_this_enrolment() {
         let dir = std::env::temp_dir().join(format!("vodoge-devid-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("临时目录");
         let paths = Paths::in_dir(&dir);
 
+        // 真造两张证书，CN 分别是两个 id。
+        let old_id = "b0000000-0000-4000-8000-00000000000b";
+        let new_id = "b2099b3f-25de-4299-aae0-dfb7e4ea5637";
+        let old_pem = self_signed_pem(old_id);
+        let new_pem = self_signed_pem(new_id);
+
         // 手工装机时代：没有 device-id 文件，证书的 CN 就是那个回落常量。
-        std::fs::write(&paths.certificate, "junk CN=b0000000-old junk").expect("写证书");
+        std::fs::write(&paths.certificate, &old_pem).expect("写证书");
         let _ = std::fs::remove_file(&paths.device_id);
         assert_eq!(
-            device_id(&dir, "b0000000-old").expect("回落"),
-            "b0000000-old",
+            device_id(&dir, old_id).expect("回落"),
+            old_id,
             "没有 device-id 文件时应当回落到常量"
         );
 
-        // 装机之后：device-id 文件说了话，而且证书里确实有它。
-        std::fs::write(&paths.certificate, "junk CN=b2099b3f-new junk").expect("写证书");
-        std::fs::write(&paths.device_id, "b2099b3f-new\n").expect("写 id");
+        // 装机之后：device-id 文件说了话，而且证书里确实是它。
+        std::fs::write(&paths.certificate, &new_pem).expect("写证书");
+        std::fs::write(&paths.device_id, format!("{new_id}\n")).expect("写 id");
         assert_eq!(
-            device_id(&dir, "b0000000-old").expect("读文件"),
-            "b2099b3f-new",
+            device_id(&dir, old_id).expect("读文件"),
+            new_id,
             "装机写下的 id 没有覆盖掉那个常量 —— 那台机器会带着旧 id 去连"
         );
 
-        // 🔴 最要紧的一条：两个文件来自不同机器时，**停下来**。
-        //    不停的话，症状是网关逐帧拒，而屏幕上看不出这两件事有关系。
-        std::fs::write(&paths.certificate, "junk CN=b0000000-old junk").expect("写证书");
-        std::fs::write(&paths.device_id, "b2099b3f-new").expect("写 id");
-        let err = device_id(&dir, "b0000000-old").expect_err("身份不一致却继续了");
+        // 🔴 两个文件来自不同机器时，停下来。
+        std::fs::write(&paths.certificate, &old_pem).expect("写证书");
+        std::fs::write(&paths.device_id, new_id).expect("写 id");
+        let err = device_id(&dir, old_id).expect_err("身份不一致却继续了");
         let said = err.to_string();
         assert!(
             said.contains("对不上") && said.contains("不同的机器"),
@@ -763,6 +803,23 @@ mod tests {
         for path in [&paths.certificate, &paths.device_id] {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// 造一张 CN 是 `common_name` 的自签证书，PEM 形式 —— 和生产上那个文件
+    /// 同一种格式。
+    fn self_signed_pem(common_name: &str) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("密钥");
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("参数");
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params
+            .self_signed(&key)
+            .expect("自签")
+            .pem()
+            .into_bytes()
     }
 
     /// 装机凭据只有一个 token 时，不许猜。
