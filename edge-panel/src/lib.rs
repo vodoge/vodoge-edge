@@ -1,5 +1,7 @@
 //! Local LAN panel. It reads only the SQLite cache so it still works offline.
 
+pub mod guard;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -389,6 +391,13 @@ struct PanelState {
     /// 地方 —— 表一空，它的接线在 HTTP 层面就一条测试都覆盖不到了。测试用
     /// `router_with_blocks` 装一份夹具进来。
     blocks: &'static [(&'static str, edge_core::SmsBlock)],
+    /// 面板的访问闸。
+    ///
+    /// 🔴 `Option` 是给内存 fixture 留的（edge-panel 自己的测试没有 token
+    ///    文件）。生产那条路一定是 `Some` —— `serve()` 里如果拿不到 token
+    ///    就直接不启动，见那里的注释。`None` 表示「这个 router 不设闸」，
+    ///    只有进程内测试会走到。
+    guard: Option<Arc<guard::Guard>>,
 }
 
 /// HTTP router for the offline panel. Bind it on the LAN; it does not call the cloud.
@@ -411,7 +420,7 @@ pub fn router_with_matrix(
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
 ) -> Router {
-    build_router(inbox, actions, uplink_online, matrix)
+    build_router(inbox, actions, uplink_online, matrix, None)
 }
 
 /// HTTP router whose reported mode follows a live uplink flag.
@@ -428,7 +437,7 @@ pub fn router_with_uplink(
     let matrix = Arc::new(Mutex::new(CapabilityMatrix::builtin().unwrap_or_else(
         |error| panic!("built-in capability matrix does not parse: {error}"),
     )));
-    build_router(inbox, actions, uplink_online, matrix)
+    build_router(inbox, actions, uplink_online, matrix, None)
 }
 
 /// 装一份自定的短信封禁表 —— **只给测试用**，理由见 `PanelState::blocks`。
@@ -445,6 +454,7 @@ pub fn router_with_blocks(
             CapabilityMatrix::builtin().expect("built-in capability matrix"),
         )),
         blocks,
+        None,
     )
 }
 
@@ -453,6 +463,7 @@ fn build_router(
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
+    guard: Option<Arc<guard::Guard>>,
 ) -> Router {
     build_router_with_blocks(
         inbox,
@@ -460,6 +471,7 @@ fn build_router(
         uplink_online,
         matrix,
         edge_core::sms_blocks(),
+        guard,
     )
 }
 
@@ -469,6 +481,9 @@ fn build_router_with_blocks(
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
     blocks: &'static [(&'static str, edge_core::SmsBlock)],
+    // `None` = 这个 router 不设闸（只有进程内测试走这条）。生产那条路一定是
+    // `Some`：`serve()` 拿不到 token 时直接不启动。
+    guard: Option<Arc<guard::Guard>>,
 ) -> Router {
     Router::new()
         .route("/", get(index))
@@ -500,13 +515,33 @@ fn build_router_with_blocks(
         .route("/api/modems/update", post(update_modem))
         .route("/api/modems/register", post(register_modem))
         .route("/api/modems/unregister", post(unregister_modem))
+        // 拿 token 换一个 cookie。它在闸**外面**（否则没 cookie 的人永远
+        // 拿不到 cookie），自己校验 token。
+        .route(guard::SESSION_PATH, post(open_session))
         .with_state(Arc::new(PanelState {
             inbox,
             actions,
             uplink_online,
             matrix,
             blocks,
+            guard,
         }))
+}
+
+/// 生产用的入口：带闸。
+///
+/// 单独一个函数而不是给 `router_with_matrix` 加参数：那个函数有二十多个
+/// 测试调用点，而它们测的是处理器、不是闸。把闸做成另一个入口，既让生产
+/// 那条路只有一种写法，也不用去改一堆和这件事无关的测试。
+pub fn router_guarded(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    uplink_online: Arc<AtomicBool>,
+    matrix: Arc<Mutex<CapabilityMatrix>>,
+    guard: Arc<guard::Guard>,
+) -> Router {
+    build_router(inbox, actions, uplink_online, matrix, Some(guard.clone()))
+        .layer(axum::middleware::from_fn_with_state(guard, guard::gate))
 }
 
 /// Serve the panel until the process exits.
@@ -516,13 +551,65 @@ pub async fn serve(
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
+    // token 放哪。和证书同一个目录 —— 那里已经是这台机器上「身份相关的东西
+    // 都在这」的地方，0600 的文件出现在那里不会让人意外。
+    token_path: std::path::PathBuf,
 ) -> std::io::Result<()> {
+    // 🔴 先拿 token，**拿不到就不启动**。
+    //
+    // 降级成「没有 token 就不设闸」是这一处最容易写、也最危险的选择：
+    // 一个磁盘满、一个权限错，就把 19 个改动型端点重新交给局域网，而日志上
+    // 只多一行 warning。宁可面板起不来 —— 那是看得见的故障。
+    let token = guard::PanelToken::load_or_create(&token_path)?;
+    let gate = Arc::new(guard::Guard::new(token, token_path));
+
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    // ⚠️ `into_make_service_with_connect_info` 不能省。没有它，闸拿不到对端
+    //    地址，于是每一个请求都落进「认不出对面是谁」那一支 —— 那一支是拒，
+    //    所以症状会是「本机也进不去」，而不是静默放行。方向是对的，但面板
+    //    会不可用。
     axum::serve(
         listener,
-        router_with_matrix(inbox, actions, uplink_online, matrix),
+        router_guarded(inbox, actions, uplink_online, matrix, gate)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await
+}
+
+/// `POST /api/session` —— 拿 token 换一个 cookie。
+///
+/// 🔴 它在闸**外面**：没有 cookie 的人得有一条路拿到 cookie。所以它自己校验
+///    token，而且是这个面板上唯一一个会被局域网无限次调用的校验点 ——
+///    比较用的是常量时间（`PanelToken::matches`）。
+///
+/// ⚠️ 不记录失败次数、不限速。这是有意的取舍而不是遗漏：token 是 32 字节
+///    随机（64 个十六进制字符），穷举它不是这台机器需要防的事；而一个会把
+///    自己锁死的限速器，会在运维最需要这扇窗户的时候关上它。
+async fn open_session(
+    State(state): State<Arc<PanelState>>,
+    Json(body): Json<SessionBody>,
+) -> Response {
+    let Some(guard) = state.guard.as_ref() else {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "这个面板没有设闸，也就没有 session 可换",
+        );
+    };
+    if !guard.token_matches(body.token.trim()) {
+        // 不说「token 长度不对」之类的细节 —— 那是在替对方缩小搜索空间。
+        return json_error(StatusCode::UNAUTHORIZED, "token 不对");
+    }
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, guard::session_cookie(body.token.trim()))],
+        Json(serde_json::json!({"ok": true})),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SessionBody {
+    token: String,
 }
 
 async fn index() -> Html<&'static str> {

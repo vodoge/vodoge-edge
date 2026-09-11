@@ -4687,6 +4687,9 @@ mod linux {
         let uplink_ever_resumed = Arc::new(AtomicBool::new(false));
 
         let panel_bind = env("VODOGE_EDGE_PANEL", "0.0.0.0:8743");
+        // 面板 token 和证书同一个目录。首次启动时 serve() 自己会生成它。
+        let panel_token_path = Path::new(&env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge"))
+            .join("panel-token");
         let panel_store = shared.clone();
         let panel_online = uplink_online.clone();
         let panel_matrix = live_matrix.clone();
@@ -4698,6 +4701,7 @@ mod linux {
                 Some(panel_actions),
                 panel_online,
                 panel_matrix,
+                panel_token_path,
             )) {
                 log_error(format!("panel: {error}"));
             }
