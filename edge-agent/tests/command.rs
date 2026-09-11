@@ -1352,3 +1352,60 @@ fn a_matrix_without_a_minimum_still_installs() {
     assert_eq!(outcome.result.status, RESULT_SUCCEEDED);
     assert_eq!(executor.matrix().version(), "hot-1");
 }
+
+/// 🔴 失败的命令结果必须把 details 带回云端。
+///
+/// 「已经交给模组了，可能真发出去了，重发之前先查投递回执」—— 这句建议靠
+/// 投递回执按 TP-MR 匹配那一行消息，而 `diagnostic_result` 的 Err 那一支
+/// 此前把 details **整个丢掉**（`terminal_result` 硬写 `details: None`）。
+///
+/// 2026-09-11 在生产上量过：43 条 failed 的 `provider_reference` 全是 NULL，
+/// 同时 33 条投递回执匹配不到任何一行消息。云端那一侧一直是对的
+/// （`SettleOutbound` 对成功和失败都写 `provider_reference`），断点只在这里。
+#[test]
+fn a_failed_result_carries_its_details() {
+    let mut port = FakeSendPort::new();
+    port.fail_with_details(
+        "modem_left_bus_after_submit",
+        "the module left the bus; check for a delivery receipt before sending it again",
+        serde_json::json!({"message_reference": 42, "status_report_requested": true}),
+    );
+    let mut executor = CommandExecutor::new(port);
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("failed send still completes");
+
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    let details = outcome
+        .result
+        .details
+        .as_ref()
+        .expect("失败结果把 details 丢了 —— 那句「先查投递回执」就没法照做");
+    let json = serde_json::to_value(details).expect("details 可序列化");
+    // ⚠️ 用 `as_f64` 比，不是 `as_u64`。`context_value` 把数字过成 f64，
+    //    于是 42 在这一侧是 `42.0` —— `as_u64()` 对它返回 None。
+    //    第一版就是这么写的，红出来的是「TP-MR 没有带回云端」，而实际上
+    //    它带回来了。一条因为自己写法而误报的断言，会把人送去修一个不存在
+    //    的 bug。
+    assert_eq!(
+        json.get("message_reference").and_then(|v| v.as_f64()),
+        Some(42.0),
+        "TP-MR 没有带回云端: {json}"
+    );
+}
+
+/// ⚠️ 没有 details 的失败，结果里也不该凭空出现一个。
+#[test]
+fn a_failed_result_without_details_stays_empty() {
+    let mut port = FakeSendPort::new();
+    port.fail_with("send_failed", "radio off");
+    let mut executor = CommandExecutor::new(port);
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("failed send still completes");
+    assert_eq!(outcome.result.status, RESULT_FAILED);
+    assert!(
+        outcome.result.details.is_none(),
+        "没有细节的失败却带上了 details"
+    );
+}

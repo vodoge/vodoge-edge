@@ -49,6 +49,23 @@ pub struct SmsSend {
 pub struct SendError {
     pub reason_code: String,
     pub message: String,
+    /// 这次失败要带回云端的结构化细节。
+    ///
+    /// 🔴 加它是为了一条**没法照做的建议**。发送失败时边缘会说
+    ///    「The message was already handed to the module, so it may have been
+    ///    transmitted; check for a delivery receipt before sending it again.」
+    ///    —— 而投递回执靠 TP-MR（`provider_reference`）匹配那一行，
+    ///    失败结果此前从不带它（`terminal_result` 硬写 `details: None`）。
+    ///
+    ///    2026-09-11 在生产上量过：43 条 failed 的 `provider_reference`
+    ///    **全是 NULL**，同时有 33 条投递回执匹配不到任何一行消息。也就是说
+    ///    那句话让运维去查一个永远查不到的东西。
+    ///
+    /// ⚠️ 只有**已经交给模组**的那种失败才该带引用（见
+    ///    `left_the_bus_after_the_request`）。还没发射就失败的，引用从没上过
+    ///    空中，带上它只会让将来复用同一个 TP-MR 的消息错配到这一行 ——
+    ///    TP-MR 是一个字节，256 条之后就绕回来了。
+    pub details: Option<serde_json::Value>,
 }
 
 impl SendError {
@@ -56,6 +73,20 @@ impl SendError {
         Self {
             reason_code: reason_code.into(),
             message: message.into(),
+            details: None,
+        }
+    }
+
+    /// 同上，但带上结构化细节。
+    pub fn with_details(
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+            details: Some(details),
         }
     }
 }
@@ -530,6 +561,16 @@ impl FakeSendPort {
 
     pub fn fail_with(&mut self, reason_code: impl Into<String>, message: impl Into<String>) {
         self.error = Some(SendError::new(reason_code, message));
+    }
+
+    /// 同上，但带结构化细节 —— 「已经交给模组才断」那种失败会带 TP-MR。
+    pub fn fail_with_details(
+        &mut self,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) {
+        self.error = Some(SendError::with_details(reason_code, message, details));
     }
 
     pub fn sent(&self) -> &[SmsSend] {
@@ -1827,14 +1868,31 @@ fn diagnostic_result(
             }
             result
         }
-        Err(error) => terminal_result(
-            cmd_id,
-            RESULT_FAILED,
-            now_ms,
-            attempts,
-            Some(error.reason_code.as_str()),
-            Some(error.message.as_str()),
-        ),
+        Err(error) => {
+            // 🔴 失败也要把 details 带上，和成功那一支对称。
+            //
+            //    在这之前这里直接丢掉了它，于是「已经交给模组了，重发之前先查
+            //    投递回执」那句建议**没法照做**：回执靠 TP-MR 匹配消息行，而
+            //    失败结果不带 TP-MR。2026-09-11 在生产上量过：43 条 failed 的
+            //    provider_reference 全是 NULL，同时 33 条投递回执匹配不到
+            //    任何一行消息。
+            //
+            // ⚠️ 只有「已经交出去」那种失败会带 details（见
+            //    `describe_send_failure`）。其余的照旧是 None —— 引用从没上过
+            //    空中的话，带上它会让将来复用同一个 TP-MR 的消息错配。
+            let mut result = terminal_result(
+                cmd_id,
+                RESULT_FAILED,
+                now_ms,
+                attempts,
+                Some(error.reason_code.as_str()),
+                Some(error.message.as_str()),
+            );
+            if let Some(details) = error.details {
+                result.details = Some(context_value(details));
+            }
+            result
+        }
     }
 }
 

@@ -848,14 +848,35 @@ mod linux {
     /// `EF_SMSS` advanced by 34 over a day of sends the console recorded as
     /// failures, and 10086 kept replying to them. Told "failed", an operator
     /// resends and the recipient gets it twice.
-    fn describe_send_failure(error: &edge_modem::SessionError) -> SendError {
+    /// 一次发送失败该怎么对云端描述。
+    ///
+    /// 🔴 `reference` 参数是后加的，为的是让上面那句建议**能被照做**。
+    ///    「已经交给模组了，可能真发出去了，重发之前先查投递回执」—— 而投递
+    ///    回执靠 TP-MR 匹配消息行，失败结果此前从不带它。2026-09-11 在生产上
+    ///    量过：43 条 failed 的 `provider_reference` 全是 NULL，同时 33 条
+    ///    投递回执匹配不到任何一行。那句话指向的是一个永远查不到的东西。
+    ///
+    /// ⚠️ 只有 `left_the_bus_after_the_request()` 那一支带引用。另一支还没
+    ///    发射就失败了，引用从没上过空中 —— 带上它只会让将来复用同一个 TP-MR
+    ///    的消息错配到这一行。TP-MR 是一个字节，256 条之后就绕回来了。
+    fn describe_send_failure(error: &edge_modem::SessionError, reference: u8) -> SendError {
         if error.left_the_bus_after_the_request() {
-            return SendError::new(
+            return SendError::with_details(
                 "modem_left_bus_after_submit",
                 format!(
                     "{error}. The message was already handed to the module, so it may have \
                      been transmitted; check for a delivery receipt before sending it again."
                 ),
+                serde_json::json!({
+                    // 交出去时用的那个 TP-MR。模组没来得及回答它实际用了哪个，
+                    // 所以这里只能是我们请求的那个 —— 字段名照成功路径的写法，
+                    // 云端那一侧读的是同一个键。
+                    "message_reference": u16::from(reference),
+                    "requested_reference": reference,
+                    // 这条 PDU 请求过状态报告，所以回执**可能会来**。
+                    // 成功路径也送这个字段，两边一致。
+                    "status_report_requested": true,
+                }),
             );
         }
         SendError::new("send_failed", error.to_string())
@@ -1494,7 +1515,7 @@ mod linux {
                 .radio
                 .with_client(send.modem_imei.as_deref(), |client| {
                     client.send_sms(0x06, &pdu).map_err(|error| {
-                        let described = describe_send_failure(&error);
+                        let described = describe_send_failure(&error, reference);
                         log_error(format!(
                             "sms to {} failed: {} {}",
                             send.to, described.reason_code, described.message
@@ -11158,7 +11179,7 @@ mod linux {
                 device: "/dev/cdc-wdm2".into(),
                 awaiting_response: true,
             };
-            let described = describe_send_failure(&error);
+            let described = describe_send_failure(&error, 42);
             assert_eq!(described.reason_code, "modem_left_bus_after_submit");
             assert!(
                 described.message.contains("may have been transmitted"),
@@ -11172,6 +11193,49 @@ mod linux {
             );
         }
 
+        /// 🔴 「重发之前先查投递回执」这句建议必须能被照做。
+        ///
+        /// 上面那条钉住了措辞，而措辞指向的东西此前**不存在**：投递回执靠
+        /// TP-MR（云端的 `provider_reference`）匹配那一行消息，而失败结果
+        /// 从不带 TP-MR —— `describe_send_failure` 不带，`diagnostic_result`
+        /// 的 Err 那一支还把 details 整个丢掉。
+        ///
+        /// 2026-09-11 在生产上量过：43 条 failed 的 `provider_reference`
+        /// **全是 NULL**，同时有 33 条投递回执匹配不到任何一行消息。
+        /// 一条没法照做的诊断建议比不给建议更坏 —— 运维会以为自己查过了。
+        #[test]
+        fn a_handover_failure_carries_the_reference_the_receipt_will_quote() {
+            let error = edge_modem::SessionError::Disconnected {
+                device: "/dev/cdc-wdm2".into(),
+                awaiting_response: true,
+            };
+            let details = describe_send_failure(&error, 42)
+                .details
+                .expect("已经交出去的失败没有带 details —— 那句建议就没法照做");
+            assert_eq!(
+                details.get("message_reference").and_then(|v| v.as_u64()),
+                Some(42),
+                "带的不是交出去时用的那个 TP-MR: {details}"
+            );
+        }
+
+        /// ⚠️ 还没交出去就失败的，**不许**带引用。
+        ///
+        /// 那个 TP-MR 从没上过空中，不会有任何回执引用它。把它记进
+        /// `provider_reference`，将来复用同一个号的消息就会错配到这一行 ——
+        /// TP-MR 是一个字节，256 条之后就绕回来。
+        ///
+        /// 🔴 这条和上面那条是一对：只满足上面那条的写法（无条件带引用）
+        ///    会让这一条变红。
+        #[test]
+        fn a_failure_before_handover_carries_no_reference() {
+            let error = edge_modem::SessionError::transport("timed out");
+            assert!(
+                describe_send_failure(&error, 42).details.is_none(),
+                "还没发射就失败却带上了引用 —— 将来复用同一个 TP-MR 的消息会错配到这一行"
+            );
+        }
+
         /// A module that was already gone before the write is a different
         /// story: nothing was submitted, and resending is the right move.
         #[test]
@@ -11180,14 +11244,14 @@ mod linux {
                 device: "/dev/cdc-wdm2".into(),
                 awaiting_response: false,
             };
-            assert_eq!(describe_send_failure(&error).reason_code, "send_failed");
+            assert_eq!(describe_send_failure(&error, 42).reason_code, "send_failed");
         }
 
         /// Everything the module itself answered stays exactly as it was.
         #[test]
         fn a_refusal_from_the_module_keeps_its_own_words() {
             let error = edge_modem::SessionError::transport("timed out waiting for QMI response");
-            let described = describe_send_failure(&error);
+            let described = describe_send_failure(&error, 42);
             assert_eq!(described.reason_code, "send_failed");
             assert!(described.message.contains("timed out"));
         }
