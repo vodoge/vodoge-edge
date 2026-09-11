@@ -8,6 +8,11 @@ description = "Pure cumulative upstream acknowledgement state for the Vodoge edg
 
 [dependencies]
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+# 装机时在现场造密钥和 CSR。此前只是 dev-dependency（测试用它造证书），
+# 而「换盘之后这台设备再也上不来」的根因就是没有任何代码会造 CSR ——
+# 证书是 2026-09-01 手工签进 /etc/vodoge-edge 的。
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls-pemfile = "2"
 serde_json = "1"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 vodoge-contract = { path = "../contract" }
@@ -18,4 +23,3 @@ vodoge-contract = { path = "../contract" }
 libc = "0.2"
 
 [dev-dependencies]
-rcgen = "0.13"

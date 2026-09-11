@@ -563,6 +563,7 @@ dependencies = [
  "libc",
  "rcgen",
  "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tungstenite",
  "vodoge-contract",

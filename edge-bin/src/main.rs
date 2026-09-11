@@ -58,7 +58,18 @@ mod linux {
         PROTOCOL_VERSION,
     };
 
-    const DEVICE_ID: &str = "b0000000-0000-4000-8000-00000000000b";
+/// 手工装机时代的 device_id，**只作回落**。
+    ///
+    /// 🔴 不要直接用它上行。云端的身份来自证书的 CN，而上行每一帧自报的
+    ///    device_id 会被逐帧比对（`serve.go`: `envelope device_id does not
+    ///    match certificate`）。一台走 `/v1/enroll` 装机的机器拿到的是一个
+    ///    **新** UUID，此时这个常量是错的 —— 那台机器会装机成功、然后每一帧
+    ///    被拒，而屏幕上看不出这两件事有关系。
+    ///
+    /// 正确的取法是 `edge_uplink::enroll::device_id(cert_dir, DEVICE_ID_FALLBACK)`：
+    /// 优先读装机时写下的 `device-id`，没有才回落到这里。回落对现役那台机器
+    /// 是对的 —— 它 2026-09-01 那张手签证书的 CN 就是这个值。
+    const DEVICE_ID_FALLBACK: &str = "b0000000-0000-4000-8000-00000000000b";
 
     /// Primary UICC slot. These modules expose one card slot, and the eUICC
     /// always sits in it.
@@ -4722,7 +4733,7 @@ mod linux {
         });
 
         log_line(format!(
-            "vodoge-edge panel on {} device_id={DEVICE_ID}",
+            "vodoge-edge panel on {} device_id={DEVICE_ID_FALLBACK}",
             env("VODOGE_EDGE_PANEL", "0.0.0.0:8743")
         ));
         // Traffic is reported far less often than modems are polled. The
@@ -10256,9 +10267,56 @@ mod linux {
         let url = env("VODOGE_UPLINK_URL", "wss://43.108.53.126:444/v1/edge");
         let cert_dir = env("VODOGE_EDGE_CERTS", "/etc/vodoge-edge");
         loop {
+            // 🔴 没有身份就先装机，**不要**带着一个注定失败的 TLS 去连。
+            //
+            // 在这之前，一台换过盘的机器会在这里每 5 秒重试一次 `load_tls`，
+            // 日志里滚的是「No such file or directory」—— 那句话没说缺哪个
+            // 文件、也没说怎么补，而正确答案（去控制台生成一个装机码）在屏幕上
+            // 一个字都没有。这个仓库里此前**没有任何代码会造 CSR**，所以那台
+            // 机器的唯一出路是一次人工签发。
+            //
+            // ⚠️ 装机地址从上行地址推出来（同一个监听，客户端证书是
+            //    VerifyClientCertIfGiven），不另配一个：分两处配就会有一天
+            //    它们指向不同的部署，而症状是「装机成功了，但上行连不上」。
+            match edge_uplink::enroll::enroll_url_from_uplink(&url) {
+                Some(enroll_url) => match edge_uplink::enroll::ensure(&cert_dir, &enroll_url) {
+                    Ok(None) => {}
+                    Ok(Some(device_id)) => log_error(format!("enrolled as {device_id}")),
+                    Err(error) => {
+                        log_error(format!("enroll: {error}"));
+                        // 这两种要等人（放凭据、放 CA），5 秒一轮只会把日志刷满；
+                        // 其余（网络、云端拒绝）按上行原来的节奏重试。
+                        let waits_for_a_person = matches!(
+                            error,
+                            edge_uplink::enroll::EnrollError::NeedsCode { .. }
+                                | edge_uplink::enroll::EnrollError::NeedsTrustAnchor { .. }
+                        );
+                        std::thread::sleep(Duration::from_secs(if waits_for_a_person {
+                            60
+                        } else {
+                            5
+                        }));
+                        continue;
+                    }
+                },
+                None => log_error(format!(
+                    "enroll: 从上行地址 {url} 推不出装机地址（需要 wss://），\
+                     这台机器没有身份时无法自助装机"
+                )),
+            }
+            // 自报的 id 必须和证书出自同一次装机，否则网关逐帧拒。
+            let device_id = match edge_uplink::enroll::device_id(&cert_dir, DEVICE_ID_FALLBACK) {
+                Ok(id) => id,
+                Err(error) => {
+                    log_error(format!("identity: {error}"));
+                    std::thread::sleep(Duration::from_secs(60));
+                    continue;
+                }
+            };
             let result = uplink_once(
                 &url,
                 &cert_dir,
+                &device_id,
                 &outbox,
                 &executor,
                 &live_matrix,
@@ -10277,6 +10335,9 @@ mod linux {
     fn uplink_once(
         url: &str,
         cert_dir: &str,
+        // 这台机器自报的 device_id。由调用方从装机结果解析出来 ——
+        // 它必须和证书的 CN 一致，网关逐帧比对。
+        device_id: &str,
         outbox: &Arc<Mutex<DurableOutbox>>,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
@@ -10307,7 +10368,7 @@ mod linux {
                 queue_bytes: box_.queue_bytes(),
             }
         };
-        let config = LinkConfig::new(DEVICE_ID, snapshot).map_err(|e| e.to_string())?;
+        let config = LinkConfig::new(device_id, snapshot).map_err(|e| e.to_string())?;
         let mut worker = UplinkWorker::new(config, SharedOutbox(outbox.clone()));
         log_line(format!("uplink connecting {url}"));
         let now = Instant::now();
@@ -10323,7 +10384,7 @@ mod linux {
                         .map_err(|e| e.to_string())?;
                     if let Inbound::CommandDeliver(deliver) = inbound {
                         if let Err(error) =
-                            handle_command(&deliver, executor, live_matrix, &mut socket, outbox)
+                            handle_command(device_id, &deliver, executor, live_matrix, &mut socket, outbox)
                         {
                             log_error(format!("command: {error}"));
                         }
@@ -10353,6 +10414,8 @@ mod linux {
     }
 
     fn handle_command(
+        // 自报的 device_id，必须和证书的 CN 一致（网关逐帧比对）。
+        device_id: &str,
         envelope: &Envelope,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
@@ -10380,7 +10443,7 @@ mod linux {
                 kind: MessageKind::CommandReceipt,
                 id: uuid::Uuid::new_v4().to_string(),
                 ts: now,
-                device_id: DEVICE_ID.into(),
+                device_id: device_id.to_string(),
                 seq: None,
                 trace_id: None,
                 payload: serde_json::to_value(&outcome.receipt).map_err(|e| e.to_string())?,
@@ -10409,7 +10472,7 @@ mod linux {
                 kind: MessageKind::CommandResult,
                 id: outcome.result.cmd_id.clone(),
                 ts: now,
-                device_id: DEVICE_ID.into(),
+                device_id: device_id.to_string(),
                 seq: Some(sequence),
                 trace_id: None,
                 payload: serde_json::to_value(&outcome.result).map_err(|e| e.to_string())?,
@@ -10420,7 +10483,7 @@ mod linux {
             outcome.result.cmd_id, outcome.result.status
         );
         if let Some(inventory) = &outcome.inventory {
-            if let Err(error) = send_esim_inventory(inventory, socket, outbox, now) {
+            if let Err(error) = send_esim_inventory(device_id, inventory, socket, outbox, now) {
                 // Logged, never fatal, and never a reason to fail the command.
                 // The command result is what the operator is waiting on and it
                 // has already been sequenced; losing the inventory costs a
@@ -10439,6 +10502,8 @@ mod linux {
     /// in the outbox, hand this payload the result's sequence number, and drop
     /// one of the two on the floor.
     fn send_esim_inventory(
+        // 自报的 device_id，必须和证书的 CN 一致（网关逐帧比对）。
+        device_id: &str,
         payload: &EsimInventoryPayload,
         socket: &mut Socket,
         outbox: &Arc<Mutex<DurableOutbox>>,
@@ -10463,7 +10528,7 @@ mod linux {
                 kind: MessageKind::EsimInventory,
                 id,
                 ts: now,
-                device_id: DEVICE_ID.into(),
+                device_id: device_id.to_string(),
                 seq: Some(sequence),
                 trace_id: None,
                 payload: serde_json::to_value(payload).map_err(|e| e.to_string())?,

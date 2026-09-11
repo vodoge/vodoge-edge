@@ -5,6 +5,7 @@
 
 pub mod codec;
 pub mod dial;
+pub mod enroll;
 pub mod session;
 pub mod tls;
 pub mod update;
