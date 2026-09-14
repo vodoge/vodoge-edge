@@ -10347,10 +10347,50 @@ mod linux {
             online.store(false, Ordering::Relaxed);
             match result {
                 Ok(()) => log_error("uplink closed, reconnecting"),
-                Err(error) => log_error(format!("uplink: {error}")),
+                Err(error) => {
+                    let text = format!("{error}");
+                    log_error(format!("uplink: {text}"));
+                    // 🔴 机器重装那一种失败，把补救连数字一起印出来。
+                    //
+                    //    `ack cursor N exceeds last allocated sequence M` 这句话
+                    //    本身是对的，但它不说下一步做什么 —— 而这个循环每 5 秒
+                    //    重来一次，所以它会在日志里刷成一面墙，看的人只知道
+                    //    「上行坏了」。那个 N 就是云端游标，补救需要的全部输入
+                    //    已经在这一行里了。
+                    //
+                    // ⚠️ 匹配的是**文本**，因为 `WorkerError::Outbox` 把类型压成了
+                    //    `String`，到这里已经没有 `UplinkError` 可以 match 了。
+                    //    所以这里钉的那句话由 `edge-uplink` 的
+                    //    `UplinkError::AckBeyondAllocated` 格式化产出，两处必须
+                    //    一起改 —— `edge-store/tests/uplink_rescue.rs` 有一条断言
+                    //    盯着这个字符串。
+                    if let Some(cursor) = ack_cursor_from(&text) {
+                        log_error(format!(
+                            "uplink: 这台机器的上行序列在云端游标之下 —— \
+                             大多是硬件重装、或者搬过 /var/lib 之后。修：\
+                             `systemctl stop vodoge-edge && uplink-rescue {cursor} && \
+                             systemctl start vodoge-edge`（先加 --dry-run 看它要改什么）。\
+                             别去云端查这个数，日志里这个就是它。"
+                        ));
+                    }
+                }
             }
             std::thread::sleep(Duration::from_secs(5));
         }
+    }
+
+    /// 从 `ack cursor N exceeds last allocated sequence M` 里取出 N。
+    ///
+    /// ⚠️ 取的是**第一个**数。第二个是本地的 `last_allocated`，拿它去救援会被
+    ///    `uplink-rescue` 以「云端不会把提交过的东西退回去」拒掉 —— 那条拒绝
+    ///    存在的理由就是有人会抄错这一个。
+    fn ack_cursor_from(text: &str) -> Option<u64> {
+        let rest = text.split("ack cursor ").nth(1)?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        digits.parse().ok()
     }
 
     fn uplink_once(
@@ -10595,6 +10635,59 @@ mod linux {
 
     fn env(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
+    }
+
+    #[cfg(test)]
+    mod ack_cursor_tests {
+        use super::ack_cursor_from;
+
+        /// 🔴 解析的必须是 `edge-uplink` **真的产出的**那句话，不是一个我照记忆
+        ///    写下的相似句子。所以这里不手写字符串，而是让
+        ///    `UplinkError::AckBeyondAllocated` 自己格式化出来。
+        ///
+        ///    这个仓库有过同一类事故：一条断言喂了一个假字符串
+        ///    （`"junk CN=b0000000-old junk"`），于是它测的是那个假串而不是
+        ///    真实产物，真正的缺陷放了过去，代价是 21 小时的上行中断。
+        #[test]
+        fn it_parses_the_sentence_edge_uplink_actually_produces() {
+            let error = edge_uplink::UplinkError::AckBeyondAllocated {
+                committed_through: 119_517,
+                last_allocated: 5,
+            };
+            let text = format!("{error}");
+            assert_eq!(
+                ack_cursor_from(&text),
+                Some(119_517),
+                "取到的不是云端游标。那句话是：{text}",
+            );
+        }
+
+        /// ⚠️ 取的是**第一个**数。第二个是本地的 `last_allocated`，拿它去救援
+        ///    会被拒（`uplink-rescue` 那条 `CloudWentBackwards`），而那条拒绝
+        ///    存在的理由正是有人会抄错这一个。
+        #[test]
+        fn it_takes_the_first_number_not_the_second() {
+            let error = edge_uplink::UplinkError::AckBeyondAllocated {
+                committed_through: 7,
+                last_allocated: 900_001,
+            };
+            assert_eq!(ack_cursor_from(&format!("{error}")), Some(7));
+        }
+
+        /// 别的失败不许触发那条补救提示 —— 一条对任何错误都印的建议不是建议。
+        #[test]
+        fn other_failures_do_not_get_the_rescue_hint() {
+            for text in [
+                "uplink closed, reconnecting",
+                "restored uplink journal is internally inconsistent",
+                "ack crosses unresolved sequence 101",
+                "tls handshake failed",
+                // 没有数字的畸形串：不许 panic，也不许当成 0。
+                "ack cursor  exceeds last allocated sequence 5",
+            ] {
+                assert_eq!(ack_cursor_from(text), None, "这一句不该触发补救提示：{text}");
+            }
+        }
     }
 
     #[cfg(test)]

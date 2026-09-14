@@ -215,23 +215,45 @@ numbers:
 uplink: ack cursor 119517 exceeds last allocated sequence 5
 ```
 
-Take `N` from the cloud (`SELECT MAX(seq) FROM app.ingress WHERE device_id = …`),
-stop the agent, and shift the queue above it:
+Stop the agent and run the repair with the **first** number from that line:
 
-```sql
-UPDATE uplink_outbox SET seq = seq + N;
-UPDATE uplink_cursor
-   SET committed_through = N,
-       last_allocated = (SELECT MAX(seq) FROM uplink_outbox)
- WHERE id = 1;
+```sh
+systemctl stop vodoge-edge
+uplink-rescue --dry-run 119517     # prints what it would change, changes nothing
+uplink-rescue 119517
+systemctl start vodoge-edge
 ```
 
-Shift rather than clear. Setting the cursor alone would mark anything already
-queued — real messages the modems collected — as delivered, and drop it.
+That number is the cloud's own cursor — it arrives in every `ResumeAck` and the
+agent prints it verbatim. **Do not go and query the cloud for it.** The value
+the cloud actually acts on is `app.ingress_window()`'s longest contiguous run
+from `pruned_through`; `SELECT MAX(seq) FROM app.ingress` is a different number,
+too high when there are holes above that prefix (which marks sequences the cloud
+never received as delivered, and the agent then deletes those records) and too
+low — or NULL — once retention has pruned the prefix, which is exactly the state
+a machine that has been down long enough to be rebuilt is in.
 
-> The matrix and the cursor live in `inbox.db`, the queue in `outbox.db`, both
-> under `VODOGE_EDGE_DATA`. Carry the whole directory if you can; if you cannot,
-> the two steps above are the minimum.
+The repair renumbers the pending queue densely above the cursor, in one
+transaction, and is idempotent: running it twice is a no-op. It refuses rather
+than acts when the number is below what the agent already knows was committed,
+and it refuses to create a database that is not there.
+
+> **Why a command and not two `UPDATE`s.** This section used to carry hand-typed
+> SQL (`seq = seq + N`, then a cursor update reading `MAX(seq)`). It had three
+> failure modes, all three measured: on an empty queue — the normal state of a
+> rebuilt machine — `MAX(seq)` is NULL and `last_allocated` is `NOT NULL`, so it
+> died on a constraint; when `N` was smaller than the queue depth the shift hit
+> `UNIQUE constraint failed` because `seq` is an `INTEGER PRIMARY KEY` updated in
+> ascending order; and run **twice** it produced a journal that starts cleanly
+> and can then never advance again, because nothing validates that
+> `(committed_through, last_allocated]` has no hole in it. That third one is
+> silent, and it is the one an unclear first attempt invites.
+
+> The matrix lives in `inbox.db` and the uplink journal in `outbox.db`, both
+> under `VODOGE_EDGE_DATA`. Carry the whole directory if you can. ⚠️ Both files
+> get the same schema, so `uplink_cursor` exists in *both* — editing the one in
+> `inbox.db` reports `1 row changed` against a cursor nothing reads. An earlier
+> version of this note said the cursor lived there; it does not.
 
 ## Upgrading a running agent
 
@@ -320,9 +342,13 @@ is forward-only: it walks `MIGRATIONS[user_version..]` upward and stops. Put an
 older binary on a newer database and its loop simply does not run, because
 `user_version` is already past the end of the migrations it knows about. The
 one destructive path, `Store::rollback_to`, drops eleven tables — and it is
-reachable from tests only. `main()` takes no arguments, there are no
-subcommands, and `Store::open` calls `migrate()` and nothing else, so no
-startup can reach it.
+reachable from tests only. The daemon's `main()` takes no arguments and has no
+subcommands, and `Store::open` calls `migrate()` and nothing else, so no startup
+can reach it. The two binaries that *do* read argv — `qmi-probe` and
+`uplink-rescue` — do not touch it either, and that is now a test rather than a
+sentence: `edge-store/tests/uplink_rescue.rs` enumerates every `src/bin/*.rs`
+plus the daemon's `main.rs` from the directory tree and fails if any of them
+mentions `rollback_to`.
 
 What downgrading *can* do is leave an old binary reading a schema built by a
 newer one. That is fine for additive changes and is not something this

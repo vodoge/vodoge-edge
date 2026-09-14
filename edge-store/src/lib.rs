@@ -297,6 +297,166 @@ impl Store {
         Ok(())
     }
 
+    /// 机器重装之后，把本地 journal 抬到云端游标之上。
+    ///
+    /// `cloud_committed_through` 就是 `ResumeAck` 带回来的那个数，也是
+    /// `ack cursor N exceeds last allocated sequence M` 这句错误里印出来的 N。
+    /// **不要**去云端 `SELECT MAX(seq) FROM app.ingress` 取它：云端那一侧真正的
+    /// 数是 `app.ingress_window()` 算的「从 `pruned_through` 起的最长连续段」，
+    /// 而 `MAX(seq)` 在有空洞时偏高、在保留期剪过前缀之后偏低甚至是 NULL。
+    ///
+    /// ## 为什么是「重编号」而不是「平移」
+    ///
+    /// 🔴 这个仓库的 README 以前教的是两条手打 SQL：
+    ///
+    /// ```text
+    /// UPDATE uplink_outbox SET seq = seq + N;
+    /// UPDATE uplink_cursor SET committed_through = N,
+    ///        last_allocated = (SELECT MAX(seq) FROM uplink_outbox) WHERE id = 1;
+    /// ```
+    ///
+    /// 三种失败方式，三种都实测过：
+    ///
+    /// - 队列为空（重装后最常见）：`MAX(seq)` 是 NULL，而 `last_allocated` 是
+    ///   `INTEGER NOT NULL` —— 报约束错误，什么都没改。
+    /// - `N` 小于队列深度：`seq` 是 `INTEGER PRIMARY KEY`，按 rowid 升序改，
+    ///   改到一半撞上还没挪的行 —— `UNIQUE constraint failed`。
+    /// - **跑两遍**：最糟的一种，因为它不报错。seq 再平移一次 N，而
+    ///   `committed_through` 还是 N，于是 `(N, 2N]` 这一段既没有记录也没有已接受
+    ///   的丢失声明。`UplinkState::rehydrate` 只检三件事，不检这个区间有没有空洞，
+    ///   所以 agent 正常启动 —— 然后每一次 ack 都是
+    ///   `AckCrossesUnresolvedSequence(N+1)`，上行永远推不动，而且协议上救不回来
+    ///   （把那段空洞用 `missing_ranges` 声明出去会被 `MissingRangeAtOrBelowCursor`
+    ///   拒掉）。
+    ///
+    /// 所以这里**紧密重编号**到 `N+1..=N+count`：空队列可用、不可能撞号、
+    /// 不留空洞，而且幂等 —— 第二次调用返回 [`RescueOutcome::AlreadyAbove`]，
+    /// 一个字节都不改。
+    ///
+    /// ⚠️ `seq` 只是运输用的号，身份是 `envelope_id`（云端按它去重，见
+    ///    `UplinkError::DuplicateEnvelopeId`）。重编号不动 `envelope_id`、
+    ///    `payload` 和 `protected`，所以没有任何排队中的消息会丢。
+    ///
+    /// 整件事在一个事务里：`uplink_cursor` 和 `uplink_outbox` 在同一个文件里
+    /// （两者分别由 MIGRATIONS[1] 和 MIGRATIONS[0] 建），所以全成或全不成 ——
+    /// 那条半应用状态不再可能出现。
+    pub fn rescue_uplink_sequence(
+        &self,
+        cloud_committed_through: u64,
+    ) -> Result<RescueOutcome, StoreError> {
+        // BEGIN IMMEDIATE：普查和改写必须看到同一份状态。默认的 deferred 事务
+        // 在第一次写的时候才拿写锁，中间另一个进程（`Restart=always` 的 agent
+        // 每 5 秒重开一次这个文件）能挤进来。
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.rescue_locked(cloud_committed_through);
+        match &result {
+            Ok(RescueOutcome::Repaired { .. }) => self.conn.execute_batch("COMMIT")?,
+            // 拒绝和无事可做都不写：回滚，文件一个字节不变。
+            _ => self.conn.execute_batch("ROLLBACK")?,
+        }
+        result
+    }
+
+    fn rescue_locked(&self, n: u64) -> Result<RescueOutcome, StoreError> {
+        let (committed_through, last_allocated) = self.cursor()?;
+
+        // 🔴 云端说的比本地已知的**已提交**还少。云端不会把提交过的东西退回去，
+        //    所以这不是「机器重装」，而是一个说不通的输入 —— 照它改会把游标往回搬，
+        //    而往回搬意味着已经落地删掉的记录再也回不来。拒绝，不改任何东西。
+        //
+        // ⚠️ 判据是 `committed_through`，**不是** `last_allocated`。`N` 低于
+        //    `last_allocated` 是**常态**（在途的那些就是差额），我第一版拿
+        //    `last_allocated` 做判据，于是正常运行的 journal 会被拒绝，而
+        //    「云端游标小于本地队列深度」那种真要修的情形也被一起拒了。
+        if n < committed_through {
+            return Ok(RescueOutcome::CloudWentBackwards {
+                local_committed_through: committed_through,
+            });
+        }
+
+        let pending: Vec<i64> = self
+            .conn
+            .prepare("SELECT seq FROM uplink_outbox ORDER BY seq ASC")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = pending.len();
+        let target_last = n + count as u64;
+
+        // 已经是目标形状：游标就是 N，待发记录紧密落在 N 之上。幂等的那一支 ——
+        // 这是「跑两遍」不会砸死上行的原因。
+        let dense = pending
+            .iter()
+            .enumerate()
+            .all(|(index, seq)| *seq as u64 == n + index as u64 + 1);
+        if committed_through == n && last_allocated == target_last && dense {
+            return Ok(RescueOutcome::AlreadyAbove);
+        }
+
+        // ⚠️ 两段式改号。直接 `seq = N + rank` 在 N 小于队列深度时会撞上还没挪的行
+        //    （`seq` 是 rowid 别名，UPDATE 按升序走）—— 那正是文档那条
+        //    `seq = seq + N` 的失败方式之一（实测：1..5 加 2 → UNIQUE 冲突）。
+        //    先搬到一个和「现有」「目标」都不相交的高位区间，再落到目标位置。
+        //
+        // 🔴 绝不用 `UPDATE OR REPLACE`：它靠删掉冲突的那一行来「解决」冲突，
+        //    而那一行是模组真的收到过的一条消息。
+        let highest_now = pending.last().copied().unwrap_or(0) as u64;
+        let staging_base = highest_now.max(target_last) + 1;
+        for (index, seq) in pending.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE uplink_outbox SET seq = ?1 WHERE seq = ?2",
+                params![(staging_base + index as u64) as i64, *seq],
+            )?;
+        }
+        for index in 0..count {
+            self.conn.execute(
+                "UPDATE uplink_outbox SET seq = ?1 WHERE seq = ?2",
+                params![
+                    (n + index as u64 + 1) as i64,
+                    (staging_base + index as u64) as i64
+                ],
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE uplink_cursor SET committed_through = ?1, last_allocated = ?2 WHERE id = 1",
+            params![n as i64, target_last as i64],
+        )?;
+
+        // `uplink_gaps` 里存的是**平移前**的号，而这张表在整个仓库里没有任何读者
+        //  —— `from_store` 只读 `load_outbox`，`rehydrate` 连 gap 参数都没有。
+        //  留着就是留一本会骗人的账。清掉并报出条数。
+        let gaps_cleared = self.conn.execute("DELETE FROM uplink_gaps", [])? as u64;
+
+        // 改完之后在同一个事务里自检。`rehydrate` 不检这两条，所以它们只能由
+        // 这里保证：游标恰好贴着最小号，`last_allocated` 恰好是最大号。
+        // 少了这两条里任何一条，`(committed_through, last_allocated]` 里就会出现
+        // 一个没有记录的空洞，而那会让上行永远推不动。
+        let (min_seq, max_seq, live): (Option<i64>, Option<i64>, i64) = self.conn.query_row(
+            "SELECT MIN(seq), MAX(seq), COUNT(*) FROM uplink_outbox",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if live as usize != count {
+            return Err(StoreError::RescuePostcondition(format!(
+                "重编号之后队列从 {count} 条变成了 {live} 条"
+            )));
+        }
+        if count > 0 {
+            let min_seq = min_seq.unwrap_or(0) as u64;
+            let max_seq = max_seq.unwrap_or(0) as u64;
+            if min_seq != n + 1 || max_seq != target_last {
+                return Err(StoreError::RescuePostcondition(format!(
+                    "重编号之后是 {min_seq}..{max_seq}，应当是 {}..{target_last}",
+                    n + 1
+                )));
+            }
+        }
+
+        Ok(RescueOutcome::Repaired {
+            renumbered: count,
+            gaps_cleared,
+        })
+    }
+
     pub fn insert_gap(
         &self,
         gap_id: &str,
@@ -1220,11 +1380,36 @@ pub struct OutboxRow {
     pub protected: bool,
 }
 
+/// [`Store::rescue_uplink_sequence`] 做了什么。
+///
+/// 三种结果各自都是一句话，而不是一个 bool：一个操作员在 3 点钟需要知道的是
+/// 「改了没有、改了多少、为什么没改」，而 `Ok(())` 三件都答不上来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescueOutcome {
+    /// 抬上去了。`renumbered` 是被重编号的待发记录条数（空队列是 0），
+    /// `gaps_cleared` 是清掉的那本没人读的 gap 账的条数。
+    Repaired {
+        renumbered: usize,
+        gaps_cleared: u64,
+    },
+    /// 本来就已经是目标形状，一个字节都没改。
+    ///
+    /// 幂等的那一支：重复执行走到这里，而不是再平移一次。
+    AlreadyAbove,
+    /// 云端报的游标比本地已知的**已提交**还低 —— 说不通的输入，拒绝执行。
+    ///
+    /// ⚠️ 判据是 `committed_through` 而不是 `last_allocated`：后者低于 N 是常态
+    ///    （在途的记录就是那个差额）。
+    CloudWentBackwards { local_committed_through: u64 },
+}
+
 /// Persistence errors.
 #[derive(Debug)]
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     InvalidTarget { current: i64, target: i64 },
+    /// 救援改完之后自检没过。整个事务回滚，文件不变。
+    RescuePostcondition(String),
 }
 
 impl fmt::Display for StoreError {
@@ -1233,6 +1418,9 @@ impl fmt::Display for StoreError {
             Self::Sqlite(error) => write!(formatter, "sqlite: {error}"),
             Self::InvalidTarget { current, target } => {
                 write!(formatter, "cannot roll schema from {current} to {target}")
+            }
+            Self::RescuePostcondition(detail) => {
+                write!(formatter, "uplink rescue post-condition failed: {detail}")
             }
         }
     }
