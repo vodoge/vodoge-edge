@@ -289,3 +289,114 @@ fn draining_back_under_the_limit_rearms_the_alarm() {
          最多要再静默一整个步长才重新喊"
     );
 }
+
+/// 往 outbox 里放东西的每一处，都必须传 `Protected`。
+///
+/// 🔴 上面那条 `an_all_protected_queue_says_it_is_overflowing` 的注释说「生产里
+///    append 全部是 Protected」—— 那句话是整个 journal 安全性的支点，而在这条
+///    断言之前它只是一句注释。没有任何东西阻止下一个人为了某种遥测加一条
+///    `Evictable`。
+///
+/// ## 打破它的代价，是实测出来的
+///
+/// 容量 2、三条 Evictable：第三条进来淘汰第一条，`CapacityAlert{evicted_seq:1}`
+/// 如实报出。但**就在那一刻**，`ack` 到 3 已经失败了：
+///
+/// ```text
+/// 内存里 pending_gap_ids = ["capacity-1"]
+/// 内存里 ack 到 3       = Err(AckCrossesUnresolvedSequence(1))
+/// ```
+///
+/// `AckCrossesUnresolvedSequence` 要求区间里每个号是**留存记录**或**已接受的
+/// 丢失**，而「已声明」不等于「已接受」。重启之后更彻底：`pending_gap_ids` 变成
+/// 空（`uplink_gaps` 这张表没有任何读者，`rehydrate` 连 gap 参数都没有），
+/// 而 ack 照旧失败。
+///
+/// ⚠️ 而它**接受不了**：`UplinkGap` / `UplinkGapAck` 这两个消息在契约里定义着，
+///    但边缘从不发、网关也不处理 —— 两边都只有生成出来的类型。也就是说
+///    「声明丢失并让云端接受」这条路今天在两侧都不存在。
+///
+/// 所以代价不是「少了一条遥测」，是**上行当场永久停住**，而且是那种最坏的形状：
+/// 告警说的是「淘汰了 seq 1」，没有任何地方说「你的上行从此推不动了」。
+///
+/// ## 边界
+///
+/// 只扫**调用方**（守护进程和 agent），不扫实现这套机制的库。`edge-store` 和
+/// `edge-uplink` 必须能提到 `Evictable`（`from_store` 要按 `row.protected` 还原
+/// 它、`oldest_evictable` 要按它筛、`declare_loss` 要按它设红线）—— 库定义这个
+/// 区分，调用方不许选它。
+#[test]
+fn every_production_append_keeps_the_record_protected() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .to_path_buf();
+
+    // 从目录枚举调用方的源文件，不写一张手写清单。
+    let mut sources = Vec::new();
+    for crate_name in ["edge-bin", "edge-agent"] {
+        let dir = workspace.join(crate_name).join("src");
+        assert!(dir.is_dir(), "{} 不在了", dir.display());
+        let mut stack = vec![dir];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    sources.push(path);
+                }
+            }
+        }
+    }
+    assert!(!sources.is_empty(), "调用方一个源文件都没枚举到 —— 枚举本身坏了");
+
+    let mut appends = 0usize;
+    let mut offenders = Vec::new();
+    for path in &sources {
+        let source = std::fs::read_to_string(path).expect("read");
+        for (offset, _) in source.match_indices(".append(") {
+            // 取到配平的右括号为止 —— 生产里那几处参数是分行写的。
+            let mut depth = 0i32;
+            let mut end = None;
+            for (index, ch) in source[offset..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(offset + index);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { continue };
+            let call = &source[offset..=end];
+            // 不提 RetentionClass 的是别的 `append`（比如 Vec::append）。跳过，
+            // 但下面会断言真的数到了足够多带 RetentionClass 的调用。
+            if !call.contains("RetentionClass") {
+                continue;
+            }
+            appends += 1;
+            if !call.contains("RetentionClass::Protected") {
+                let line = source[..offset].matches('\n').count() + 1;
+                offenders.push(format!("{}:{line}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        appends >= 4,
+        "只数到 {appends} 处带 RetentionClass 的 append —— 扫描坏了，不是调用点变少了。\
+         2026-09-15 有四处：edge-agent/src/lib.rs 一处，edge-bin/src/main.rs 三处",
+    );
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
+        "一个调用点把记录标成了可淘汰。淘汰会立刻让上行永久停住（见这条测试的注释：\
+         已声明的 gap 不等于已接受，而让云端接受它的那两个协议消息在两侧都没有实现）。\
+         真要加 Evictable 的话，先把 UplinkGap/UplinkGapAck 在两个仓库里接通。",
+    );
+}

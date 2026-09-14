@@ -15,6 +15,24 @@ pub const DEFAULT_MAX_RECORDS: usize = 100_000;
 const OVERFLOW_WARN_STRIDE: usize = 1_000;
 
 /// Alert produced when capacity eviction actually drops an evictable record.
+///
+/// 🔴 **淘汰一条记录会让上行当场永久停住。** 这一点在这个结构体的名字和字段里
+///    看不出来，而想给某个 envelope 加 `RetentionClass::Evictable` 的人恰好是在
+///    这里看。实测（`edge-store/tests/outbox.rs` 的
+///    `every_production_append_keeps_the_record_protected` 注释里有原始输出）：
+///
+///    容量 2、三条 Evictable，第三条进来淘汰第一条，这个告警如实报出
+///    `evicted_seq: 1`。**就在那一刻**，`ack` 到 3 已经是
+///    `AckCrossesUnresolvedSequence(1)` —— 因为那条判定要求区间里每个号是留存
+///    记录或**已接受的**丢失，而「已声明」不算。重启之后 `pending_gap_ids` 连
+///    空都不剩（`uplink_gaps` 没有任何读者，`rehydrate` 连 gap 参数都没有）。
+///
+/// ⚠️ 而它接受不了：`UplinkGap` / `UplinkGapAck` 在契约里定义着，但边缘从不发、
+///    网关也不处理 —— 两边都只有生成出来的类型。要用 `Evictable`，得先把这两个
+///    消息在两个仓库里接通。
+///
+/// 生产上四个 append 调用点全部传 `Protected`，所以这条路今天走不到；那件事
+/// 现在由上面那条断言钉着，不再只是一句注释。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapacityAlert {
     pub gap_id: String,
