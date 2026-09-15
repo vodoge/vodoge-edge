@@ -2192,6 +2192,49 @@ mod linux {
             // ⚠️ 只在**开**的时候问，理由见 `data_capability_gate`。
             if let Some(operation) = data_capability_gate(enabled) {
                 self.refuse_unsupported(Some(imei), operation)?;
+                // 🔴 再问一次这张卡自己的 `cellular_enabled`。
+                //
+                //    它和上面那道闸问的不是一件事：上面问的是「这个 (模组, 运营商)
+                //    组合被实测支持数据吗」，这里问的是「运维有没有把**这张卡**的
+                //    蜂窝数据关掉」。控制台把它们做成两列、两个确认对话框。
+                //
+                //    在这之前这个字段是只写的，于是那个开关点了等于没点。
+                let verdict = cellular_allows_data({
+                    let store = self.store.0.lock().expect("store");
+                    match store.list_local_modems() {
+                        Ok(modems) => match modems
+                            .iter()
+                            .find(|modem| modem.imei == imei)
+                            .and_then(|modem| modem.iccid.clone())
+                        {
+                            // 读不到 ICCID：没有卡号就没有这张卡的策略，按设备
+                            // 默认走。这和 `operating_context` 里那句注释同义。
+                            None => Ok(None),
+                            Some(iccid) => store
+                                .card_policy(&iccid)
+                                .map(|found| found.map(|policy| policy.cellular_enabled))
+                                .map_err(|error| error.to_string()),
+                        },
+                        Err(error) => Err(error.to_string()),
+                    }
+                });
+                match verdict {
+                    CellularVerdict::Allowed => {}
+                    CellularVerdict::RefusedByPolicy => {
+                        return Err(SendError::new(
+                            "cellular_disabled_for_card",
+                            "this card's policy has cellular data switched off; \
+                             allow it in the console first",
+                        ));
+                    }
+                    CellularVerdict::RefusedUnreadable => {
+                        return Err(SendError::new(
+                            "cellular_policy_unreadable",
+                            "this card's policy could not be read, so data is held down \
+                             until it can be; re-push the card policies from the console",
+                        ));
+                    }
+                }
             }
             // The QMI path first, because it is the one that produces a usable
             // interface. `AT+CGACT` attaches the bearer and stops there: it
@@ -2404,6 +2447,42 @@ mod linux {
                 .expect("store")
                 .replace_card_policies(&stored, policy_version, unix_ms())
                 .map_err(|error| SendError::new("card_policy_not_stored", error.to_string()))?;
+            // 🔴 承诺的前半句：「装着这张卡的模组会**断开**蜂窝数据」。
+            //
+            //    在这之前这一整段不存在 —— 下发只是把行写进库，然后什么都不做。
+            //    只拦住「再拉起来」不够：运维关掉蜂窝是为了止损，而一条已经在跑
+            //    的数据面不会自己停。
+            //
+            // ⚠️ 只断卡号对得上、而且那张卡被明确关掉的。读不到 ICCID 的模组不动
+            //    （理由见 `modems_to_drop`）。幂等由 `stop_data` 兜底：没有会话时
+            //    它报 `no_data_session`，所以同一份策略再推一次不做第二次功。
+            let dropped: Vec<serde_json::Value> = {
+                let modems = self
+                    .store
+                    .0
+                    .lock()
+                    .expect("store")
+                    .list_local_modems()
+                    .unwrap_or_default();
+                modems_to_drop(&modems, &stored)
+                    .into_iter()
+                    .map(|imei| {
+                        let outcome = self.radio.stop_data(imei);
+                        serde_json::json!({
+                            "imei": imei,
+                            // 三种结果都记：断开了、本来就没起来、真的失败了。
+                            // 一个只报成功的回执会把第三种读成第二种。
+                            "result": match &outcome {
+                                Ok(_) => "stopped".to_string(),
+                                Err(error) if error.reason_code == "no_data_session" => {
+                                    "already_down".to_string()
+                                }
+                                Err(error) => format!("failed: {}", error.reason_code),
+                            },
+                        })
+                    })
+                    .collect()
+            };
             json_details(&serde_json::json!({
                 "policy_version": policy_version,
                 "stored": written,
@@ -2411,6 +2490,7 @@ mod linux {
                     .iter()
                     .map(|policy| policy.iccid.clone())
                     .collect::<Vec<_>>(),
+                "cellular_dropped": dropped,
             }))
         }
 
@@ -2965,6 +3045,79 @@ mod linux {
     ///
     /// ⚠️ 接线只有一行（`set_data_network` 里那个 `if let`），宿主机上测不了
     /// ——它要一个真的 `Radio`。这里能钉住的是**策略**：开才问、关不问。
+    /// 这张卡的 `cellular_enabled` 允不允许把数据面拉起来。
+    ///
+    /// 🔴 这个字段此前是**只写**的：契约里有、库里存、下发时写进去，然后没有
+    ///    任何地方读回来做决定。而控制台在一个必须点确认的对话框里承诺：
+    ///
+    ///      「策略会立刻下发到本租户的所有设备：装着这张卡的模组会断开蜂窝数据，
+    ///        并且一直断到重新允许为止。语音与短信不受这条策略影响。」
+    ///
+    ///    两半都没兑现 —— 既不断开，也不保持。这个函数是后半句。
+    ///
+    /// ⚠️ 和 `data: Option<bool>` 不是一回事，别合并：那一个是运维填的**账单
+    ///    事实**（这个套餐卖不卖数据），走第 4 层、只做减法；这一个是**一条
+    ///    指令**（现在把这张卡的数据关掉）。控制台把它们做成两列、两个确认。
+    ///
+    /// 接线只有一行（`set_data_network` 里那个 match），宿主机上测不了 ——
+    /// 这里能钉住的是**策略**，和 `data_capability_gate` 同一个理由。
+    fn cellular_allows_data(policy: Result<Option<bool>, String>) -> CellularVerdict {
+        match policy {
+            Ok(Some(true)) => CellularVerdict::Allowed,
+            Ok(Some(false)) => CellularVerdict::RefusedByPolicy,
+            // 云端把整个租户的策略集推给每台设备，所以「这张卡没有行」是常态，
+            // 不是异常 —— 它按设备自己的默认走。把它也拦掉就是一道永远触发的闸。
+            Ok(None) => CellularVerdict::Allowed,
+            // 🔴 读不到就不拉起来。和同一轮修的那个订阅闸同一条规矩：读失败不许
+            //    坍缩成「没有限制」。极性在这里更清楚 —— 这个文件自己写着
+            //    「关不掉比开不起来严重得多」，所以**不拉起来**正是安全的那一边。
+            Err(_) => CellularVerdict::RefusedUnreadable,
+        }
+    }
+
+    /// 这次下发之后，哪几根模组要断开数据面。
+    ///
+    /// 承诺的前半句：「装着这张卡的模组会断开蜂窝数据」。
+    ///
+    /// ⚠️ 读不到 ICCID 的模组**不动**。没有卡号就不知道它装的是哪张卡，而按
+    ///    「不知道」去断一根可能完全无关的模组，是拿别人的数据面赌 —— 这些模组
+    ///    经 USB/IP 接入，没人能物理接触。
+    ///
+    ///    这和 `cellular_allows_data` 的极性相反，而两边都对：那里在决定**要不要
+    ///    开**，证据不足就不开；这里在决定**要不要动一根已经在跑的**，证据不足
+    ///    就别动。同一个文件里 `candidate_is_driven` 的注释说的是同一件事。
+    ///
+    /// 幂等由 `stop_data` 兜底：它在没有会话时返回 `no_data_session`，所以同一份
+    /// 策略再推一次不会做第二次功。
+    fn modems_to_drop<'a>(
+        modems: &'a [edge_store::LocalModem],
+        policies: &[edge_store::CardPolicy],
+    ) -> Vec<&'a str> {
+        modems
+            .iter()
+            .filter(|modem| {
+                modem.iccid.as_deref().is_some_and(|iccid| {
+                    policies
+                        .iter()
+                        .any(|policy| policy.iccid == iccid && !policy.cellular_enabled)
+                })
+            })
+            .map(|modem| modem.imei.as_str())
+            .collect()
+    }
+
+    /// `cellular_allows_data` 的三种答案。
+    ///
+    /// 三个变体而不是 `bool`：拒绝的两种理由指向完全不同的修法 —— 一个是
+    /// 「运维关掉了这张卡」（去控制台重新允许），另一个是「那一行读不出来」
+    /// （重推一次策略重写整行）。合成一个 bool 就把这件事丢了。
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CellularVerdict {
+        Allowed,
+        RefusedByPolicy,
+        RefusedUnreadable,
+    }
+
     fn data_capability_gate(enabled: bool) -> Option<edge_core::Operation> {
         enabled.then_some(edge_core::Operation::Data)
     }
@@ -10781,6 +10934,125 @@ mod linux {
                 radio_at_command(false),
                 "开和关发同一条命令 —— 那个按钮会变成单向的"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod cellular_policy_tests {
+        use super::{cellular_allows_data, modems_to_drop, CellularVerdict};
+        use edge_store::{CardPolicy, LocalModem};
+
+        fn card(iccid: &str, cellular_enabled: bool) -> CardPolicy {
+            CardPolicy {
+                iccid: iccid.into(),
+                cellular_enabled,
+                vertical: "iot".into(),
+                apn: None,
+                sms_send: None,
+                sms_receive: None,
+                data: None,
+                voice: None,
+            }
+        }
+
+        fn modem(imei: &str, iccid: Option<&str>) -> LocalModem {
+            LocalModem {
+                imei: imei.into(),
+                family: "EC20".into(),
+                firmware: None,
+                msisdn: None,
+                msisdn_iccid: None,
+                apn_contexts: None,
+                iccid: iccid.map(str::to_owned),
+                state: "online".into(),
+                last_seen: None,
+                mcc: None,
+                mnc: None,
+                home_mcc: None,
+                home_mnc: None,
+                imsi: None,
+                discovery: "qmi".into(),
+                manageable: true,
+                control_port: None,
+            }
+        }
+
+        /// 🔴 `cellular_enabled` 此前是**只写**的：契约里有、库里存、写进去，然后
+        ///    没有任何地方读回来做决定。而控制台在一个必须点确认的对话框里承诺：
+        ///
+        ///      「装着这张卡的模组会断开蜂窝数据，并且一直断到重新允许为止。」
+        ///
+        ///    两半都没兑现。这一条钉的是后半句。
+        #[test]
+        fn a_card_with_cellular_off_cannot_bring_data_up() {
+            assert_eq!(
+                cellular_allows_data(Ok(Some(false))),
+                CellularVerdict::RefusedByPolicy,
+            );
+        }
+
+        /// 负面对照：不许靠「永远拒绝」通过上面那条。
+        #[test]
+        fn a_card_with_cellular_on_still_brings_data_up() {
+            assert_eq!(cellular_allows_data(Ok(Some(true))), CellularVerdict::Allowed);
+        }
+
+        /// 没有策略行 = 这张卡按设备自己的默认走，不拦。
+        ///
+        /// ⚠️ 云端把整个租户的策略集推给每台设备，所以「这张卡没有行」是常态，
+        ///    不是异常。把它也拦掉就是一道永远触发的闸。
+        #[test]
+        fn a_card_with_no_policy_row_follows_the_device_default() {
+            assert_eq!(cellular_allows_data(Ok(None)), CellularVerdict::Allowed);
+        }
+
+        /// 读不到就不拉起来。
+        ///
+        /// 🔴 和同一轮修的那个订阅闸同一条规矩：读失败不许坍缩成「没有限制」。
+        ///    极性在这里更清楚 —— 这个文件自己写着「关不掉比开不起来严重得多」，
+        ///    所以**不拉起来**正是安全的那一边。
+        #[test]
+        fn an_unreadable_policy_does_not_bring_data_up() {
+            assert_eq!(
+                cellular_allows_data(Err("sqlite: boom".into())),
+                CellularVerdict::RefusedUnreadable,
+            );
+        }
+
+        /// 下发之后要断掉哪几根：卡号对得上、而且那张卡被关掉了。
+        #[test]
+        fn a_push_drops_the_modems_holding_a_disabled_card() {
+            let modems = vec![
+                modem("imei-a", Some("8986-a")),
+                modem("imei-b", Some("8986-b")),
+                modem("imei-none", None),
+            ];
+            let policies = vec![card("8986-a", false), card("8986-b", true)];
+            assert_eq!(modems_to_drop(&modems, &policies), vec!["imei-a"]);
+        }
+
+        /// ⚠️ 读不到 ICCID 的模组不许被断。没有卡号就不知道它装的是哪张卡，
+        ///    而按「不知道」去断一根可能完全无关的模组，是拿别人的数据面赌。
+        ///
+        ///    这和上面那条「读不到策略就不拉起来」方向相反，而两边都对：那里在
+        ///    决定**要不要开**，证据不足就不开；这里在决定**要不要动一根已经在
+        ///    跑的**，证据不足就别动。同一个文件里 `candidate_is_driven` 的注释
+        ///    写的是同一件事。
+        #[test]
+        fn a_modem_with_no_readable_iccid_is_left_alone() {
+            let modems = vec![modem("imei-none", None)];
+            let policies = vec![card("8986-a", false)];
+            assert!(modems_to_drop(&modems, &policies).is_empty());
+        }
+
+        /// 幂等：同一份策略再推一次，要断的还是那一根 —— 真正的幂等由
+        /// `stop_data` 在没有会话时报 `no_data_session` 保证，这一条钉的是
+        /// **选谁**这一步不会越推越多。
+        #[test]
+        fn pushing_the_same_policy_twice_selects_the_same_modems() {
+            let modems = vec![modem("imei-a", Some("8986-a"))];
+            let policies = vec![card("8986-a", false)];
+            assert_eq!(modems_to_drop(&modems, &policies), modems_to_drop(&modems, &policies));
         }
     }
 
