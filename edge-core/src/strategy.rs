@@ -104,15 +104,27 @@ pub enum RefusedBy {
     Carrier,
     /// The subscription is not sold as doing it.
     Subscription,
+    /// 这张卡的声明**读不出来**，所以不知道它有没有 withhold 这一项。
+    ///
+    /// 🔴 和 [`Self::Subscription`] 分开，不是为了好看：这两句话指向的修法完全
+    ///    不同。`Subscription` 的意思是「运维说过这个计划不含它」—— 要改就去
+    ///    控制台改声明。`SubscriptionUnreadable` 的意思是「那一行坏了」——
+    ///    去控制台重推一次策略（重推会重写整行）。把后者报成前者，等于把运维
+    ///    自己的声明说成一次他从没做过的拒绝的原因。
+    SubscriptionUnreadable,
 }
 
 impl RefusedBy {
     pub fn wire(self) -> &'static str {
+        // ⚠️ 不写 `_ =>`。新增一个层却忘了给它一个线上名字，应当编译不过，
+        //    而不是悄悄落进某个别的桶里 —— 这个仓库在 `RefusalKind::kind()`
+        //    上用的是同一条规矩（binding.rs 的注释写着「极性是反的」那一段）。
         match self {
             Self::Ledger => "untested",
             Self::Modem => "modem",
             Self::Carrier => "carrier",
             Self::Subscription => "subscription",
+            Self::SubscriptionUnreadable => "subscription_unreadable",
         }
     }
 }
@@ -228,12 +240,77 @@ pub struct SubscriptionCapability {
     pub sms_receive: Option<bool>,
     pub data: Option<bool>,
     pub voice: Option<bool>,
+    /// 这四个字段配不配当依据。
+    ///
+    /// 🔴 四个 `Option<bool>` 全是 `None` 有三种来历，而它们**不是**同一件事：
+    ///
+    ///   - 这张卡没人填过表        —— 合法的「没声明」，不拦
+    ///   - 这根模组读不到 ICCID    —— 没有卡号就没有声明，也不拦
+    ///   - **那一行读失败了**      —— 不知道声明是什么，拦
+    ///
+    ///    前两种共用 `None`，`declared()` 分不出第三种 —— 所以权威性必须从这
+    ///    四个字段**外面**带进来。这和 [`crate::MatrixAuthority`] 存在的理由
+    ///    一模一样（那里是 `CapabilityOrigin::Fallback` 分不出「没人写过规则」
+    ///    和「矩阵丢了」）。
+    ///
+    /// ⚠️ 默认是 [`SubscriptionAuthority::Declared`]，因为 `Default` 表达的是
+    ///    「读到了，只是空的」—— 那是这个类型在绝大多数调用点的含义，而把默认
+    ///    设成 `Unreadable` 会让每一个手写 `SubscriptionCapability::default()`
+    ///    的测试和调用点突然开始拦东西。要表达读失败必须**明写**。
+    pub authority: SubscriptionAuthority,
+}
+
+/// 这份声明的来历 —— 能不能拿它当「没有限制」的依据。
+///
+/// 照 [`crate::MatrixAuthority`] 的形状：不确定是一个**独立的变体**，带在数据
+/// 旁边而不是塞进数据里。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SubscriptionAuthority {
+    /// 读到了。四个字段就是运维填的（可能一个都没填）。
+    #[default]
+    Declared,
+    /// 这根模组读不到 ICCID。声明是按卡号挂的，没有卡号就没有声明。
+    ///
+    /// ⚠️ 这是合法的「没声明」，不是失败：它不拦任何东西，把判断留给账本和硬件。
+    NoCard,
+    /// **那一行读失败了。** 不知道声明是什么。
+    ///
+    /// 🔴 最可能的触发不是什么罕见故障，是运维**想收紧策略**：装机流程在每台
+    ///    机器上放了 `sqlite3`，而 0012 把那四列声明成 `INTEGER`（SQLite 只是
+    ///    亲和性），所以 `UPDATE card_policies SET sms_send = 'false'` 会原样
+    ///    存成 TEXT，整行解不开。实测：
+    ///    `Invalid column type Text at index: 4, name: sms_send`。
+    Unreadable,
 }
 
 impl SubscriptionCapability {
+    /// 那一行读失败了：不知道声明是什么。
+    pub fn unreadable() -> Self {
+        Self {
+            authority: SubscriptionAuthority::Unreadable,
+            ..Self::default()
+        }
+    }
+
+    /// 这根模组读不到 ICCID：没有卡号就没有声明。
+    pub fn no_card() -> Self {
+        Self {
+            authority: SubscriptionAuthority::NoCard,
+            ..Self::default()
+        }
+    }
+
     /// True when the operator has explicitly said this plan does not do it.
     pub fn withholds(&self, operation: Operation) -> bool {
         matches!(self.declared(operation), Some(false))
+    }
+
+    /// 这份声明能不能当「没有限制」的依据。
+    ///
+    /// 🔴 `false` 的时候**每一种操作都要拦**，而不是挑着拦：不知道声明是什么，
+    ///    就不知道它 withhold 了哪一个，挑着拦等于在猜。
+    pub fn is_authoritative(&self) -> bool {
+        !matches!(self.authority, SubscriptionAuthority::Unreadable)
     }
 
     pub fn declared(&self, operation: Operation) -> Option<bool> {
@@ -522,6 +599,22 @@ impl StrategyRegistry {
         }
 
         // 4. The subscription, last, and only ever subtracting.
+        //
+        // 🔴 读不到那一行，就不放行 —— 而不是当成「没有声明」。两边的代价不对称：
+        //    误拒是一条短信没发出去，而且下面那句话说清了原因；误放是按运维明确
+        //    不要的方式花掉他的钱，静默、持久、没有任何痕迹。
+        if !subscription.is_authoritative() {
+            return refuse(
+                RefusedBy::SubscriptionUnreadable,
+                format!(
+                    "the plan on this card could not be read, so {} is held back \
+                     until it can be; a row written by hand with the on-box sqlite3 \
+                     is the usual cause -- the four flag columns take 0 and 1, not \
+                     'false' and 'true'",
+                    operation.wire()
+                ),
+            );
+        }
         if subscription.withholds(operation) {
             return refuse(
                 RefusedBy::Subscription,

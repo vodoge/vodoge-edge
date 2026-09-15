@@ -168,6 +168,8 @@ fn a_subscription_cannot_grant_what_was_never_measured() {
         sms_receive: Some(true),
         data: Some(true),
         voice: Some(true),
+        // 读到了，只是运维把每一项都写了 true。
+        ..SubscriptionCapability::default()
     };
 
     let resolved = registry.resolve(
@@ -340,5 +342,134 @@ fn messaging_on_the_ec200_now_reaches_the_ledger_rather_than_a_ceiling() {
             ),
             Support::Supported(_) => panic!("still untested until somebody measures it"),
         }
+    }
+}
+
+/// 读不到那张卡的声明，和「这张卡没有声明」不是同一件事。
+///
+/// 🔴 实测出来的（2026-09-15，用真 `Store`）：
+///
+/// ```text
+/// 正常写入后 sms_send = Some(Some(false))    ← 声明生效
+/// 手工 UPDATE 之后列里存的类型 = text
+/// 读失败: Invalid column type Text at index: 4, name: sms_send
+/// 调用点 .ok().flatten() 看到的 = None       ← 和「这张卡没有声明」一模一样
+/// ```
+///
+/// 装机流程在每台机器上放了 `sqlite3`。运维打开它、按直觉敲
+/// `UPDATE card_policies SET sms_send = 'false'` 想**关掉**发短信 —— 0012 把那
+/// 四列声明成 `INTEGER`（SQLite 只是亲和性，`'false'` 原样存成 TEXT），而取值那
+/// 一步要 `Option<i64>`，于是整行解不开。**收紧这个动作本身把限制取消了。**
+///
+/// 生产上三张卡**全部**声明了 `sms_send: false`，而云端发短信只查每小时配额、
+/// 不查卡策略（控制台只给 device_id，哪张卡由边缘决定），所以这道闸没有第二层。
+///
+/// ⚠️ 这里钉的是极性：读不到就**不放行**。代价对比是不对称的 ——
+///    误拒的代价是一条短信没发出去，而且会有一条响亮的告警说清原因和怎么修；
+///    误放的代价是按运维明确不要的方式花掉他的钱，而且没有任何痕迹。
+#[test]
+fn an_unreadable_plan_withholds_instead_of_permitting() {
+    let mut ledger = SupportLedger::new();
+    ledger.record(
+        ModemFamily::EC20,
+        CarrierProfile::GENERIC_INTERNATIONAL,
+        sms_both(Bearer::Cellular),
+    );
+    let registry = builtin_strategy_registry(ledger).expect("registry");
+
+    let resolved = registry.resolve(
+        &ModemFamily::EC20,
+        &CarrierProfile::GENERIC_INTERNATIONAL,
+        &SubscriptionCapability::unreadable(),
+        Operation::SmsSend,
+    );
+    assert!(
+        !resolved.is_supported(),
+        "读不到声明却放行了 —— 那正是「收紧反而放开」的那条路",
+    );
+    match resolved.support {
+        Support::Unsupported { by, ref reason } => {
+            // 🔴 不是 `Subscription`。那一个的意思是「运维说过这个计划不含它」，
+            //    修法是去控制台改声明；这一个的意思是「那一行坏了」，修法是重推
+            //    策略。报错了层，运维会去改一个他从没填过的字段。
+            assert_eq!(by, RefusedBy::SubscriptionUnreadable);
+            assert!(
+                reason.contains("could not be read"),
+                "拒绝的理由要说清是读不到，而不是「计划里没有」—— 两者的修法完全不同：{reason}",
+            );
+        }
+        other => panic!("期望一条 Unsupported，拿到 {other:?}"),
+    }
+}
+
+/// 负面对照：不许靠「永远拒绝」通过上面那条。
+///
+/// 🔴 上面那条断言可以被一个「subscription 层永远拒绝」的实现满足，而那会让这
+///    台机器一条短信都发不出去。这两条必须一起看。
+#[test]
+fn a_readable_plan_that_declares_nothing_still_permits() {
+    let mut ledger = SupportLedger::new();
+    ledger.record(
+        ModemFamily::EC20,
+        CarrierProfile::GENERIC_INTERNATIONAL,
+        sms_both(Bearer::Cellular),
+    );
+    let registry = builtin_strategy_registry(ledger).expect("registry");
+
+    // 读到了，只是这张卡没人填过表 —— 合法的「没声明」，一如既往不拦。
+    assert!(
+        registry
+            .resolve(
+                &ModemFamily::EC20,
+                &CarrierProfile::GENERIC_INTERNATIONAL,
+                &SubscriptionCapability::default(),
+                Operation::SmsSend,
+            )
+            .is_supported(),
+        "没人填过表的卡被拦住了 —— 那是一道永远触发的闸",
+    );
+    // 这张卡没有可读的 ICCID：没有卡号就没有声明，同样是合法的「没声明」。
+    assert!(
+        registry
+            .resolve(
+                &ModemFamily::EC20,
+                &CarrierProfile::GENERIC_INTERNATIONAL,
+                &SubscriptionCapability::no_card(),
+                Operation::SmsSend,
+            )
+            .is_supported(),
+        "读不到 ICCID 的模组被拦住了",
+    );
+}
+
+/// 读不到的时候，四种操作**每一种**都拦。
+///
+/// ⚠️ 不知道声明是什么，就不知道它withhold了哪一个。挑着拦等于在猜。
+#[test]
+fn an_unreadable_plan_withholds_every_operation() {
+    let mut ledger = SupportLedger::new();
+    ledger.record(
+        ModemFamily::EC20,
+        CarrierProfile::GENERIC_INTERNATIONAL,
+        sms_both(Bearer::Cellular),
+    );
+    let registry = builtin_strategy_registry(ledger).expect("registry");
+
+    for operation in [
+        Operation::SmsSend,
+        Operation::SmsReceive,
+        Operation::Data,
+        Operation::Voice,
+    ] {
+        let resolved = registry.resolve(
+            &ModemFamily::EC20,
+            &CarrierProfile::GENERIC_INTERNATIONAL,
+            &SubscriptionCapability::unreadable(),
+            operation,
+        );
+        assert!(
+            !resolved.is_supported(),
+            "{operation:?} 在声明读不到的时候仍然放行了",
+        );
     }
 }

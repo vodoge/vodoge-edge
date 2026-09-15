@@ -1684,17 +1684,63 @@ mod linux {
             // The plan is keyed on the card, so a module with no readable
             // ICCID has no declaration -- which withholds nothing, and leaves
             // the ledger and the hardware to decide.
-            let subscription = modem
-                .iccid
-                .as_deref()
-                .and_then(|iccid| store.card_policy(iccid).ok().flatten())
-                .map(|policy| edge_core::SubscriptionCapability {
-                    sms_send: policy.sms_send,
-                    sms_receive: policy.sms_receive,
-                    data: policy.data,
-                    voice: policy.voice,
-                })
-                .unwrap_or_default();
+            //
+            // 🔴 但**读失败**不是那个意思。上一版这里是
+            //    `.and_then(|iccid| store.card_policy(iccid).ok().flatten())`，
+            //    `.ok()` 把 `Err` 压成 `None`，于是一次读取失败和「这张卡没人
+            //    填过表」变成同一件事 —— 而后者什么都不拦。
+            //
+            //    最可能的触发不是罕见故障，是运维**想收紧策略**：装机流程在每台
+            //    机器上放了 `sqlite3`，而 0012 把那四列声明成 `INTEGER`（SQLite
+            //    只是亲和性），所以按直觉敲
+            //    `UPDATE card_policies SET sms_send = 'false'` 会原样存成 TEXT，
+            //    整行解不开。实测：`Invalid column type Text at index: 4`。
+            //    **收紧这个动作本身把限制取消了**，静默、持久、每行独立。
+            //
+            //    生产上三张卡全部声明了 `sms_send: false`，而云端发短信只查每小时
+            //    配额、不查卡策略（控制台只给 device_id，哪张卡由边缘决定），
+            //    所以这道闸没有第二层兜底。
+            let subscription = match modem.iccid.as_deref() {
+                // 没有卡号就没有声明 —— 合法的「没声明」，一如既往不拦。
+                None => edge_core::SubscriptionCapability::no_card(),
+                Some(iccid) => match store.card_policy(iccid) {
+                    Ok(Some(policy)) => edge_core::SubscriptionCapability {
+                        sms_send: policy.sms_send,
+                        sms_receive: policy.sms_receive,
+                        data: policy.data,
+                        voice: policy.voice,
+                        ..edge_core::SubscriptionCapability::default()
+                    },
+                    // 读到了，这张卡确实没人填过表。
+                    Ok(None) => edge_core::SubscriptionCapability::default(),
+                    Err(error) => {
+                        // ⚠️ 喊出来。`.ok()` 那一版连一行日志都没有，而这条路
+                        //    是持久的：不喊的话它会一直安静地放行下去。
+                        //    edge-store 的 WAL 回退也是这么走 stderr 的
+                        //    （journald 下 stderr 进同一份日志）。
+                        //
+                        // 🔴 **刻意不发 `raise_alert`**，虽然矩阵那一支的成例是
+                        //    Critical 告警。理由是这条路和那条不同：矩阵在**启动时**
+                        //    读一次，读坏了这台机器就一直按一份它读不懂的配置跑，
+                        //    而没有任何人的动作会暴露这件事 —— 所以必须主动喊。
+                        //
+                        //    这里是**事件驱动**的：这个闸只在有人真的要发短信或者
+                        //    拉数据的时候才走到（云端 SmsSend、面板 SmsSend、
+                        //    SetDataNetwork 开），而拒绝会以
+                        //    `sms_send_refused_by_subscription_unreadable` + 下面
+                        //    那句完整原因回到云端，运维在那条被拒的命令上就看得见。
+                        //    一条和拒绝同时发生、内容也一样的告警，换来的是把 outbox
+                        //    穿进 `RadioPort`（它今天没有这个字段）。不值。
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "card policy for {iccid} could not be read, so every \
+                             operation on it is held back until it can be: {error}"
+                        );
+                        edge_core::SubscriptionCapability::unreadable()
+                    }
+                },
+            };
 
             Ok(edge_core::OperatingContext {
                 family: ModemFamily::from(modem.family.as_str()),
