@@ -353,6 +353,7 @@ impl<O: Outbox> UplinkWorker<O> {
             lowest_retained_seq: self.outbox.lowest_retained_seq(),
             pending_gap_ids: self.outbox.pending_gap_ids(),
             capability_matrix_version: previous.capability_matrix_version.clone(),
+            card_policy_version: previous.card_policy_version.clone(),
             edge_version: previous.edge_version.clone(),
             queue_records: Some(self.outbox.queue_records()),
             queue_bytes: self.outbox.queue_bytes(),

@@ -23,6 +23,7 @@ fn snapshot() -> ResumeSnapshot {
         lowest_retained_seq: None,
         pending_gap_ids: Vec::new(),
         capability_matrix_version: "1".into(),
+        card_policy_version: None,
         edge_version: None,
         queue_records: None,
         queue_bytes: None,

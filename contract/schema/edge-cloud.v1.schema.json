@@ -730,6 +730,12 @@
           "minLength": 1,
           "maxLength": 128
         },
+        "card_policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "The card-policy set this device currently holds, as the cloud last labelled it. Absent when the device holds none -- which is not the same as holding an empty set, and is why this is optional rather than an empty string: an agent that has never received a push and one that was pushed an empty set both have nothing to enforce, but only the first has never been told anything."
+        },
         "edge_version": {
           "type": "string",
           "maxLength": 128

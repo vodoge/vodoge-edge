@@ -136,6 +136,8 @@ pub struct ResumePayload {
     pub pending_gap_ids: Vec<String>,
     #[serde(rename = "capability_matrix_version")]
     pub capability_matrix_version: String,
+    #[serde(rename = "card_policy_version", default, skip_serializing_if = "Option::is_none")]
+    pub card_policy_version: Option<String>,
     #[serde(rename = "edge_version", default, skip_serializing_if = "Option::is_none")]
     pub edge_version: Option<String>,
     #[serde(rename = "queue_records", default, skip_serializing_if = "Option::is_none")]

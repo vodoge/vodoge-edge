@@ -4939,12 +4939,14 @@ mod linux {
         });
 
         let uplink_outbox = outbox.clone();
+        let uplink_store = shared.clone();
         let uplink_executor = executor.clone();
         let uplink_matrix = live_matrix.clone();
         let resumed_for_uplink = uplink_ever_resumed.clone();
         std::thread::spawn(move || {
             uplink_loop(
                 uplink_outbox,
+                uplink_store,
                 uplink_executor,
                 uplink_matrix,
                 uplink_online,
@@ -10479,6 +10481,12 @@ mod linux {
 
     fn uplink_loop(
         outbox: Arc<Mutex<DurableOutbox>>,
+        // 只为在 Resume 里报一次卡策略版本。
+        //
+        // ⚠️ 单独传进来，而不是从 `executor` 里掏 —— 掏的话要先锁 executor
+        //    再锁 store，而这个文件对锁序有过教训（见 `live_matrix` 那段
+        //    「叶子锁」注释）。
+        store: Arc<SharedStore>,
         executor: Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: Arc<Mutex<CapabilityMatrix>>,
         online: Arc<AtomicBool>,
@@ -10538,6 +10546,7 @@ mod linux {
                 &cert_dir,
                 &device_id,
                 &outbox,
+                &store,
                 &executor,
                 &live_matrix,
                 &online,
@@ -10599,6 +10608,7 @@ mod linux {
         // 它必须和证书的 CN 一致，网关逐帧比对。
         device_id: &str,
         outbox: &Arc<Mutex<DurableOutbox>>,
+        store: &Arc<SharedStore>,
         executor: &Arc<Mutex<CommandExecutor<RadioPort>>>,
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         online: &Arc<AtomicBool>,
@@ -10615,6 +10625,27 @@ mod linux {
             .expect("capability matrix")
             .version()
             .to_string();
+        // 手上那套卡策略的版本。`None` = 一条都没有。
+        //
+        // 🔴 这个函数（`card_policy_version`）在这之前**零生产调用者** —— 它一直
+        //    就是为这件事存在的，只是没人接。2026-09-15 在生产上量到的后果：
+        //    云端有三张卡、全部声明了 `sms_send: false`，而这台机器的
+        //    `card_policies` 是 0 行。下发只在运维改策略的那一刻发生一次，
+        //    历史上 5 次里 2 次因设备离线过期、1 次失败，之后再没有人重试。
+        //
+        // ⚠️ 读失败也报 `None`，不装作「我有某个版本」。云端看到 `None` 会补推
+        //    一次 —— 补推恰好是读失败该有的处理（`replace_card_policies` 会重写
+        //    整行，而一行解不开正是它可能坏掉的样子）。
+        //
+        // ⚠️ 在锁 outbox **之前**读完，锁在这一句结束就放掉 —— 和上面读矩阵
+        //    版本同一条规矩：两把锁不叠。
+        let card_policy_version = store
+            .0
+            .lock()
+            .expect("store")
+            .card_policy_version()
+            .ok()
+            .flatten();
         let snapshot = {
             let box_ = outbox.lock().expect("outbox");
             ResumeSnapshot {
@@ -10623,6 +10654,7 @@ mod linux {
                 lowest_retained_seq: box_.lowest_retained_seq(),
                 pending_gap_ids: box_.pending_gap_ids(),
                 capability_matrix_version: matrix_version,
+                card_policy_version,
                 edge_version: Some(env!("CARGO_PKG_VERSION").into()),
                 queue_records: Some(box_.queue_records()),
                 queue_bytes: box_.queue_bytes(),

@@ -24,6 +24,18 @@ pub struct ResumeSnapshot {
     pub lowest_retained_seq: Option<u64>,
     pub pending_gap_ids: Vec<String>,
     pub capability_matrix_version: String,
+    /// 这台机器手上那套卡策略的版本，`None` = 一条都没有。
+    ///
+    /// 🔴 `None` 和空字符串不是一回事，所以是 `Option`：**从来没收到过推送**
+    ///    和「收到过一套空的」都表现为「没有可执行的限制」，但只有前者意味着
+    ///    云端说过的话根本没到过这台机器。云端要靠这个差别决定补不补推。
+    ///
+    /// ⚠️ 加它的理由是 2026-09-15 在生产上量到的：云端有三张卡、全部声明了
+    ///    `sms_send: false`，而这台机器的 `card_policies` 是**0 行**。
+    ///    下发只在运维通过 API 改策略的那一刻发生一次，没有任何对账 ——
+    ///    历史上 5 次下发里 2 次因设备离线过期、1 次因当时的边缘不认识这个
+    ///    命令而失败，之后再没有人重试。
+    pub card_policy_version: Option<String>,
     pub edge_version: Option<String>,
     pub queue_records: Option<i64>,
     pub queue_bytes: Option<i64>,
@@ -206,6 +218,7 @@ impl LinkSession {
             last_acked_seq: snapshot.last_acked_seq,
             pending_gap_ids: snapshot.pending_gap_ids.clone(),
             capability_matrix_version: snapshot.capability_matrix_version.clone(),
+            card_policy_version: snapshot.card_policy_version.clone(),
             edge_version: snapshot.edge_version.clone(),
             queue_records: snapshot.queue_records,
             queue_bytes: snapshot.queue_bytes,
