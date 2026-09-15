@@ -10970,6 +10970,167 @@ mod linux {
     }
 
     #[cfg(test)]
+    mod gated_operations_tests {
+        /// 四项声明里，只有两项真的会拦东西 —— 而另外两项**不该**被接上。
+        ///
+        /// 2026-09-15 用真的策略注册表量过（生产那套账本，EC20 × CN-Mobile）：
+        ///
+        /// ```text
+        /// SmsSend:    Unsupported { by: Subscription, "…not including sms_mo" }
+        /// SmsReceive: Unsupported { by: Subscription, "…not including sms_mt" }
+        /// Data:       Unsupported { by: Subscription, "…not including data" }
+        /// Voice:      Unsupported { by: Ledger, "…needing a probe, which is not a measurement" }
+        /// ```
+        ///
+        /// 也就是说第 4 层的逻辑对三项都是对的，而生产代码只拿其中两项去问过它。
+        /// 缺的那两项各有各的理由，而且**都不是「忘了接」**：
+        ///
+        /// 🔴 `SmsReceive` 不该接。那条短信已经到了 —— 网络投递过、模组存下了。
+        ///    「扣留」一次收取只有两种实现：留在模组里（而
+        ///    `sweep_inbox_over_at` 的文档写着「The store is small and a full one
+        ///    stops accepting new messages」），或者读出来丢掉（直接丢数据）。
+        ///    声明是**只做减法**的，减的是「要不要去尝试」；而收取没有可减的尝试。
+        ///    拿一条可能过期的声明去拦它，代价是丢消息。
+        ///
+        /// 🔴 `Voice` 接不上。它在第 2 层就停了：没有任何 (型号, 运营商) 对被测量
+        ///    过 voice（账本里是 `Probe`，而「需要探测」不是一次测量），而
+        ///    EC200U 的天花板更直接 ——「this agent has no voice path at all」。
+        ///    声明永远拿不到发言机会，因为操作在两层之前就被拒了。
+        ///
+        /// ⚠️ 所以这条断言是**双向**的锁：
+        ///    ① 把 SmsSend 或 Data 的闸拿掉会红（那是在放掉真的在省钱的两道）；
+        ///    ② 把 SmsReceive 或 Voice 接上也会红 —— 接上去的那个实现要么丢消息，
+        ///       要么是一段永远走不到的死代码，而两者都该先有人解释。
+        #[test]
+        fn only_the_two_operations_that_can_withhold_are_gated() {
+            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("workspace root")
+                .to_path_buf();
+
+            // 从目录枚举调用方的源文件，不写手写清单。
+            let mut sources = Vec::new();
+            for crate_name in ["edge-bin", "edge-agent"] {
+                let dir = workspace.join(crate_name).join("src");
+                assert!(dir.is_dir(), "{} 不在了", dir.display());
+                let mut stack = vec![dir];
+                while let Some(current) = stack.pop() {
+                    for entry in std::fs::read_dir(&current).expect("read_dir") {
+                        let path = entry.expect("entry").path();
+                        if path.is_dir() {
+                            stack.push(path);
+                        } else if path.extension().is_some_and(|ext| ext == "rs") {
+                            sources.push(path);
+                        }
+                    }
+                }
+            }
+            assert!(!sources.is_empty(), "一个调用方源文件都没枚举到");
+
+            let mut gated: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            let mut unresolved = Vec::new();
+            let mut call_sites = 0usize;
+            for path in &sources {
+                let source = std::fs::read_to_string(path).expect("read");
+                for (offset, _) in source.match_indices("refuse_unsupported(") {
+                    let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+                    let prefix = &source[line_start..offset];
+                    // 定义处不算。
+                    if prefix.contains("fn ") {
+                        continue;
+                    }
+                    // ⚠️ **这条断言自己的源码也在扫描范围里**，而它的字符串字面量和
+                    //    注释里都写着 `refuse_unsupported(`。第一版没排除，于是它被
+                    //    自己绊倒，报了一处「认不出来的调用点」——指向的是它自己。
+                    //    这个仓库同一类自指的坑踩过不止一次（`api.rs` 那条守卫被
+                    //    自己的注释绊过，控制台那条被自己的修复说明绊过）。
+                    if prefix.trim_start().starts_with("//")
+                        || prefix.contains('"')
+                        || prefix.contains("match_indices")
+                    {
+                        continue;
+                    }
+                    call_sites += 1;
+                    // 取到配平的右括号为止。
+                    let mut depth = 0i32;
+                    let mut end = None;
+                    for (index, ch) in source[offset..].char_indices() {
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(offset + index);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let Some(end) = end else { continue };
+                    let call = &source[offset..=end];
+                    let mut found = false;
+                    for name in ["SmsSend", "SmsReceive", "Data", "Voice"] {
+                        if call.contains(&format!("Operation::{name}")) {
+                            *gated.entry(name).or_default() += 1;
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        // 字面量之外唯一的形状：`data_capability_gate` 算出来的那个
+                        // `Option<Operation>`，它只可能是 Data（`enabled.then_some(Data)`）。
+                        // 认这一种，别的形状报出来。
+                        let line_end = source[offset..].find('\n').map_or(source.len(), |i| offset + i);
+                        let context_start = source[..offset].rfind("fn ").unwrap_or(0);
+                        if source[context_start..line_end].contains("data_capability_gate") {
+                            *gated.entry("Data").or_default() += 1;
+                        } else {
+                            let line = source[..offset].matches('\n').count() + 1;
+                            unresolved.push(format!("{}:{line}", path.display()));
+                        }
+                    }
+                }
+            }
+
+            assert!(
+                call_sites >= 3,
+                "只找到 {call_sites} 处 refuse_unsupported 调用 —— 扫描坏了。\
+                 2026-09-15 有三处：edge-agent/src/lib.rs 一处（SmsSend）、\
+                 edge-bin/src/main.rs 两处（data_capability_gate 的 Data、面板发送的 SmsSend）",
+            );
+            assert_eq!(
+                unresolved,
+                Vec::<String>::new(),
+                "一处 refuse_unsupported 的操作参数这条断言认不出来。先弄清它传的是哪一项，\
+                 再决定是解析它还是登记它 —— 悄悄跳过会让下面那条断言变成在数空气",
+            );
+            assert_eq!(
+                gated.keys().copied().collect::<Vec<_>>(),
+                vec!["Data", "SmsSend"],
+                "生产代码问过闸的操作变了。往里加 SmsReceive 或 Voice 之前先读这条测试的注释：\
+                 收取没有可扣留的尝试（拦它就是丢消息），而 voice 在第 2 层就被拒了",
+            );
+
+            // ⚠️ 上面那条钉的是「哪些操作被拦」，**不是「每一条路都拦了」**。
+            //
+            // 🔴 这个区别是变异验证逼出来的：把 edge-agent 那处 SmsSend 改成别的，
+            //    上面那条仍然全绿 —— 因为 edge-bin 里还有第二处 SmsSend，集合没变。
+            //    而丢掉的那一处正是**云端下发的发送**要过的闸，也就是真正在省钱的
+            //    那一道。所以每一项还要钉住有几条路问过它。
+            //
+            // 今天两条 SmsSend：云端命令那条（edge-agent/src/lib.rs）和面板自己发
+            // 那条（edge-bin/src/main.rs）——面板曾经是绕过账本的后门，那一处就是
+            // 为此补上的。Data 一条：`set_data_network` 开的时候。
+            assert_eq!(gated.get("SmsSend").copied(), Some(2),
+                "问过 SmsSend 的路数变了。今天是两条：云端下发的发送、以及面板自己发的。\
+                 少一条就是又开了一个绕过账本的后门（面板那条历史上就是这么补上的）");
+            assert_eq!(gated.get("Data").copied(), Some(1),
+                "问过 Data 的路数变了。今天只有一条：set_data_network 开数据面的时候 ——\
+                 关的时候刻意不问（见 data_capability_gate：关不掉比开不起来严重得多）");
+        }
+    }
+
+    #[cfg(test)]
     mod cellular_policy_tests {
         use super::{cellular_allows_data, modems_to_drop, CellularVerdict};
         use edge_store::{CardPolicy, LocalModem};
