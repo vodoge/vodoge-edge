@@ -161,3 +161,95 @@ fn voided_pairs_read_as_untested_in_the_builtin_matrix() {
         );
     }
 }
+
+/// 内置矩阵不许比云端账本**多声称**任何东西。
+///
+/// 🔴 2026-09-18 在生产上并排量过，两份在三处不一致，而且方向相反：
+///
+/// ```text
+///                              内置        云端
+///   EC20×CN-Mobile  Data       放行        拒绝(untested)
+///   EC20×Generic    Data       放行        拒绝(untested)
+///   EC20×Generic    SmsReceive 拒绝        放行
+/// ```
+///
+///   而两份的版本号都写着 `2026-09-05` —— 看起来像同一份。
+///
+///   代价：一台**还没收到推送**的机器（新装的、或者矩阵读不出来回落的）会对两个
+///   云端从没测过的组合放行数据面 —— 那是花钱的方向；同时拒绝一个云端测过的收
+///   短信组合。
+///
+/// ⚠️ 这条断言**只管一个方向**：内置比云端多说的（`supported` 而云端没有），
+///    因为那一边的代价是「拿没测过的结论去放行」。内置比云端少说的不拦 ——
+///    少说只会让机器更保守，而在还没收到推送时保守正是对的。
+///
+/// 🔴 云端那一份是从生产库抓下来的快照（`app.support_ledger`，4 行，
+///    2026-09-05T07:36:10Z）。写成夹具而不是去连库：这是一条单元测试，而它要
+///    钉的是「内置这份文件里的每一条都有出处」—— 出处变了要有人来改这份快照，
+///    那一刻正是该重新想一遍的时候。
+#[test]
+fn the_builtin_matrix_claims_nothing_the_cloud_ledger_does_not() {
+    // (型号, 运营商, sms_mo, sms_mt, data) —— None = 账本里没这一项。
+    let ledger: &[(&str, &str, Option<&str>, Option<&str>, Option<&str>)] = &[
+        ("EC20", "CN-Mobile", Some("supported"), Some("supported"), None),
+        ("EC20", "CN-Telecom", Some("unsupported"), Some("unsupported"), Some("supported")),
+        ("EC20", "Generic-International", Some("probe"), Some("supported"), None),
+        ("EC200U-CN", "CN-Telecom", Some("supported"), Some("supported"), None),
+    ];
+
+    let builtin = include_str!("../capabilities/capability-matrix.toml");
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+
+    // 逐条规则解析出 (family, carrier, 各项 kind)。
+    for block in builtin.split("[[rule]]").skip(1) {
+        let field = |name: &str| -> Option<String> {
+            block.lines().find_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix(name)?.trim_start().strip_prefix('=')?;
+                Some(rest.trim().trim_matches('"').to_string())
+            })
+        };
+        let kind = |name: &str| -> Option<String> {
+            let raw = field(name)?;
+            let at = raw.find("kind")?;
+            let rest = &raw[at..];
+            let start = rest.find('"')? + 1;
+            let end = rest[start..].find('"')? + start;
+            Some(rest[start..end].to_string())
+        };
+        let (Some(family), Some(carrier)) = (field("modem_family"), field("carrier")) else {
+            continue;
+        };
+        let row = ledger
+            .iter()
+            .find(|(f, c, ..)| *f == family && *c == carrier);
+        let Some((_, _, l_mo, l_mt, l_data)) = row else {
+            offenders.push(format!("{family} × {carrier}：整条规则在云端账本里没有出处"));
+            continue;
+        };
+        for (name, cloud) in [("sms_mo", l_mo), ("sms_mt", l_mt), ("data", l_data)] {
+            checked += 1;
+            let Some(local) = kind(name) else { continue };
+            // 只拦「内置说 supported 而云端没说」。见上面那段注释。
+            if local == "supported" && *cloud != Some("supported") {
+                offenders.push(format!(
+                    "{family} × {carrier} 的 {name}：内置说 supported，云端账本是 {}",
+                    cloud.unwrap_or("（没有这一项）"),
+                ));
+            }
+        }
+    }
+
+    assert!(
+        checked >= 9,
+        "只检查了 {checked} 项 —— 解析坏了，不是规则变少了（3 条规则 × 3 项）",
+    );
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
+        "内置矩阵比云端账本多声称了东西。一台还没收到推送的机器会拿这些没有出处的\n\
+         结论去放行 —— 而 data 那一项是花钱的方向。\n\
+         要么把它从内置矩阵里删掉，要么先在云端账本里记下这次测量。",
+    );
+}
