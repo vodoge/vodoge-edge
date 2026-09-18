@@ -803,6 +803,30 @@ pub fn FleetOverview(state: StatusState) -> impl IntoView {
                                         // 🔴 画在这一行里，而不是折进详情：
                                         // 它说的是「这一根随时可能不再被管」，
                                         // 而运维扫这份列表时不会点开任何东西。
+                                        // 这一趟判不了。
+                                        //
+                                        // 🔴 和下面那个「闸」标记分开画，而且用
+                                        // 中性色：它说的不是「这一根出问题了」，
+                                        // 是「这一趟没能检查它」。在此之前这两种
+                                        // 情况在这一行上长得一模一样 —— hold 不写
+                                        // 库里的标记，而这一行读的就是那个标记。
+                                        // 生产上 retro_hold 发生过 93 次。
+                                        {m
+                                            .hold
+                                            .as_ref()
+                                            .map(|reason| {
+                                                view! {
+                                                    <span class="vd-fleetrow-gate">
+                                                        <Badge
+                                                            color=BadgeColor::Subtle
+                                                            size=BadgeSize::Small
+                                                        >
+                                                            "未判定"
+                                                        </Badge>
+                                                        {crate::gate::hold_notice(reason)}
+                                                    </span>
+                                                }
+                                            })}
                                         {m
                                             .gate_failure
                                             .as_ref()
@@ -1346,6 +1370,7 @@ mod tests {
             manageable: true,
             capability_origin: edge_panel_api::CapabilityOrigin::Rule,
             gate_failure: None,
+            hold: None,
             carrier_profile: String::new(),
             control_port: None,
             firmware: None,

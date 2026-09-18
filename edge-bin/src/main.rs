@@ -4924,6 +4924,14 @@ mod linux {
         let panel_store = shared.clone();
         let panel_online = uplink_online.clone();
         let panel_matrix = live_matrix.clone();
+        // 当前这一趟追溯执行判不了的模组。追溯循环写，面板读。
+        //
+        // 🔴 这张表存在的理由：`Hold` 刻意**不写**库里的 gate 标记（写了就会推进
+        //    倒计时），于是面板分不出「刚检查过、没问题」和「这一趟根本判不了」。
+        //    生产上 `retro_hold` 发生过 93 次，那 93 次里运维看到的都是前者。
+        let panel_holds: edge_panel::Holds =
+            Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let retro_holds = panel_holds.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("tokio");
             if let Err(error) = runtime.block_on(serve(
@@ -4932,6 +4940,7 @@ mod linux {
                 Some(panel_actions),
                 panel_online,
                 panel_matrix,
+                panel_holds,
                 panel_token_path,
             )) {
                 log_error(format!("panel: {error}"));
@@ -4975,6 +4984,7 @@ mod linux {
                 &live_matrix,
                 &matrix_authority,
                 &uplink_ever_resumed,
+                &retro_holds,
                 &mut memory,
             ) {
                 log_error(format!("poll: {error}"));
@@ -5246,6 +5256,8 @@ mod linux {
         live_matrix: &Arc<Mutex<CapabilityMatrix>>,
         matrix_authority: &Arc<AtomicU8>,
         uplink_ever_resumed: &Arc<AtomicBool>,
+        // 这一趟判不了的模组写到哪。只影响面板的显示，见 `edge_panel::Holds`。
+        holds: &edge_panel::Holds,
         memory: &mut PollMemory,
     ) -> Result<(), String> {
         let now = unix_ms();
@@ -5648,7 +5660,8 @@ mod linux {
             edge_core::MatrixAuthority::from_u8(matrix_authority.load(Ordering::Relaxed)),
             uplink_ever_resumed.load(Ordering::Relaxed),
             discoveries.as_deref(),
-            now,
+            holds,
+                    now,
         );
 
         // Read separately from the snapshots: the registry is the authority on
@@ -8803,6 +8816,8 @@ mod linux {
         authority: edge_core::MatrixAuthority,
         uplink_ever_resumed: bool,
         discoveries: Option<&[edge_store::LocalModemDiscovery]>,
+        // 这一趟判不了的那些写到哪。面板读它，见 `edge_panel::Holds`。
+        holds: &edge_panel::Holds,
         now: i64,
     ) {
         // 候选列表读不到 → 整趟作废。
@@ -8893,6 +8908,21 @@ mod linux {
             let evidence = build_evidence(&judged, &gates, &observed, discoveries, now);
             let mut plan = plan_enforcement(matrix, authority, uplink_ever_resumed, &evidence, now);
             plan.hold.extend(unreadable_holds);
+
+            // 这一趟的 hold 覆盖上去，整张表换掉而不是增量更新。
+            //
+            // 🔴 整张换：hold 是**这一趟**的判断，上一趟判不了、这一趟判得了的
+            //    那些必须消失。增量更新会让一个已经不成立的 hold 永远留在面板上，
+            //    而永远亮着的灯没有人看。
+            //
+            // ⚠️ 在执行之前写，不在之后：下面那几步任何一步失败都不该让面板继续
+            //    显示一个过时的判断。而这张表只影响显示，写它不会影响任何决定。
+            if let Ok(mut current) = holds.lock() {
+                current.clear();
+                for (imei, reason) in &plan.hold {
+                    current.insert(imei.clone(), reason.wire().to_string());
+                }
+            }
 
             // 执行。
             for imei in &plan.keep {

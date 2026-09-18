@@ -398,9 +398,54 @@ struct PanelState {
     ///    就直接不启动，见那里的注释。`None` 表示「这个 router 不设闸」，
     ///    只有进程内测试会走到。
     guard: Option<Arc<guard::Guard>>,
+    /// 当前这一趟判不了的模组。见 `Holds` 的文档。
+    holds: Holds,
 }
 
 /// HTTP router for the offline panel. Bind it on the LAN; it does not call the cloud.
+/// 当前这一趟**判不了**的模组，IMEI → `HoldReason::wire()`。
+///
+/// 🔴 追溯执行有四种结果，而库里的 gate 标记只表达其中两种（Quarantine 写标记、
+///    Keep 清标记）。`Hold`（判不了）刻意**不写**标记 —— 写了就会推进倒计时，
+///    而判不了的那一趟对倒计时来说等于没发生。
+///
+///    代价是面板分不出「刚检查过、没问题」和「这一趟根本判不了」。生产上
+///    `retro_hold` 发生过 93 次（云端 app.alerts，最近 2026-09-11），那 93 次
+///    里运维看到的都是前者。所以这个状态必须从**外面**带进来，和
+///    `MatrixAuthority` 存在的理由一模一样。
+///
+/// ⚠️ 共享内存而不是落库：hold 是**当前这一趟**的判断，每一趟重算。落库会在
+///    重启之后显示一个上一个进程的判断，而那个判断可能已经不成立了。
+pub type Holds = Arc<Mutex<std::collections::BTreeMap<String, String>>>;
+
+/// 一个不知道任何 hold 的 router。
+///
+/// 默认空表：只有 agent 跑着追溯循环，所以只有它填得出这张表。别的调用方
+/// （测试、别的嵌入方）表达的是「这里没有追溯执行」，而那和「一根都没被 hold」
+/// 在显示上确实是同一件事 —— 和 `list_gate_failures` 的默认同一个理由。
+fn no_holds() -> Holds {
+    Arc::new(Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// HTTP router that reports which modems this pass could not judge.
+pub fn router_with_holds(
+    inbox: Arc<dyn Inbox>,
+    actions: Option<Arc<dyn Actions>>,
+    holds: Holds,
+) -> Router {
+    build_router_with_blocks(
+        inbox,
+        actions,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(
+            CapabilityMatrix::builtin().expect("built-in capability matrix"),
+        )),
+        edge_core::sms_blocks(),
+        None,
+        holds,
+    )
+}
+
 pub fn router(inbox: Arc<dyn Inbox>) -> Router {
     router_with_actions(inbox, None)
 }
@@ -420,7 +465,7 @@ pub fn router_with_matrix(
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
 ) -> Router {
-    build_router(inbox, actions, uplink_online, matrix, None)
+    build_router(inbox, actions, uplink_online, matrix, None, no_holds())
 }
 
 /// HTTP router whose reported mode follows a live uplink flag.
@@ -437,7 +482,7 @@ pub fn router_with_uplink(
     let matrix = Arc::new(Mutex::new(CapabilityMatrix::builtin().unwrap_or_else(
         |error| panic!("built-in capability matrix does not parse: {error}"),
     )));
-    build_router(inbox, actions, uplink_online, matrix, None)
+    build_router(inbox, actions, uplink_online, matrix, None, no_holds())
 }
 
 /// 装一份自定的短信封禁表 —— **只给测试用**，理由见 `PanelState::blocks`。
@@ -455,6 +500,7 @@ pub fn router_with_blocks(
         )),
         blocks,
         None,
+        no_holds(),
     )
 }
 
@@ -464,6 +510,7 @@ fn build_router(
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
     guard: Option<Arc<guard::Guard>>,
+    holds: Holds,
 ) -> Router {
     build_router_with_blocks(
         inbox,
@@ -472,6 +519,7 @@ fn build_router(
         matrix,
         edge_core::sms_blocks(),
         guard,
+        holds,
     )
 }
 
@@ -484,6 +532,7 @@ fn build_router_with_blocks(
     // `None` = 这个 router 不设闸（只有进程内测试走这条）。生产那条路一定是
     // `Some`：`serve()` 拿不到 token 时直接不启动。
     guard: Option<Arc<guard::Guard>>,
+    holds: Holds,
 ) -> Router {
     Router::new()
         .route("/", get(index))
@@ -525,6 +574,8 @@ fn build_router_with_blocks(
             matrix,
             blocks,
             guard,
+            holds,
+            
         }))
 }
 
@@ -539,8 +590,9 @@ pub fn router_guarded(
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
     guard: Arc<guard::Guard>,
+    holds: Holds,
 ) -> Router {
-    build_router(inbox, actions, uplink_online, matrix, Some(guard.clone()))
+    build_router(inbox, actions, uplink_online, matrix, Some(guard.clone()), holds)
         .layer(axum::middleware::from_fn_with_state(guard, guard::gate))
 }
 
@@ -551,6 +603,9 @@ pub async fn serve(
     actions: Option<Arc<dyn Actions>>,
     uplink_online: Arc<AtomicBool>,
     matrix: Arc<Mutex<CapabilityMatrix>>,
+    // 当前这一趟判不了的模组。和 `matrix` 同一个形状：agent 那边的循环在写，
+    // 面板这边只读一眼。见 `Holds`。
+    holds: Holds,
     // token 放哪。和证书同一个目录 —— 那里已经是这台机器上「身份相关的东西
     // 都在这」的地方，0600 的文件出现在那里不会让人意外。
     token_path: std::path::PathBuf,
@@ -570,7 +625,7 @@ pub async fn serve(
     //    会不可用。
     axum::serve(
         listener,
-        router_guarded(inbox, actions, uplink_online, matrix, gate)
+        router_guarded(inbox, actions, uplink_online, matrix, gate, holds)
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await
@@ -662,6 +717,8 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
     // ⚠️ 这个降级只对**显示**成立。追溯执行本身对同样的读失败是整趟作废，
     // 因为那一边的降级会导致删除。同一个 Err，两个方向，理由不同。
     let gate_failures = state.inbox.list_gate_failures().unwrap_or_default();
+    // 这一趟判不了的那些。锁一次拷出来：状态循环每趟都在写它，而这里只读一眼。
+    let holds = state.holds.lock().expect("holds").clone();
     let retirements = state.inbox.list_retirements().unwrap_or_default();
     match (
         state.inbox.list_modems(),
@@ -674,7 +731,9 @@ async fn status(State(state): State<Arc<PanelState>>) -> Response {
                 .map(|modem| {
                     let is_busy = busy.iter().any(|imei| *imei == modem.imei);
                     let gate = gate_failures.get(&modem.imei).cloned();
-                    modem_body(modem, now, is_busy, &matrix, gate)
+                    // 这一趟判不了的原因，如果有。见 `Holds`。
+                    let hold = holds.get(&modem.imei).cloned();
+                    modem_body(modem, now, is_busy, &matrix, gate, hold)
                 })
                 .collect(),
             discoveries: {
@@ -1190,6 +1249,7 @@ fn modem_body(
     busy: bool,
     matrix: &CapabilityMatrix,
     gate: Option<GateFailure>,
+    hold: Option<String>,
 ) -> ModemBody {
     let stale = value
         .last_seen
@@ -1265,6 +1325,7 @@ fn modem_body(
             since: gate.since,
             passes: gate.passes,
         }),
+        hold,
     }
 }
 

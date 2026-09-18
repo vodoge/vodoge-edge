@@ -97,6 +97,8 @@ fn guarded(spy: Arc<Spy>) -> axum::Router {
             PanelToken::from_value(TOKEN),
             std::path::PathBuf::from("/etc/vodoge-edge/panel-token"),
         )),
+        // 这条测试测的是访问闸，和追溯执行无关 —— 空表。
+        Arc::new(Mutex::new(std::collections::BTreeMap::new())),
     )
 }
 

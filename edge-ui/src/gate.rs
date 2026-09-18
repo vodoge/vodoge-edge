@@ -195,3 +195,114 @@ mod tests {
         assert!(text.contains("从没被测过"));
     }
 }
+
+/// 这一趟**判不了**的原因 → 运维看得懂的话。
+///
+/// 🔴 和 `reason_label` 分开，因为两者说的是完全不同的事：那一个是「判定为该
+///    解绑，倒计时在走」，这一个是「这一趟根本没判成，倒计时**没有**推进」。
+///    把它们用同一套措辞，就会让人对一个还没有结论的状态去做补救。
+///
+/// ⚠️ 下一步各不相同，所以每一句都指向那一步 —— 而不是一句通用的「判不了」。
+fn hold_label(reason: &str) -> &str {
+    match reason {
+        // 矩阵回落到内置的：这台机器对绝大多数「型号 × 运营商」都读成「没测过」，
+        // 所以它**拒绝**做判定，而不是判定为不合规。
+        "matrix_not_authoritative" => "这台机器的能力矩阵不权威，暂不判定",
+        // 冷启动：连上云端之前不判，因为矩阵可能还没推下来。
+        "uplink_never_resumed" => "还没连上过云端，暂不判定",
+        "gate_state_unreadable" => "读不到它的闸标记，暂不判定",
+        "never_observed" => "还没观测到这一根，暂不判定",
+        "observation_stale" => "最近一次观测太旧，暂不判定",
+        "family_unknown" => "型号还不知道，暂不判定",
+        "family_disagrees" => "纳管时记的型号和现在观测到的对不上，暂不判定",
+        "family_unrecognised" => "型号不认识，暂不判定",
+        "missing_evidence" => "判定所需的证据不全，暂不判定",
+        other => other,
+    }
+}
+
+/// 一根这一趟判不了的模组，那一行显示什么。
+///
+/// 🔴 措辞刻意**不带危险色彩**。这不是「它出问题了」，是「这一趟没能检查它」——
+///    而在此之前面板上这两种情况长得一模一样（hold 不写库里的标记，而面板读的
+///    就是那个标记）。生产上 `retro_hold` 发生过 93 次，那 93 次里运维看到的都是
+///    「一切正常」。
+///
+/// ⚠️ 明确说出「倒计时没有推进」。运维看到「暂不判定」会担心是不是在悄悄计时；
+///    而事实恰恰相反 —— 判不了的这一趟对倒计时来说等于没发生。
+pub fn hold_notice(reason: &str) -> String {
+    format!("{}（倒计时没有推进）", hold_label(reason))
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::{hold_label, hold_notice};
+
+    /// 每一个 `HoldReason::wire()` 都要有自己的一句话。
+    ///
+    /// 🔴 **从 edge-core 的源码里数出来**，不是在这里再抄一遍。抄一遍的话，
+    ///    将来多一个 HoldReason 时这条断言仍然是绿的 —— 它只会检查我抄下来的
+    ///    那几个，而新增的那个会在面板上默默显示成英文标签。
+    ///
+    /// ⚠️ 读源码而不是反射：`HoldReason` 的几个变体带字段（`MatrixAuthority`、
+    ///    `age_ms`、`BindRefusal`），构造不出一份「全部变体」的列表。而 `wire()`
+    ///    的那张 match 表就是权威清单，把它读出来比重建它可靠。
+    #[test]
+    fn every_hold_reason_has_a_sentence() {
+        let retro = include_str!("../../edge-core/src/retro.rs");
+        let body = retro
+            .split("impl HoldReason")
+            .nth(1)
+            .expect("edge-core 里找不到 impl HoldReason —— 这条断言在扫空气");
+        // ⚠️ 按行扫 `Self::… => "…"`，不按 `}` 切：几个变体自己就带花括号
+        //    （`ObservationStale { .. }`），按 `}` 切会在第四个变体处就截断 ——
+        //    第一版正是这么写的，它只数出 4 个然后「通过」了前面那半条断言。
+        let wires: Vec<&str> = body
+            .split("fn wire")
+            .nth(1)
+            .expect("HoldReason 没有 wire()")
+            .lines()
+            .take_while(|line| !line.trim_start().starts_with("pub fn "))
+            .filter_map(|line| {
+                let (left, rest) = line.split_once("=> \"")?;
+                if !left.contains("Self::") {
+                    return None;
+                }
+                rest.split('"').next()
+            })
+            .collect();
+        assert!(
+            wires.len() >= 9,
+            "只从 edge-core 数出 {} 个 HoldReason —— 解析坏了，不是变体变少了",
+            wires.len(),
+        );
+
+        for reason in wires {
+            assert_ne!(
+                hold_label(reason),
+                reason,
+                "{reason} 没有中文，面板上会直接显示这个英文标签",
+            );
+        }
+    }
+
+    /// 🔴 必须说出「倒计时没有推进」。没有这句话，「暂不判定」读起来像
+    ///    「正在悄悄计时」，而事实相反。
+    #[test]
+    fn the_notice_says_the_countdown_did_not_advance() {
+        let notice = hold_notice("matrix_not_authoritative");
+        assert!(
+            notice.contains("倒计时没有推进"),
+            "没说倒计时的事：{notice}",
+        );
+    }
+
+    /// 负面对照：不认识的标签原样带出去，而不是编一句话。
+    ///
+    /// ⚠️ 这条挡的是「给 `other` 写一句通用中文」那种修法 —— 那会让一个**新增
+    ///    的**原因看起来像已经被处理过了，而上面那条断言也就永远绿了。
+    #[test]
+    fn an_unknown_reason_is_passed_through_untranslated() {
+        assert_eq!(hold_label("something_new"), "something_new");
+    }
+}

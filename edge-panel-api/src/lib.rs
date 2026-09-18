@@ -142,6 +142,17 @@ pub struct RetirementBody {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModemBody {
     pub imei: String,
+    /// 当前这一趟追溯执行**判不了**这一根的原因，`None` = 判过了。
+    ///
+    /// 🔴 和 `gate_failure` 分开，因为它们是两件事：`gate_failure` 是「判定为
+    ///    该解绑、倒计时在走」，而这个是「这一趟根本判不了，倒计时没有推进」。
+    ///    在这之前后者在面板上和「刚检查过、没问题」长得一模一样 —— 而生产上
+    ///    `retro_hold` 发生过 93 次。
+    ///
+    /// ⚠️ 值是 `HoldReason::wire()` 的稳定标签（`matrix_not_authoritative` 等），
+    ///    不是给人读的句子。界面按这个值映射中文，**不翻译** agent 那边的英文
+    ///    —— 和 `adoption_blocks` 那条同一个规矩。
+    pub hold: Option<String>,
     pub family: String,
     pub iccid: Option<String>,
     pub state: String,

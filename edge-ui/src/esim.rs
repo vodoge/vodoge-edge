@@ -617,6 +617,7 @@ mod tests {
             carrier_profile: String::new(),
             capability_origin: CapabilityOrigin::Rule,
             gate_failure: None,
+            hold: None,
         };
         let mut qmi = at_only.clone();
         qmi.imei = "867018069509705".into();

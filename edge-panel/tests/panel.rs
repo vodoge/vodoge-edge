@@ -1893,3 +1893,83 @@ async fn a_restart_receipt_repeats_the_imei_that_reached_the_hardware() {
     assert_eq!(body["imei"], reached[0]);
     assert_eq!(body["status"], "restarted");
 }
+
+/// 「这一趟判不了」和「这一趟判过了、没问题」在面板上必须分得开。
+///
+/// 🔴 生产上 `retro_hold` 真的发生过 **93 次**（云端 app.alerts，最近
+///    2026-09-11）。每一次都意味着追溯执行对那几根模组**停了** —— 不清标记、
+///    不推进倒计时、不删。而面板读的是库里的 gate 标记，而 hold 恰恰**不写**
+///    标记（写了就会推进倒计时），所以那 93 次里运维看到的，和「刚检查过、
+///    没问题」一模一样。
+///
+///    这和 `MatrixAuthority` 的模块注释说的是同一件事：两种情况共用一个表示，
+///    读它的人分不出来 —— 所以状态必须从**外面**带进来。
+///
+/// ⚠️ 用共享内存而不是落库：hold 是**当前这一趟**的判断，追溯循环每一趟都重算。
+///    落库会在重启之后显示一个上一个进程的判断，而那个判断可能已经不成立了。
+#[tokio::test]
+async fn a_modem_the_gate_could_not_judge_is_not_shown_as_fine() {
+    let holds: edge_panel::Holds = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    holds.lock().expect("holds").insert(
+        "867018069509705".to_string(),
+        "matrix_not_authoritative".to_string(),
+    );
+
+    fn modem(imei: &str) -> LocalModem {
+        LocalModem {
+            imei: imei.into(),
+            family: "EC20".into(),
+            firmware: None,
+            msisdn: None,
+            msisdn_iccid: None,
+            apn_contexts: None,
+            iccid: None,
+            state: "registered".into(),
+            last_seen: Some(1_700_000_000_000),
+            mcc: Some(460),
+            mnc: Some(0),
+            home_mcc: Some(460),
+            home_mnc: Some(0),
+            imsi: None,
+            discovery: "qmi".into(),
+            manageable: true,
+            control_port: Some("/dev/cdc-wdm0".into()),
+        }
+    }
+
+    let app = edge_panel::router_with_holds(
+        Arc::new(MemoryInbox {
+            modems: vec![modem("867018069509705"), modem("867018069514820")],
+            ..MemoryInbox::default()
+        }),
+        None,
+        holds,
+    );
+
+    let status = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/status")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(
+        body["modems"][0]["hold"], "matrix_not_authoritative",
+        "判不了的那一根没有把原因带出来 —— 而那 93 次告警里，运维看到的就是这一格",
+    );
+
+    // 🔴 负面对照：另一根没有被 hold，必须明确是 null。
+    //    少了这一条，「所有模组都显示同一个 hold」也能让上面那条变绿 ——
+    //    而那会让这一格永远亮着，永远亮着的灯没有人看。
+    assert!(
+        body["modems"][1]["hold"].is_null(),
+        "没有被 hold 的模组也带上了 hold：{}",
+        body["modems"][1]["hold"],
+    );
+}
