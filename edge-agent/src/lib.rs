@@ -744,6 +744,45 @@ pub struct DeliveryOutcome {
     pub inventory: Option<EsimInventoryPayload>,
 }
 
+/// 命令台账：把「这条命令走到哪一步了」记到进程之外。
+///
+/// 🔴 这个 trait 存在的理由，是下面那句文档注释在 2026-09-18 之前**不成立**：
+/// `CommandExecutor` 说自己 "persists cmd_id"，而那份台账只是一个
+/// `BTreeMap`，进程一重启就是空的。
+///
+/// 后果是一次重复计费的短信：云端对没有终态结果的命令每 5 秒重推一次、推到
+/// 过期为止（send_sms 生产上是 5–30 分钟），而 systemd 是 `Restart=always`。
+/// 短信交给模组之后、写终态之前被拖死的那一下，重启回来 map 是空的，重推
+/// 过来 `first_seen` 又是真 —— 同一条短信再发一次，而云端只看到一条命令成功。
+///
+/// ⚠️ 用 trait 而不是直接依赖 `edge-store`：这个 crate 不依赖存储层，
+/// 而测试要能塞一个记不住东西的实现进来（正是为了复现上面那件事）。
+pub trait CommandJournal: Send {
+    /// 记下一步。**返回 Err 时调用方不会执行命令** —— 记不下来就不能执行，
+    /// 那是「至多一次」的全部内容。
+    fn record(&self, entry: JournalEntry<'_>) -> Result<(), String>;
+}
+
+/// 要记的那一步。
+#[derive(Clone, Debug)]
+pub struct JournalEntry<'a> {
+    pub cmd_id: &'a str,
+    /// `"recorded"` / `"executing"` / `"terminal"`。
+    pub phase: &'a str,
+    /// 终态结果，只有 `phase == "terminal"` 时有。
+    pub result: Option<&'a CommandResultPayload>,
+    pub result_sequence: Option<u64>,
+}
+
+/// 启动时读回来的一行。
+#[derive(Clone, Debug)]
+pub struct RestoredCommand {
+    pub cmd_id: String,
+    pub phase: String,
+    pub result: Option<CommandResultPayload>,
+    pub result_sequence: Option<u64>,
+}
+
 /// Accepts `CommandDeliver`, persists `cmd_id`, executes at most once, and
 /// always sequences a `CommandResult`.
 pub struct CommandExecutor<P, U = RejectUpdate> {
@@ -751,6 +790,10 @@ pub struct CommandExecutor<P, U = RejectUpdate> {
     updater: U,
     guard: UpdateGuard,
     commands: BTreeMap<String, StoredCommand>,
+    /// 台账写到哪里去。`None` = 只记在内存里，也就是修复前的行为 ——
+    /// 单元测试里到处都是这种构造，而生产那条路必须用 `with_journal` 接上。
+    /// `TestTheAgentWiresADurableCommandJournal`（edge-bin 侧）钉着这一点。
+    journal: Option<Box<dyn CommandJournal>>,
     uplink: UplinkState,
     matrix: CapabilityMatrix,
 }
@@ -798,6 +841,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             updater,
             guard: UpdateGuard::new(current),
             commands: BTreeMap::new(),
+            journal: None,
             uplink: UplinkState::new(),
             matrix: CapabilityMatrix::builtin().expect("built-in capability matrix"),
         }
@@ -883,6 +927,10 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Some(Phase::Recorded) | None => {}
         }
         if first_seen {
+            // 🔴 先落盘再记内存。反过来的话，写台账失败时内存里已经有了这条
+            //    命令，而下一次重推会走到「Recorded」分支继续往下执行 ——
+            //    等于台账没写成却照样执行了。
+            self.journal(&payload.cmd_id, "recorded", None, None)?;
             self.commands.insert(
                 payload.cmd_id.clone(),
                 StoredCommand {
@@ -962,7 +1010,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 iccid,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let send = SmsSend {
                     to: to.clone(),
                     body: body.clone(),
@@ -991,7 +1039,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::RestartModem { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let result = match self.port.restart_modem(modem_imei) {
                     Ok(()) => terminal_result(
                         &payload.cmd_id,
@@ -1120,7 +1168,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 timeout_ms,
                 force,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 // The contract makes `force` optional, so an absent field is
                 // the safe reading: not forced. Defaulting the other way would
                 // let a command with the field omitted run a disruptive AT.
@@ -1137,7 +1185,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 code,
                 stage,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let stage = stage.as_deref().unwrap_or("start");
                 let outcome = self.port.send_ussd(modem_imei, code, stage);
                 Ok((
@@ -1149,7 +1197,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 enabled,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self
                     .port
                     .set_radio(modem_imei, *enabled)
@@ -1168,7 +1216,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 password,
                 auth,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.configure_apn(&ApnWrite {
                     imei: modem_imei,
                     // The contract carries the identifier as an integer and
@@ -1194,7 +1242,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 iccid,
                 nickname,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.rename_esim_profile(
                     modem_imei,
                     iccid,
@@ -1206,7 +1254,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::DisableEsimProfile { modem_imei, iccid } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.disable_esim_profile(modem_imei, iccid);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1214,7 +1262,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::DeleteEsimProfile { modem_imei, iccid } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.delete_esim_profile(modem_imei, iccid);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1222,7 +1270,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ClaimModemCandidate { candidate_key } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.claim_modem_candidate(candidate_key);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1230,7 +1278,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::RevokeModemCandidate { candidate_key } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.revoke_modem_candidate(candidate_key);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1238,7 +1286,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::RegisterModem { modem_imei, note } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.register_modem(modem_imei, note.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1246,7 +1294,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::UnregisterModem { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.unregister_modem(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1258,7 +1306,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 family,
                 note,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.create_modem(modem_imei, family, note.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1266,7 +1314,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::UpdateModem { modem_imei, note } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.update_modem(modem_imei, note.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1274,7 +1322,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ReconfirmModem { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.reconfirm_modem(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1286,7 +1334,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 limit,
                 contains,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 // Both are integers in the contract and bounded there --
                 // `after` at zero and above, `limit` at 1..=500. A negative
                 // that reached here could not have been validated, and
@@ -1303,7 +1351,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ScanOperators { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.scan_operators(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1315,7 +1363,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 mode,
                 plmn,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.select_operator(modem_imei, mode, plmn.as_deref());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1323,7 +1371,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ModemReport { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.modem_report(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1331,7 +1379,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ResetModemUsb { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.reset_usb(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1342,7 +1390,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 enabled,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.set_data_network(modem_imei, *enabled);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1350,7 +1398,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::SetUsbnetMode { modem_imei, mode } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.set_usbnet_mode(modem_imei, mode.as_str());
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1358,7 +1406,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ReregisterNetwork { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.reregister_network(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1366,7 +1414,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::RefreshModems => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.refresh_modems();
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1377,7 +1425,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 policy_version,
                 policies,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.update_card_policies(policy_version, policies);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1385,7 +1433,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ListEsimProfiles { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.list_esim_profiles(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1396,7 +1444,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 target_iccid,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.switch_esim_profile(modem_imei, target_iccid);
                 // The list changes at exactly this moment and at no other, so
                 // this is where the stored inventory has to be brought level
@@ -1408,7 +1456,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ReadEsimInfo { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.read_esim_info(modem_imei);
                 // The chip is already on the stack here. The envelope costs no
                 // extra APDU and no second ISD-R channel.
@@ -1422,7 +1470,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 sequence_number,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self
                     .port
                     .retrieve_esim_notification(modem_imei, *sequence_number);
@@ -1435,7 +1483,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 modem_imei,
                 smdp_address,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self
                     .port
                     .initiate_esim_authentication(modem_imei, smdp_address.as_deref());
@@ -1449,7 +1497,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 activation_code,
                 confirmation_code,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.download_esim_profile(
                     modem_imei,
                     activation_code,
@@ -1464,7 +1512,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 instances,
                 upstreams,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 // The specs travel as contract types; the proxy manager reads
                 // them as JSON so its shape stays its own rather than being
                 // pinned to the generated bindings.
@@ -1480,7 +1528,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 instance_id,
                 action,
             } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.proxy_lifecycle(instance_id, action);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1488,7 +1536,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::ProbeUpstreamProxy { upstream_id } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.probe_upstream_proxy(upstream_id);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1496,7 +1544,7 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
                 ))
             }
             Command::RotateIp { modem_imei } => {
-                self.mark_executing(&payload.cmd_id);
+                self.mark_executing(&payload.cmd_id)?;
                 let outcome = self.port.rotate_ip(modem_imei);
                 Ok((
                     diagnostic_result(&payload.cmd_id, now_ms, attempts, outcome),
@@ -1615,10 +1663,87 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
         self.matrix = matrix;
     }
 
-    fn mark_executing(&mut self, cmd_id: &str) {
+    /// 把台账接到进程之外的存储上。
+    pub fn with_journal(&mut self, journal: Box<dyn CommandJournal>) -> &mut Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// 启动时把台账读回来。
+    ///
+    /// 🔴 这一步是「重启之后不再执行第二遍」的另一半：没有它，落盘的台账
+    /// 谁也不看。读不出来的那些行**跳过**而不是当成空 —— 一行读不动不代表
+    /// 这条命令没执行过，而把它当成没执行过正是要避免的那件事，所以跳过的
+    /// 行数会交回给调用方去喊。
+    pub fn restore_commands(&mut self, rows: Vec<RestoredCommand>) -> usize {
+        let mut skipped = 0;
+        for row in rows {
+            let phase = match row.phase.as_str() {
+                "recorded" => Phase::Recorded,
+                "executing" => Phase::Executing,
+                "terminal" => Phase::Terminal,
+                _ => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            // ⚠️ terminal 但结果读不回来时，降级成 Executing 而不是丢掉：
+            //    「执行过、但说不出结果」比「没执行过」离真相近得多，而后者
+            //    会让重推重新执行一次。
+            let (phase, result, sequence) = match (phase, row.result, row.result_sequence) {
+                (Phase::Terminal, Some(result), Some(sequence)) => {
+                    (Phase::Terminal, Some(result), Some(sequence))
+                }
+                (Phase::Terminal, _, _) => (Phase::Executing, None, None),
+                (other, result, sequence) => (other, result, sequence),
+            };
+            self.commands.insert(
+                row.cmd_id,
+                StoredCommand {
+                    phase,
+                    result,
+                    result_sequence: sequence,
+                },
+            );
+        }
+        skipped
+    }
+
+    /// 写一步台账。记不下来就返回 Err —— 调用方据此**不执行**。
+    fn journal(
+        &self,
+        cmd_id: &str,
+        phase: &str,
+        result: Option<&CommandResultPayload>,
+        result_sequence: Option<u64>,
+    ) -> Result<(), CommandError> {
+        let Some(journal) = self.journal.as_ref() else {
+            return Ok(());
+        };
+        journal
+            .record(JournalEntry {
+                cmd_id,
+                phase,
+                result,
+                result_sequence,
+            })
+            .map_err(CommandError::Journal)
+    }
+
+    /// 记下「要开始执行了」。
+    ///
+    /// 🔴 返回 `Result`，而且必须在把命令交给端口**之前**调用、失败就不执行。
+    /// 这一行落盘的时刻决定了那个重复计费的窗口有多宽：写在执行之后的话，
+    /// crash 落在「已经发出去、还没记下来」之间，重启后重推会再发一次。
+    ///
+    /// 写不下去时不执行，是把「不确定」挪到了安全的那一边：云端拿不到回执
+    /// 会重推，而重推是无害的；重发一条短信不是。
+    fn mark_executing(&mut self, cmd_id: &str) -> Result<(), CommandError> {
+        self.journal(cmd_id, "executing", None, None)?;
         if let Some(stored) = self.commands.get_mut(cmd_id) {
             stored.phase = Phase::Executing;
         }
+        Ok(())
     }
 
     fn store_terminal(
@@ -1636,6 +1761,11 @@ impl<P: SendPort, U: UpdatePort> CommandExecutor<P, U> {
             Err(UplinkError::DuplicateEnvelopeId { sequence, .. }) => sequence,
             Err(error) => return Err(CommandError::Uplink(error)),
         };
+
+        // ⚠️ 终态先落盘。写不下去时这条命令在台账里停在 `executing`，
+        //    重启后重推会得到 RESULT_UNKNOWN —— 说不出结果，但**不会**再执行
+        //    一次。那是这两种坏结果里对的那一个。
+        self.journal(cmd_id, "terminal", Some(&result), Some(sequence))?;
 
         let stored = self
             .commands
@@ -1923,6 +2053,12 @@ pub enum CommandError {
     UnexpectedKind(String),
     InvalidEnvelope(String),
     Uplink(UplinkError),
+    /// 台账写不下去。
+    ///
+    /// 🔴 这一条会让命令**不执行**。写不下「我要执行了」就执行，等于回到
+    /// 那个重复计费的窗口里去 —— 云端拿不到回执会重推，那是对的：
+    /// 至少一次的投递配至多一次的执行，而不是反过来。
+    Journal(String),
 }
 
 impl fmt::Display for CommandError {
@@ -1933,6 +2069,7 @@ impl fmt::Display for CommandError {
             Self::UnexpectedKind(kind) => write!(formatter, "unexpected envelope {kind}"),
             Self::InvalidEnvelope(reason) => write!(formatter, "invalid envelope: {reason}"),
             Self::Uplink(error) => write!(formatter, "{error}"),
+            Self::Journal(reason) => write!(formatter, "命令台账写不下去: {reason}"),
         }
     }
 }

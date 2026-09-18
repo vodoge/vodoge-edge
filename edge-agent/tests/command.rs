@@ -1409,3 +1409,224 @@ fn a_failed_result_without_details_stays_empty() {
         "没有细节的失败却带上了 details"
     );
 }
+
+/// 进程重启之后，同一条命令不会被执行第二遍。
+///
+/// 🔴 这一条复现的是一次**重复计费的短信**。在它之前，「至多一次」的台账只是
+///    一个 `BTreeMap`：进程一重启就空了。而云端对没有终态结果的命令**每 5 秒**
+///    重推一次、推到过期为止（send_sms 生产上 5–30 分钟），systemd 又是
+///    `Restart=always` / `RestartSec=5`。
+///
+///    于是：短信已经交给模组发出去 → agent 在写终态之前被 USB 重枚举拖死 →
+///    5 秒后起来，map 空了 → 云端重推 → `first_seen` 又是真 → **再发一次**。
+///    收件人收到两条，而云端只看到一条命令成功、一条消息已发，控制台上没有
+///    任何地方显示发重了。
+///
+///    生产实测（2026-09-18）：send_sms 的回执里 120 条 accepted、14 条
+///    duplicate，duplicate 落在 accepted 之后 8–50 秒 —— 云端确实在重推，
+///    只是那 14 次进程恰好活着。
+///
+/// ⚠️ 用两个 executor 模拟重启：第二个拿着同一本台账、一个**全新的**端口。
+///    端口是新的这件事很重要 —— 它让「又发了一次」变成看得见的 1 而不是 2。
+#[test]
+fn a_restart_does_not_execute_the_same_command_twice() {
+    let journal = SharedJournal::default();
+
+    let mut before = CommandExecutor::new(FakeSendPort::new());
+    before.with_journal(Box::new(journal.clone()));
+    let outcome = before
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("first deliver");
+    assert!(outcome.executed);
+    assert_eq!(before.port().sent().len(), 1, "第一次应当真的发出去");
+
+    // 进程没了。新进程，新端口，内存里什么都没有 —— 只有落盘的台账。
+    let mut after = CommandExecutor::new(FakeSendPort::new());
+    after.with_journal(Box::new(journal.clone()));
+    let skipped = after.restore_commands(journal.restored());
+    assert_eq!(skipped, 0, "台账里的行应当全部读得回来");
+
+    let again = after
+        .deliver(DELIVERY_B, send_sms_payload(CMD_ID), 2_000)
+        .expect("redeliver after restart");
+
+    assert_eq!(
+        after.port().sent().len(),
+        0,
+        "重启之后又发了一次 —— 这正是那条重复计费的短信"
+    );
+    assert!(!again.executed);
+    assert_eq!(again.receipt.status, RECEIPT_DUPLICATE);
+    // 结果原样重放，序号也是同一个：重推不能再占一个上行序号。
+    assert_eq!(again.result.status, RESULT_SUCCEEDED);
+    assert_eq!(again.result_sequence, outcome.result_sequence);
+}
+
+/// 台账停在 `executing`（正是「发出去了、还没记下终态」那一下崩的），
+/// 重启后说「不知道」，而**不是**再发一次。
+///
+/// 🔴 这是这件事里最要紧的一档：不确定的时候，宁可说不出结果，也不能重发。
+///    云端收到 RESULT_UNKNOWN 会把命令收尾，运维去查投递回执 —— 那比收件人
+///    收到两条短信好得多。
+#[test]
+fn a_crash_between_sending_and_recording_answers_unknown_rather_than_resending() {
+    let journal = SharedJournal::default();
+    // 手工造出「executing 已落盘、terminal 没来得及写」的那一行。
+    journal.put(edge_agent::JournalEntry {
+        cmd_id: CMD_ID,
+        phase: "executing",
+        result: None,
+        result_sequence: None,
+    });
+
+    let mut after = CommandExecutor::new(FakeSendPort::new());
+    after.with_journal(Box::new(journal.clone()));
+    after.restore_commands(journal.restored());
+
+    let outcome = after
+        .deliver(DELIVERY_B, send_sms_payload(CMD_ID), 2_000)
+        .expect("redeliver after crash");
+
+    assert_eq!(
+        after.port().sent().len(),
+        0,
+        "崩在写终态之前的那一下，重启后又发了一次"
+    );
+    assert!(!outcome.executed);
+    assert_eq!(outcome.receipt.status, RECEIPT_DUPLICATE);
+    assert_eq!(
+        outcome.result.status,
+        edge_agent::RESULT_UNKNOWN,
+        "说不出结果就要说不知道，不能说成功、更不能重发"
+    );
+}
+
+/// 台账写不下去时**不执行**。
+///
+/// 🔴 「记不下我要执行了」和「执行了但没记下」之间，只有前者是安全的。写不下去
+///    就返回错误：云端拿不到回执会重推，而重推是无害的 —— 至少一次的投递配
+///    至多一次的执行。反过来（照样执行）就是把那个重复计费的窗口又打开了。
+#[test]
+fn a_journal_that_cannot_write_stops_the_command() {
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    executor.with_journal(Box::new(BrokenJournal));
+
+    let error = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect_err("台账写不下去时不能照常执行");
+
+    assert!(
+        matches!(error, edge_agent::CommandError::Journal(_)),
+        "拿到的是 {error:?}"
+    );
+    assert_eq!(
+        executor.port().sent().len(),
+        0,
+        "台账没写成却还是把短信发出去了"
+    );
+}
+
+/// 「我要执行了」这一行必须落在**执行之前**。
+///
+/// 🔴 这一条是变异验证逼出来的：把 `mark_executing` 里那句落盘删掉之后，上面
+///    三条**全绿** —— 它们要么自己手工造出 executing 那一行，要么只依赖终态
+///    那一行。而这句落盘的时刻就是那道重复计费窗口的宽度：写在执行之后的话，
+///    crash 落在「短信已经发出去、还没记下来」之间，重启后重推会再发一次。
+///
+/// ⚠️ 用一本**只在 executing 这一步失败**的台账来钉它：那一步真的先发生的话，
+///    这次投递会以错误收场而端口一次都没被碰过；不先发生（或者根本没有这一步），
+///    短信就发出去了，`sent()` 会是 1。
+#[test]
+fn the_executing_record_happens_before_the_command_runs() {
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    executor.with_journal(Box::new(FailsOnExecuting));
+
+    let error = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect_err("executing 那一行写不下去时不能执行");
+    assert!(matches!(error, edge_agent::CommandError::Journal(_)));
+    assert_eq!(
+        executor.port().sent().len(),
+        0,
+        "短信在「我要执行了」落盘之前就发出去了 —— 那道重复计费的窗口还开着"
+    );
+}
+
+/// 负面对照：没有接台账时，行为和以前一样。
+///
+/// ⚠️ 少了这一条，一个「没有台账就拒绝一切命令」的实现也能让上面三条变绿，
+///    而那会让每一个单元测试和每一台没接存储的 agent 都发不出命令。
+#[test]
+fn without_a_journal_the_executor_still_works() {
+    let mut executor = CommandExecutor::new(FakeSendPort::new());
+    let outcome = executor
+        .deliver(DELIVERY_A, send_sms_payload(CMD_ID), 1_500)
+        .expect("deliver without a journal");
+    assert!(outcome.executed);
+    assert_eq!(executor.port().sent().len(), 1);
+}
+
+/// 一本记在内存里的台账，测试用。它模拟的是**落盘**：跨 executor 活下来。
+///
+/// ⚠️ 外面包一层自己的类型而不是直接给 `Arc` 实现 trait —— 孤儿规则不允许，
+///    而且这样「两个 executor 共用同一本台账」在调用处是看得见的。
+#[derive(Clone, Default)]
+struct SharedJournal(std::sync::Arc<Rows>);
+
+#[derive(Default)]
+struct Rows(std::sync::Mutex<std::collections::BTreeMap<String, edge_agent::RestoredCommand>>);
+
+impl SharedJournal {
+    fn restored(&self) -> Vec<edge_agent::RestoredCommand> {
+        self.0 .0.lock().expect("journal").values().cloned().collect()
+    }
+
+    fn put(&self, entry: edge_agent::JournalEntry<'_>) {
+        let mut rows = self.0 .0.lock().expect("journal");
+        let row = rows
+            .entry(entry.cmd_id.to_string())
+            .or_insert_with(|| edge_agent::RestoredCommand {
+                cmd_id: entry.cmd_id.to_string(),
+                phase: entry.phase.to_string(),
+                result: None,
+                result_sequence: None,
+            });
+        row.phase = entry.phase.to_string();
+        // 🔴 和 SQL 那侧的 COALESCE 同一个理由：终态一旦记下就不许被后来的
+        //    None 抹掉，否则重放会退化成重发。
+        if entry.result.is_some() {
+            row.result = entry.result.cloned();
+        }
+        if entry.result_sequence.is_some() {
+            row.result_sequence = entry.result_sequence;
+        }
+    }
+}
+
+impl edge_agent::CommandJournal for SharedJournal {
+    fn record(&self, entry: edge_agent::JournalEntry<'_>) -> Result<(), String> {
+        self.put(entry);
+        Ok(())
+    }
+}
+
+/// 一本永远写不下去的台账。
+struct BrokenJournal;
+
+impl edge_agent::CommandJournal for BrokenJournal {
+    fn record(&self, _entry: edge_agent::JournalEntry<'_>) -> Result<(), String> {
+        Err("磁盘满了".into())
+    }
+}
+
+/// 只在 `executing` 这一步失败的台账。
+struct FailsOnExecuting;
+
+impl edge_agent::CommandJournal for FailsOnExecuting {
+    fn record(&self, entry: edge_agent::JournalEntry<'_>) -> Result<(), String> {
+        if entry.phase == "executing" {
+            return Err("只在这一步失败".into());
+        }
+        Ok(())
+    }
+}

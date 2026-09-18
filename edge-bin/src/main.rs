@@ -147,6 +147,47 @@ mod linux {
     /// deleted afterwards has to be the row it was actually read from.
     struct SharedStore(Mutex<Store>);
 
+    /// 命令台账落盘的那一头。
+    ///
+    /// 🔴 这是那条重复计费短信的另一半。`CommandExecutor` 的「至多一次」台账
+    ///    在此之前只在内存里，而它的文档注释写着 "persists cmd_id" —— 进程一
+    ///    重启那份台账就是空的，于是云端的重推（没有终态结果的命令**每 5 秒**
+    ///    推一次，推到过期为止）会让同一条短信再发一次。systemd 是
+    ///    `Restart=always` / `RestartSec=5`，所以「重启」不是假设。
+    ///
+    /// ⚠️ 这里不吞错误。写不下去就把话交回给执行器，由它拒绝执行 ——
+    ///    记不下「我要执行了」还照样执行，等于那道窗口从来没关上。
+    ///
+    /// ⚠️ 锁序和既有设计相同：**executor → store**。`handle_envelope` 全程握着
+    ///    executor 那把锁，而 `RadioPort` 在它下面去锁 store（见 executor 构造
+    ///    处那段注释）。台账写在同一条路上、同一个方向，所以没有新增的反序
+    ///    —— 反过来的路径（先 store 后 executor）在这个二进制里不存在。
+    struct StoreJournal(Arc<SharedStore>);
+
+    impl edge_agent::CommandJournal for StoreJournal {
+        fn record(&self, entry: edge_agent::JournalEntry<'_>) -> Result<(), String> {
+            let result = match entry.result {
+                Some(payload) => Some(
+                    serde_json::to_string(payload)
+                        .map_err(|error| format!("命令结果序列化失败: {error}"))?,
+                ),
+                None => None,
+            };
+            self.0
+                .0
+                .lock()
+                .expect("store")
+                .record_command_phase(
+                    entry.cmd_id,
+                    entry.phase,
+                    result.as_deref(),
+                    entry.result_sequence.map(|sequence| sequence as i64),
+                    unix_ms(),
+                )
+                .map_err(|error| error.to_string())
+        }
+    }
+
     impl Inbox for SharedStore {
         fn list_messages(&self) -> Result<Vec<LocalMessage>, PanelError> {
             self.0
@@ -3216,6 +3257,63 @@ mod linux {
     /// is able to store. Three crates meet here and only one of them can see
     /// both sides, so this is where the join is checked.
     #[cfg(test)]
+    mod command_journal_wiring_tests {
+        /// 生产那条路真的接了命令台账，而且接在读回台账之前。
+        ///
+        /// 🔴 `CommandExecutor` 的台账字段默认是 `None`（单元测试里到处都是这种
+        ///    构造），所以「接没接上」是一件只有生产路径关心、而单元测试一条都
+        ///    照不到的事。edge-agent 那边的测试证明的是「接上之后不会重复执行」；
+        ///    没有这一条，把 `with_journal` 这一行删掉，两个 crate 全绿，而那条
+        ///    重复计费的短信原样回来。
+        ///
+        /// ⚠️ 顺序也钉：先接台账再 `restore_commands`。反过来，重启后第一条命令
+        ///    会在还没接台账的执行器上执行 —— 而它恰好是最可能撞上云端重推的
+        ///    那一条。
+        /// ⚠️ 要搜的那几个串在运行时拼出来，不写成完整的字面量。
+        ///
+        /// 🔴 前两版都栽在同一件事上：`include_str!("main.rs")` 读的是这个文件
+        ///    本身。第一版直接搜，命中的是**这几行里自己的字面量**，把生产那
+        ///    一行删掉照样绿；第二版想「在这个测试模块之前截断」，而这个模块
+        ///    在源码里排在生产代码**前面**，于是截掉的正是要查的那一段，
+        ///    变成永远失败。拼接是唯一不依赖两者相对位置的做法。
+        ///
+        /// ⚠️ 顺带断言命中次数是 1：再出现自指时，它会以「命中 2 次」爆出来，
+        ///    而不是悄悄地查了个寂寞。
+        #[test]
+        fn the_agent_wires_a_durable_command_journal() {
+            let source = include_str!("main.rs");
+            let needle = |head: &str, tail: &str| format!("{head}{tail}");
+
+            let wired_needle = needle("guard.with_journal(Box::new(", "StoreJournal(");
+            let restore_needle = needle("guard.restore_", "commands(");
+            let prune_needle = needle("prune_command_", "journal(");
+
+            let hits = source.matches(wired_needle.as_str()).count();
+            assert_eq!(
+                hits, 1,
+                "把命令台账接到存储上的那一行命中 {hits} 次（期望 1）。0 次 = \
+                 生产路径没接台账，重启之后云端重推会让同一条短信再发一次；\
+                 多次 = 这条断言又在命中自己。"
+            );
+
+            let wired = source.find(wired_needle.as_str()).expect("接台账那一行");
+            let restored = source
+                .find(restore_needle.as_str())
+                .expect("启动时没有把命令台账读回来 —— 落盘了也没人看");
+            assert!(
+                wired < restored,
+                "先读台账后接台账：重启后第一条命令的「我要执行了」不会落盘，\
+                 而它恰好是最可能撞上云端重推的那一条"
+            );
+
+            assert!(
+                source.contains(prune_needle.as_str()),
+                "台账没有清理，会一直长下去"
+            );
+        }
+    }
+
+    #[cfg(test)]
     mod esim_inventory_tests {
         use super::*;
         use edge_modem::{EuiccInfo2, Profile};
@@ -4876,6 +4974,65 @@ mod linux {
             .lock()
             .expect("executor")
             .restore_matrix(startup_matrix);
+
+        // 命令台账：先接上落盘的那一头，再把上一条命的台账读回来。
+        //
+        // 🔴 顺序是有讲究的：先 `with_journal` 再 `restore_commands`。反过来也能
+        //    跑，但读回来之后紧接着的第一条命令会在还没接台账的执行器上执行 ——
+        //    那条命令的「我要执行了」就不落盘，而它恰好是重启后最可能撞上重推
+        //    的那一条。
+        //
+        // ⚠️ 读不出来的行**跳过并喊一声**，不当成空。一行读不动不代表这条命令
+        //    没执行过，而把它当成没执行过正是这整件事要避免的。
+        {
+            let mut guard = executor.lock().expect("executor");
+            guard.with_journal(Box::new(StoreJournal(shared.clone())));
+            match shared.0.lock().expect("store").load_command_journal() {
+                Ok(rows) => {
+                    let total = rows.len();
+                    let restored = rows
+                        .into_iter()
+                        .map(|row| edge_agent::RestoredCommand {
+                            cmd_id: row.cmd_id,
+                            phase: row.phase,
+                            result: row
+                                .result
+                                .as_deref()
+                                .and_then(|text| serde_json::from_str(text).ok()),
+                            result_sequence: row.result_sequence.map(|sequence| sequence as u64),
+                        })
+                        .collect::<Vec<_>>();
+                    let skipped = guard.restore_commands(restored);
+                    if skipped > 0 {
+                        eprintln!(
+                            "命令台账里有 {skipped} 行读不回来（共 {total} 行）——\
+                             这些命令会被当成没执行过，重推时可能再执行一次"
+                        );
+                    }
+                }
+                Err(error) => {
+                    // 🔴 读不到整本台账不是「没有台账」。喊出来，而不是静悄悄地
+                    //    回到那个会重发短信的状态。
+                    eprintln!(
+                        "命令台账读不出来（{error}）—— 至多一次的保证在这次启动里退化成\
+                         「重推可能再执行一次」"
+                    );
+                }
+            }
+        }
+
+        // 老行清掉。窗口远大于云端的重推窗口（send_sms 生产上 5–30 分钟），
+        // 所以七天是那个窗口的百倍以上。
+        if let Ok(removed) = shared
+            .0
+            .lock()
+            .expect("store")
+            .prune_command_journal(unix_ms() - 7 * 24 * 60 * 60 * 1000)
+        {
+            if removed > 0 {
+                eprintln!("命令台账清掉 {removed} 行七天前的记录");
+            }
+        }
         // The capability matrix as it currently stands, republished here every
         // time a command may have replaced it.
         //

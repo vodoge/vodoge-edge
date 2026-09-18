@@ -122,7 +122,18 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0016_registration_gate.sql"),
     include_str!("../migrations/0017_discovery_identity.sql"),
     include_str!("../migrations/0018_message_card.sql"),
+    include_str!("../migrations/0019_command_journal.sql"),
 ];
+
+/// 命令台账里的一行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandJournalRow {
+    pub cmd_id: String,
+    pub phase: String,
+    pub result: Option<String>,
+    pub result_sequence: Option<i64>,
+    pub updated_at: i64,
+}
 
 /// An opened edge database with migrations applied.
 pub struct Store {
@@ -199,6 +210,8 @@ impl Store {
             // 而它携带的列定义就再也不会被验证。
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS registration_retirements;")?;
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS command_journal;")?;
             self.conn.execute_batch("DROP TABLE IF EXISTS card_policies;")?;
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS manual_modem_profiles;")?;
@@ -551,6 +564,74 @@ impl Store {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// 记下一条命令走到了哪一步。
+    ///
+    /// 🔴 `executing` 这一行必须在把 PDU 交给模组**之前**落盘，否则那道窗口
+    /// 还在：写在之后的话，crash 正好落在「已经发出去、还没记下来」之间，
+    /// 重启后照样会再发一次。这是这张表存在的全部理由。
+    ///
+    /// ⚠️ 命令参数不写进来。里面可能有一次性凭据（eSIM 激活码、APN 口令），
+    /// 而这个库是明文落盘的；判重只需要 cmd_id。
+    pub fn record_command_phase(
+        &self,
+        cmd_id: &str,
+        phase: &str,
+        result: Option<&str>,
+        result_sequence: Option<i64>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO command_journal (cmd_id, phase, result, result_sequence, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(cmd_id) DO UPDATE SET
+                phase = excluded.phase,
+                -- 🔴 COALESCE：终态结果一旦写下就不许被后来的 NULL 抹掉。
+                --    重推会再走一次 `recorded`/`executing` 的记录路径，而那两步
+                --    手里没有结果 —— 直接覆盖就等于把「已经执行过、结果是这个」
+                --    退回成「不知道」，然后重放变成重发。
+                result = COALESCE(excluded.result, command_journal.result),
+                result_sequence =
+                    COALESCE(excluded.result_sequence, command_journal.result_sequence),
+                updated_at = excluded.updated_at",
+            params![cmd_id, phase, result, result_sequence, now],
+        )?;
+        Ok(())
+    }
+
+    /// 读回整本台账。
+    pub fn load_command_journal(&self) -> Result<Vec<CommandJournalRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT cmd_id, phase, result, result_sequence, updated_at
+               FROM command_journal
+              ORDER BY updated_at",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(CommandJournalRow {
+                    cmd_id: row.get(0)?,
+                    phase: row.get(1)?,
+                    result: row.get(2)?,
+                    result_sequence: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 丢掉早于 `before` 的台账行。
+    ///
+    /// ⚠️ 窗口必须远大于云端的重推窗口，否则清理本身会把「至多一次」变回
+    /// 「可能两次」：云端对没有终态的命令每 5 秒重推一次，一直推到命令过期
+    /// （生产上 send_sms 是 5–30 分钟）。留几天，是那个窗口的百倍以上。
+    pub fn prune_command_journal(&self, before: i64) -> Result<usize, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM command_journal WHERE updated_at < ?1",
+            params![before],
+        )?;
+        Ok(removed)
     }
 
     /// Keep the newest `keep` fingerprints for one module and drop the rest.
